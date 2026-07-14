@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}自媒体管理后台{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="sidebar">
+        <div class="logo">
+            <span class="logo-icon">✨</span>
+            <span class="logo-text">仙宝自媒体</span>
+        </div>
+        <nav class="nav">
+            <a href="/" class="nav-item {% if request.path == '/' %}active{% endif %}">
+                <span class="nav-icon">📊</span>
+                <span>仪表盘</span>
+            </a>
+            <a href="/articles" class="nav-item {% if '/articles' in request.path %}active{% endif %}">
+                <span class="nav-icon">📝</span>
+                <span>公众号文章</span>
+            </a>
+            <a href="/xhs" class="nav-item {% if '/xhs' in request.path %}active{% endif %}">
+                <span class="nav-icon">📕</span>
+                <span>小红书文案</span>
+            </a>
+            <a href="/video" class="nav-item {% if '/video' in request.path %}active{% endif %}">
+                <span class="nav-icon">🎬</span>
+                <span>视频号</span>
+            </a>
+            <a href="/settings" class="nav-item {% if '/settings' in request.path %}active{% endif %}">
+                <span class="nav-icon">⚙️</span>
+                <span>设置</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="version">v1.0.0</div>
+        </div>
+    </div>
+    
+    <div class="main">
+        <div class="topbar">
+            <div class="topbar-left">
+                <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+                <h1 class="page-title">{% block page_title %}{% endblock %}</h1>
+            </div>
+            <div class="topbar-right">
+                {% block topbar_right %}{% endblock %}
+            </div>
+        </div>
+        
+        <div class="content">
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

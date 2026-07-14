@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "books": {
+    "pool": [
+      {
+        "id": 88,
+        "name": "太傻天书",
+        "weight": 3
+      },
+      {
+        "id": 0,
+        "name": "零极限",
+        "weight": 3
+      },
+      {
+        "id": 0,
+        "name": "与神对话",
+        "weight": 3
+      },
+      {
+        "id": 0,
+        "name": "欧林-喜悦之道",
+        "weight": 2
+      },
+      {
+        "id": 0,
+        "name": "欧林-创造金钱",
+        "weight": 2
+      },
+      {
+        "id": 0,
+        "name": "欧林-灵魂之爱",
+        "weight": 2
+      },
+      {
+        "id": 0,
+        "name": "赛斯-灵魂永生",
+        "weight": 1
+      },
+      {
+        "id": 0,
+        "name": "赛斯-个人实相的本质",
+        "weight": 1
+      }
+    ],
+    "recent_used": [],
+    "max_history": 3
+  },
+  "themes": {
+    "categories": [
+      {
+        "id": "self",
+        "name": "自我认知",
+        "examples": [
+          "你是谁",
+          "自我价值",
+          "内在声音",
+          "真实自我",
+          "自我接纳"
+        ]
+      },
+      {
+        "id": "emotion",
+        "name": "情绪管理",
+        "examples": [
+          "焦虑",
+          "恐惧",
+          "愤怒",
+          "悲伤",
+          "喜悦",
+          "平静"
+        ]
+      },
+      {
+        "id": "relationship",
+        "name": "关系与爱",
+        "examples": [
+          "亲密关系",
+          "亲子关系",
+          "友谊",
+          "信任",
+          "沟通",
+          "边界"
+        ]
+      },
+      {
+        "id": "purpose",
+        "name": "人生目的",
+        "examples": [
+          "使命",
+          "热情",
+          "选择",
+          "方向",
+          "意义",
+          "活出自己"
+        ]
+      },
+      {
+        "id": "abundance",
+        "name": "丰盛与财富",
+        "examples": [
+          "金钱观",
+          "丰盛意识",
+          "价值感",
+          "给予与接收",
+          "富足心态"
+        ]
+      },
+      {
+        "id": "spiritual",
+        "name": "灵性成长",
+        "examples": [
+          "冥想",
+          "觉察",
+          "当下",
+          "觉醒",
+          "能量",
+          "直觉"
+        ]
+      },
+      {
+        "id": "healing",
+        "name": "疗愈与释放",
+        "examples": [
+          "放下过去",
+          "原谅",
+          "内在小孩",
+          "情绪释放",
+          "自我疗愈"
+        ]
+      },
+      {
+        "id": "creation",
+        "name": "创造与显化",
+        "examples": [
+          "吸引力法则",
+          "信念创造实相",
+          "愿景板",
+          "行动力",
+          "显化"
+        ]
+      }
+    ],
+    "max_history": 2
+  },
+  "angles": {
+    "pool": [
+      {
+        "id": "personal",
+        "name": "个人故事"
+      },
+      {
+        "id": "reader",
+        "name": "读者问答"
+      },
+      {
+        "id": "crossbook",
+        "name": "跨书串联"
+      },
+      {
+        "id": "contrary",
+        "name": "反常识"
+      },
+      {
+        "id": "practical",
+        "name": "实操指南"
+      },
+      {
+        "id": "seasonal",
+        "name": "时令相关"
+      },
+      {
+        "id": "comparison",
+        "name": "对比分析"
+      },
+      {
+        "id": "deep",
+        "name": "深度思辨"
+      }
+    ],
+    "recent_used": [],
+    "max_history": 3
+  }
+}

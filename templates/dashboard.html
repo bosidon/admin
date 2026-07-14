@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}仪表盘 - 自媒体管理后台{% endblock %}
+{% block page_title %}📊 仪表盘{% endblock %}
+
+{% block topbar_right %}
+<button class="btn btn-primary" onclick="syncArticles()">🔄 同步</button>
+{% endblock %}
+
+{% block content %}
+<!-- 统计卡片 -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-icon purple">📝</div>
+        <div class="stat-info">
+            <h3>{{ stats.articles_total }}</h3>
+            <p>公众号文章</p>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon yellow">⏳</div>
+        <div class="stat-info">
+            <h3>{{ stats.articles_pending }}</h3>
+            <p>待审核</p>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon green">📕</div>
+        <div class="stat-info">
+            <h3>{{ stats.xhs_total }}</h3>
+            <p>小红书文案</p>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon blue">🎬</div>
+        <div class="stat-info">
+            <h3>{{ stats.video_total }}</h3>
+            <p>视频脚本</p>
+        </div>
+    </div>
+</div>
+
+<!-- 最近动态 -->
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">📋 最近动态</h2>
+    </div>
+    
+    {% if recent %}
+        {% for item in recent %}
+        <div class="list-item">
+            <div class="list-item-content">
+                <div class="list-item-title">
+                    {% if item.type == 'article' %}📝{% elif item.type == 'xhs' %}📕{% else %}🎬{% endif %}
+                    {{ item.title }}
+                </div>
+                <div class="list-item-meta">
+                    <span>{{ item.time[:16] if item.time else '-' }}</span>
+                    {{ getStatusTag(item.status) | safe }}
+                </div>
+            </div>
+            <div class="list-item-actions">
+                {% if item.type == 'article' %}
+                    <a href="/articles" class="btn btn-outline btn-sm">查看</a>
+                {% elif item.type == 'xhs' %}
+                    <a href="/xhs" class="btn btn-outline btn-sm">查看</a>
+                {% else %}
+                    <a href="/video" class="btn btn-outline btn-sm">查看</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty-state">
+            <div class="emoji">📭</div>
+            <h3>暂无内容</h3>
+            <p>点击「同步」从服务器获取最新内容</p>
+        </div>
+    {% endif %}
+</div>
+
+<!-- 快捷操作 -->
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">⚡ 快捷操作</h2>
+    </div>
+    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+        <a href="/articles" class="btn btn-primary">📝 管理文章</a>
+        <a href="/xhs" class="btn btn-primary">📕 管理文案</a>
+        <a href="/video" class="btn btn-primary">🎬 管理脚本</a>
+        <a href="/settings" class="btn btn-outline">⚙️ 设置</a>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}设置 - 自媒体管理后台{% endblock %}
+{% block page_title %}⚙️ 设置{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">🔧 服务器配置</h2>
+    </div>
+    <form id="settings-form">
+        <div class="form-group">
+            <label class="form-label">云服务器地址</label>
+            <input type="text" class="form-input" name="cloud_host" value="{{ config.cloud_host }}" placeholder="ubuntu@124.222.139.97">
+        </div>
+        <div class="form-group">
+            <label class="form-label">飞书 App ID</label>
+            <input type="text" class="form-input" name="feishu_app_id" value="{{ config.feishu_app_id }}" placeholder="cli_xxxxx">
+        </div>
+        <div class="form-group">
+            <label class="form-label">DeepSeek API Key</label>
+            <input type="password" class="form-input" name="deepseek_api_key" value="{{ config.deepseek_api_key }}" placeholder="sk-xxxxx">
+        </div>
+        <div class="form-group">
+            <label class="form-label">百炼 API Key</label>
+            <input type="password" class="form-input" name="bailian_api_key" value="{{ config.bailian_api_key }}" placeholder="sk-xxxxx">
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">⏰ 定时任务</h2>
+    </div>
+    <div class="form-group">
+        <label class="form-label">
+            <input type="checkbox" name="auto_generate" {% if config.auto_generate %}checked{% endif %}>
+            启用自动定时生成
+        </label>
+    </div>
+    <div class="form-group">
+        <label class="form-label">生成频率</label>
+        <select class="form-input" name="generate_schedule">
+            <option value="每周二/五 09:00" {% if config.generate_schedule == '每周二/五 09:00' %}selected{% endif %}>每周二/五 09:00</option>
+            <option value="每天 09:00" {% if config.generate_schedule == '每天 09:00' %}selected{% endif %}>每天 09:00</option>
+            <option value="每周一/三/五 09:00" {% if config.generate_schedule == '每周一/三/五 09:00' %}selected{% endif %}>每周一/三/五 09:00</option>
+        </select>
+    </div>
+</div>
+
+<div style="display: flex; gap: 12px; justify-content: flex-end;">
+    <button class="btn btn-primary" onclick="saveSettings()">💾 保存设置</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function saveSettings() {
+    const form = document.getElementById('settings-form');
+    const data = {
+        cloud_host: form.cloud_host.value,
+        feishu_app_id: form.feishu_app_id.value,
+        deepseek_api_key: form.deepseek_api_key.value,
+        bailian_api_key: form.bailian_api_key.value,
+        auto_generate: form.auto_generate.checked,
+        generate_schedule: form.generate_schedule.value
+    };
+    
+    fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    }).then(r => r.json()).then(result => {
+        if (result.ok) {
+            showToast('设置已保存', 'success');
+        } else {
+            showToast('保存失败', 'error');
+        }
+    });
+}
+</script>
+{% endblock %}

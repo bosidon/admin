@@ -1,49 +1,338 @@
 {% extends "base.html" %}
-
-{% block title %}公众号文章 - 自媒体管理后台{% endblock %}
-{% block page_title %}📝 公众号文章{% endblock %}
-
+{% block title %}文案制作 - 仙宝内容平台{% endblock %}
+{% block page_title %}✍️ 文案制作{% endblock %}
 {% block topbar_right %}
-<button class="btn btn-outline" onclick="syncArticles()">🔄 同步</button>
-<button class="btn btn-primary" onclick="generateArticle()">✨ 生成文章</button>
+<button class="btn btn-outline" onclick="load()">🔄 刷新</button>
+<button class="btn btn-primary" onclick="showGenerate()">✨ 快速生成</button>
 {% endblock %}
 
 {% block content %}
-<div class="card">
-    {% if articles %}
-        {% for a in articles %}
-        <div class="list-item">
-            <div class="list-item-content">
-                <div class="list-item-title">
-                    <a href="/articles/{{ a.id }}" style="color: inherit; text-decoration: none;">
-                        {{ a.title }}
-                    </a>
-                </div>
-                <div class="list-item-meta">
-                    <span>📖 {{ a.book }}</span>
-                    <span>🎯 {{ a.topic }}</span>
-                    <span>📐 {{ a.angle }}</span>
-                    <span>{{ a.created_at[:10] if a.created_at else '-' }}</span>
-                    {{ getStatusTag(a.status) | safe }}
-                </div>
-            </div>
-            <div class="list-item-actions">
-                <a href="/articles/{{ a.id }}" class="btn btn-outline btn-sm">👁️ 预览</a>
-                {% if a.status == 'pending' %}
-                    <button class="btn btn-success btn-sm" onclick="updateStatus('articles', '{{ a.id }}', 'approved')">✅ 通过</button>
-                    <button class="btn btn-danger btn-sm" onclick="updateStatus('articles', '{{ a.id }}', 'rejected')">❌ 拒绝</button>
-                {% elif a.status == 'approved' %}
-                    <button class="btn btn-primary btn-sm" onclick="updateStatus('articles', '{{ a.id }}', 'published')">📤 发布</button>
-                {% endif %}
-            </div>
-        </div>
-        {% endfor %}
-    {% else %}
-        <div class="empty-state">
-            <div class="emoji">📭</div>
-            <h3>暂无文章</h3>
-            <p>点击「生成文章」创建新内容，或点击「同步」从服务器获取</p>
-        </div>
-    {% endif %}
+<!-- 筛选栏 -->
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+    <button class="btn btn-outline btn-sm filter-btn active" onclick="filterStatus('')">全部</button>
+    <button class="btn btn-outline btn-sm filter-btn" onclick="filterStatus('pending')">⏳ 待审</button>
+    <button class="btn btn-outline btn-sm filter-btn" onclick="filterStatus('approved')">✅ 已通过</button>
+    <button class="btn btn-outline btn-sm filter-btn" onclick="filterStatus('published')">📤 已发布</button>
 </div>
+
+<div class="card" style="padding:0;overflow:hidden;">
+    <table style="width:100%;border-collapse:collapse;font-size:14px;">
+        <thead>
+            <tr style="background:#f8fafc;border-bottom:1px solid var(--border);text-align:left;">
+                <th style="padding:12px 16px;font-weight:600;width:30%;">标题</th>
+                <th style="padding:12px 8px;font-weight:600;width:10%;">平台</th>
+                <th style="padding:12px 8px;font-weight:600;width:10%;">书目</th>
+                <th style="padding:12px 8px;font-weight:600;width:12%;">话题</th>
+                <th style="padding:12px 8px;font-weight:600;width:10%;">类型</th>
+                <th style="padding:12px 8px;font-weight:600;width:8%;">字数</th>
+                <th style="padding:12px 8px;font-weight:600;width:10%;">状态</th>
+                <th style="padding:12px 8px;font-weight:600;width:8%;">时间</th>
+                <th style="padding:12px 16px;font-weight:600;width:12%;text-align:center;">操作</th>
+            </tr>
+        </thead>
+        <tbody id="article-tbody">
+            <tr><td colspan="9" style="text-align:center;padding:40px;color:#94a3b8;">加载中...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 生成弹窗 -->
+<div id="gen-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:12px;padding:24px;width:520px;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+        <h3 style="margin-bottom:16px;">✨ 快速生成内容</h3>
+        <div id="gen-form"></div>
+        <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
+            <button class="btn btn-outline" onclick="closeGen()">取消</button>
+            <button class="btn btn-primary" id="gen-btn" onclick="doGenerate()">🚀 开始生成</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let OPTS = null;
+let currentFilter = '';
+let ALL_TOPICS = [];
+
+const PLATFORM_MAP = {wechat:'公众号',xiaohongshu:'小红书',video_account:'视频号',douyin:'抖音',bilibili:'B站',kuaishou:'快手',podcast:'播客',zhihu:'知乎',toutiao:'头条'};
+const CONTENT_TYPE_MAP = {'article':'📄 图文文章','xhs_note':'📕 小红书笔记','short_video':'🎬 短视频脚本','long_video':'📹 长视频脚本','speech':'🎤 口播稿','podcast_script':'🎙️ 播客脚本','qa':'💬 问答'};
+
+function formatCST(utcStr) {
+    if (!utcStr) return '-';
+    const d = new Date(utcStr + 'Z');
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+
+const STATUS_TAG = {
+    'pending': '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:12px;font-size:12px;">⏳ 待审</span>',
+    'approved': '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:12px;font-size:12px;">✅ 已通过</span>',
+    'published': '<span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:12px;font-size:12px;">📤 已发布</span>',
+    'rejected': '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:12px;font-size:12px;">🗑️ 已删除</span>',
+};
+
+async function load() {
+    const articles = await api('/api/articles' + (currentFilter ? '?status='+currentFilter : ''));
+    const tbody = document.getElementById('article-tbody');
+    if (!articles.length) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#94a3b8;">📭 暂无内容</td></tr>';
+        return;
+    }
+    tbody.innerHTML = articles.map(a => {
+        const contentType = CONTENT_TYPE_MAP[a.content_type]||a.content_type||'-';
+        const titleLink = `<a href="/articles/${a.id}" style="color:inherit;text-decoration:none;font-weight:500;">${a.title||'未命名'}</a>`;
+        const date = formatCST(a.created_at);
+        const actions = `<a href="/articles/${a.id}" class="btn btn-outline btn-sm" title="查看">👁️</a>`
+            + ` <a href="/illustrate/${a.id}" class="btn btn-outline btn-sm" title="配图">🖼️</a>`
+            + (a.promo_link ? ` <button class="btn btn-outline btn-sm promo-copy-btn" data-link="${a.promo_link}" title="复制推广链接">🔗</button>` : '');
+        const statusActions = (a.status==='pending'||a.status==='draft')
+            ? `<button class="btn btn-success btn-sm" onclick="updateStatus('articles',${a.id},'approved')" title="通过">✅</button>`
+            : a.status==='approved'
+            ? `<button class="btn btn-primary btn-sm" onclick="updateStatus('articles',${a.id},'published')" title="发布">📤</button>`
+            : '';
+        const delBtn = ` <button class="btn btn-danger btn-sm" onclick="deleteArticle(${a.id})" title="删除">🗑️</button>`;
+
+        return `<tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 16px;">${titleLink}</td>
+            <td style="padding:10px 8px;"><span style="background:#ede9fe;color:#5b21b6;padding:2px 6px;border-radius:4px;font-size:12px;">${PLATFORM_MAP[a.platform]||a.platform||'-'}</span></td>
+            <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.book ? '<a href="https://lingxiu.xianbao.online/search?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;">'+a.book+'</a>' : '-'}</td>
+            <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.topic||'-'}</td>
+            <td style="padding:10px 8px;font-size:12px;">${contentType}</td>
+            <td style="padding:10px 8px;font-size:13px;text-align:right;">${a.word_count||0}</td>
+            <td style="padding:10px 8px;">${STATUS_TAG[a.status]||a.status||'-'}</td>
+            <td style="padding:10px 8px;font-size:12px;color:#94a3b8;">${date}</td>
+            <td style="padding:10px 16px;text-align:center;white-space:nowrap;">${actions} ${statusActions} ${delBtn}</td>
+        </tr>`;
+    }).join('');
+}
+
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('.promo-copy-btn');
+    if (!btn) return;
+    const link = btn.dataset.link || '';
+    if (!link) return;
+    navigator.clipboard.writeText(link)
+        .then(() => showToast('✅ 推广链接已复制：' + link, 'success'))
+        .catch(() => prompt('复制推广链接：', link));
+});
+
+function filterStatus(s) {
+    currentFilter = s;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    load();
+}
+
+async function deleteArticle(id) {
+    if (!confirm('确定删除这篇内容？')) return;
+    const r = await api('/api/articles/' + id, {method:'DELETE'});
+    if (r.ok) { showToast('已删除', 'success'); load(); }
+    else { showToast('删除失败', 'error'); }
+}
+
+// 书目-话题联动
+async function showGenerate() {
+    const modal = document.getElementById('gen-modal');
+    modal.style.display = 'flex';
+    if (!OPTS) OPTS = await api('/api/options');
+    ALL_TOPICS = OPTS.topics || [];
+    filterTopicsByBook();
+
+    // 平台-类型联动映射
+    const PLATFORM_TYPES = {
+        'wechat': ['article', 'speech', 'long_video'],
+        'xiaohongshu': ['xhs_note', 'article'],
+        'video_account': ['short_video', 'speech', 'long_video'],
+        'douyin': ['short_video', 'speech'],
+        'bilibili': ['long_video', 'article'],
+        'kuaishou': ['short_video', 'speech'],
+        'podcast': ['podcast_script', 'speech'],
+        'zhihu': ['qa', 'article'],
+        'toutiao': ['article', 'short_video'],
+    };
+    const DEFAULT_TYPE = {
+        'wechat': 'article',
+        'xiaohongshu': 'xhs_note',
+        'video_account': 'short_video',
+        'douyin': 'short_video',
+        'bilibili': 'long_video',
+        'kuaishou': 'short_video',
+        'podcast': 'podcast_script',
+        'zhihu': 'qa',
+        'toutiao': 'article',
+    };
+
+    // 渲染类型下拉框（根据平台联动）
+    function renderTypeOpts(platform) {
+        const types = PLATFORM_TYPES[platform] || OPTS.content_types.map(t=>t.id);
+        const opts = OPTS.content_types.filter(t=>types.includes(t.id));
+        const def = DEFAULT_TYPE[platform] || 'article';
+        return `<select id="gen-content_type" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;">
+            ${opts.map(o=>`<option value="${o.id}" ${o.id===def?'selected':''}>${o.name}</option>`).join('')}
+        </select>`;
+    }
+
+    const fields = [
+        {key:'platform', label:'📱 自媒体平台', opts: OPTS.platforms, default:'wechat'},
+        {key:'book', label:'📖 书目', opts: OPTS.books.map(b=>({id:b.name,name:b.name+(b.author?' · '+b.author:'')})), default:'', required:false},
+        {key:'topic', label:'🎯 话题', opts: [], default:'', required:false},
+        {key:'angle', label:'📐 角度', opts: OPTS.angles.map(a=>({id:a.name,name:a.name})), default:'', required:false},
+        {key:'structure', label:'🏗️ 结构', opts: OPTS.structures.map(s=>({id:s.name,name:s.label})), default:'', required:false},
+        {key:'hook', label:'🪝 钩子', opts: OPTS.hooks.map(h=>({id:h,name:h})), default:'', required:false},
+        {key:'tone', label:'🎨 语气', opts: OPTS.tones.map(t=>({id:t.name,name:t.label})), default:'', required:false},
+    ];
+
+    const form = document.getElementById('gen-form');
+    
+    function renderField(f) {
+        const opts = [{id:'',name:'自动选择'},...(f.opts||[])];
+        const def = f.default || '';
+        return `<div style="flex:1;min-width:200px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">${f.label}</label>
+            <select id="gen-${f.key}" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+                ${opts.map(o=>`<option value="${o.id}" ${o.id===def?'selected':''}>${o.name}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+    
+    // 构建4行布局
+    form.innerHTML = `
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+            <div style="flex:2;min-width:200px;">
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">📱 自媒体平台</label>
+                <select id="gen-platform" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+                    ${OPTS.platforms.map(p=>`<option value="${p.id}" ${p.id==='wechat'?'selected':''}>${p.name}</option>`).join('')}
+                </select>
+            </div>
+            <div style="flex:3;min-width:200px;">
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">📋 内容类型</label>
+                ${renderTypeOpts('wechat')}
+            </div>
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+            ${renderField(fields[1])}
+            ${renderField(fields[2])}
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+            ${renderField(fields[3])}
+            ${renderField(fields[4])}
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+            ${renderField(fields[5])}
+            ${renderField(fields[6])}
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+            <div style="flex:1;">
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">🔗 推广人 ID <span style="font-weight:400;color:#94a3b8;">（生成后自动追加推广链接）</span></label>
+                <input id="gen-promo_uid" type="number" placeholder="如 58（合伙人 user id）" value=""
+                       style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+            </div>
+            <div style="flex:2;display:flex;align-items:flex-end;padding-bottom:6px;">
+                <span style="font-size:12px;color:#64748b;">留空则不插入推广链接</span>
+            </div>
+        </div>
+    `;
+
+    // 书目下拉框绑定 onchange
+    const bookSel = document.getElementById('gen-book');
+    if (bookSel) {
+        bookSel.onchange = filterTopicsByBook;
+    }
+
+    // 平台+类型联动映射
+    const DEFAULTS = {
+        'zhihu+qa': {structure:'qa', hook:'提问式', tone:'reflective'},
+        'podcast+podcast_script': {structure:'story', hook:'故事式', tone:'reflective'},
+        'douyin+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
+        'kuaishou+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
+        'wechat+article': {structure:'standard', hook:'金句开头', tone:'warm'},
+        'toutiao+article': {structure:'listicle', hook:'热点蹭流量', tone:'rational'},
+    };
+    
+    // 联动函数
+    function applyDefaults() {
+        const platform = document.getElementById('gen-platform').value;
+        const type = document.getElementById('gen-content_type').value;
+        const key = platform + '+' + type;
+        const defaults = DEFAULTS[key] || {};
+        
+        if (defaults.structure) {
+            const sel = document.getElementById('gen-structure');
+            if (sel) sel.value = defaults.structure;
+        }
+        if (defaults.hook) {
+            const sel = document.getElementById('gen-hook');
+            if (sel) sel.value = defaults.hook;
+        }
+        if (defaults.tone) {
+            const sel = document.getElementById('gen-tone');
+            if (sel) sel.value = defaults.tone;
+        }
+    }
+    
+    // 平台联动类型
+    document.getElementById('gen-platform').onchange = function() {
+        document.getElementById('gen-content_type').outerHTML = renderTypeOpts(this.value);
+        applyDefaults();
+    };
+    
+    // 类型变化也触发联动
+    document.getElementById('gen-content_type').onchange = function() {
+        applyDefaults();
+    };
+    
+    // 类型 select 的 id 需要加前缀以避免重复
+    document.querySelectorAll('#gen-form select').forEach(s => {
+        if (s.id === 'gen-content_type') return;
+    });
+}
+function closeGen() {
+    document.getElementById('gen-modal').style.display = 'none';
+}
+
+// 书目-话题联动
+
+function filterTopicsByBook() {
+    const bookSel = document.getElementById('gen-book');
+    const topicSel = document.getElementById('gen-topic');
+    if (!bookSel || !topicSel) return;
+    
+    const selectedBook = bookSel.value;
+    let filteredTopics;
+    
+    if (!selectedBook) {
+        // 未选书目，显示所有话题（前50个）
+        filteredTopics = ALL_TOPICS.slice(0, 50);
+    } else {
+        // 选了书目，只显示该书相关话题
+        filteredTopics = ALL_TOPICS.filter(t => t.book_name === selectedBook);
+    }
+    
+    // 重新渲染话题下拉框
+    const opts = [{id:'',name:'自动选择'}, ...filteredTopics.map(t=>({id:t.name,name:t.category+'·'+t.name}))];
+    topicSel.innerHTML = opts.map(o=>`<option value="${o.id}">${o.name}</option>`).join('');
+}
+
+async function doGenerate() {
+    const btn = document.getElementById('gen-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ 生成中...';
+    const params = {};
+    ['platform','content_type','book','topic','angle','structure','hook','tone'].forEach(k => {
+        const v = document.getElementById('gen-'+k).value;
+        if (v) params[k] = v;
+    });
+    // ⭐ 推广人 ID（自动生成推广链接）
+    const pu = document.getElementById('gen-promo_uid');
+    if (pu && pu.value.trim()) params.promo_uid = pu.value.trim();
+    try {
+        const r = await api('/api/articles/generate', {method:'POST', body:JSON.stringify(params)});
+        if (r.ok) { showToast('✅ 生成成功：'+r.title, 'success'); closeGen(); load(); }
+        else { showToast('❌ '+r.error, 'error'); }
+    } catch(e) { showToast('❌ '+e.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = '🚀 开始生成'; }
+}
+
+load();
+</script>
 {% endblock %}

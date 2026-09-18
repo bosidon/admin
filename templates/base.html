@@ -3,60 +3,226 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}自媒体管理后台{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    {% block head %}{% endblock %}
+    <title>{% block title %}视频创作平台{% endblock %}</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        :root {
+            --primary: #7c3aed; --primary-dark: #6d28d9;
+            --success: #22c55e; --warning: #f59e0b;
+            --danger: #ef4444; --info: #3b82f6;
+            --bg: #f8fafc; --card: #fff; --text: #1e293b;
+            --text2: #64748b; --border: #e2e8f0;
+        }
+        body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: var(--bg); color: var(--text); }
+        a { color: var(--primary); text-decoration: none; }
+        
+        /* 布局 */
+        .sidebar { position:fixed; left:0; top:0; bottom:0; width:220px; background:#1e1b4b; color:#fff; padding:20px 0; z-index:100; }
+        .logo { padding:0 20px 20px; font-size:18px; font-weight:700; border-bottom:1px solid rgba(255,255,255,0.1); }
+        .nav { padding:16px 12px; }
+        .nav a { display:flex; align-items:center; gap:10px; padding:10px 14px; color:rgba(255,255,255,0.7); border-radius:8px; margin-bottom:4px; font-size:14px; }
+        .nav a:hover, .nav a.active { background:var(--primary); color:#fff; }
+        .main { margin-left:220px; min-height:100vh; }
+        .topbar { background:#fff; border-bottom:1px solid var(--border); padding:16px 24px; display:flex; justify-content:space-between; align-items:center; position:sticky; top:0; z-index:50; }
+        .topbar h1 { font-size:18px; }
+        .content { padding:24px; max-width:1400px; }
+        
+        /* 组件 */
+        .card { background:var(--card); border-radius:12px; padding:20px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+        .btn { display:inline-flex; align-items:center; gap:6px; padding:8px 16px; border:none; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }
+        .btn-primary { background:var(--primary); color:#fff; }
+        .btn-primary:hover { background:var(--primary-dark); }
+        .btn-success { background:var(--success); color:#fff; }
+        .btn-warning { background:var(--warning); color:#fff; }
+        .btn-danger { background:var(--danger); color:#fff; }
+        .btn-outline { background:transparent; border:1px solid var(--border); color:var(--text); }
+        .btn-outline:hover { background:var(--bg); }
+        .btn-sm { padding:5px 10px; font-size:12px; }
+        .btn-lg { padding:12px 24px; font-size:15px; }
+        .tag { display:inline-block; padding:3px 8px; border-radius:100px; font-size:11px; font-weight:500; }
+        .tag-purple { background:#ede9fe; color:#7c3aed; }
+        .tag-green { background:#d1fae5; color:#059669; }
+        .tag-yellow { background:#fef3c7; color:#d97706; }
+        .tag-blue { background:#dbeafe; color:#2563eb; }
+        .tag-gray { background:#f1f5f9; color:#64748b; }
+        
+        /* 表单 */
+        .form-group { margin-bottom:14px; }
+        .form-label { display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--text2); }
+        .form-input, .form-select, .form-textarea { width:100%; padding:8px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px; }
+        .form-textarea { min-height:120px; resize:vertical; font-family:inherit; line-height:1.6; }
+        .form-input:focus, .form-select:focus, .form-textarea:focus { outline:none; border-color:var(--primary); }
+        
+        /* 统计卡片 */
+        .stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:24px; }
+        .stat { background:#fff; border-radius:12px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+        .stat h3 { font-size:28px; margin-bottom:4px; }
+        .stat p { font-size:13px; color:var(--text2); }
+        
+        /* 项目卡片 */
+        .project-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; }
+        .project-card { background:#fff; border-radius:12px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05); cursor:pointer; transition:all 0.2s; }
+        .project-card:hover { box-shadow:0 4px 12px rgba(0,0,0,0.1); transform:translateY(-2px); }
+        .project-card h3 { font-size:16px; margin-bottom:8px; }
+        .project-card .meta { font-size:12px; color:var(--text2); display:flex; gap:12px; margin-bottom:12px; }
+        .project-card .progress { height:4px; background:var(--border); border-radius:2px; overflow:hidden; }
+        .project-card .progress-bar { height:100%; background:var(--primary); transition:width 0.3s; }
+        
+        /* 步骤条 */
+        .steps { display:flex; gap:4px; margin-bottom:24px; }
+        .step { flex:1; text-align:center; padding:12px 8px; background:#f1f5f9; border-radius:8px; font-size:13px; color:var(--text2); cursor:pointer; }
+        .step.active { background:var(--primary); color:#fff; }
+        .step.done { background:var(--success); color:#fff; }
+        
+        /* 分镜卡片 */
+        .scene-list { display:flex; flex-direction:column; gap:12px; }
+        .scene-card { background:#fff; border:1px solid var(--border); border-radius:10px; padding:16px; display:flex; gap:16px; }
+        .scene-num { width:36px; height:36px; background:var(--primary); color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; flex-shrink:0; }
+        .scene-content { flex:1; }
+        .scene-meta { font-size:12px; color:var(--text2); display:flex; gap:12px; margin-top:8px; }
+        
+        /* 资产网格 */
+        .asset-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px; }
+        .asset-card { background:#fff; border:2px solid var(--border); border-radius:10px; overflow:hidden; cursor:pointer; transition:all 0.2s; }
+        .asset-card:hover { border-color:var(--primary); }
+        .asset-card.selected { border-color:var(--primary); background:#faf5ff; }
+        .asset-card img { width:100%; height:120px; object-fit:cover; }
+        .asset-card .info { padding:10px; }
+        .asset-card .name { font-size:13px; font-weight:600; }
+        .asset-card .type { font-size:11px; color:var(--text2); }
+        
+        /* 模态框 */
+        .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:200; align-items:center; justify-content:center; }
+        .modal-overlay.show { display:flex; }
+        .modal { background:#fff; border-radius:16px; padding:24px; max-width:500px; width:90%; max-height:80vh; overflow-y:auto; }
+        .modal h2 { font-size:18px; margin-bottom:16px; }
+        .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; }
+        
+        /* Toast */
+        .toast { position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; color:#fff; font-size:14px; z-index:300; animation:slideIn 0.3s; }
+        .toast.success { background:var(--success); }
+        .toast.error { background:var(--danger); }
+        @keyframes slideIn { from { transform:translateY(20px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+        
+        /* 编辑器 */
+        .editor { border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+        .editor-toolbar { background:#f8fafc; border-bottom:1px solid var(--border); padding:8px 12px; display:flex; gap:8px; }
+        .editor-content { min-height:300px; padding:16px; font-family:inherit; line-height:1.8; }
+        .editor-content textarea { width:100%; min-height:280px; border:none; resize:vertical; font-family:inherit; font-size:14px; line-height:1.8; }
+        
+        /* 时间轴 */
+        .timeline { position:relative; padding-left:24px; }
+        .timeline::before { content:''; position:absolute; left:8px; top:0; bottom:0; width:2px; background:var(--border); }
+        .timeline-item { position:relative; margin-bottom:16px; }
+        .timeline-item::before { content:''; position:absolute; left:-20px; top:4px; width:12px; height:12px; background:var(--primary); border-radius:50%; }
+    </style>
 </head>
 <body>
     <div class="sidebar">
-        <div class="logo">
-            <span class="logo-icon">✨</span>
-            <span class="logo-text">仙宝自媒体</span>
-        </div>
-        <nav class="nav">
-            <a href="/" class="nav-item {% if request.path == '/' %}active{% endif %}">
-                <span class="nav-icon">📊</span>
-                <span>仪表盘</span>
-            </a>
-            <a href="/articles" class="nav-item {% if '/articles' in request.path %}active{% endif %}">
-                <span class="nav-icon">📝</span>
-                <span>公众号文章</span>
-            </a>
-            <a href="/xhs" class="nav-item {% if '/xhs' in request.path %}active{% endif %}">
-                <span class="nav-icon">📕</span>
-                <span>小红书文案</span>
-            </a>
-            <a href="/video" class="nav-item {% if '/video' in request.path %}active{% endif %}">
-                <span class="nav-icon">🎬</span>
-                <span>视频号</span>
-            </a>
-            <a href="/settings" class="nav-item {% if '/settings' in request.path %}active{% endif %}">
-                <span class="nav-icon">⚙️</span>
-                <span>设置</span>
-            </a>
-        </nav>
-        <div class="sidebar-footer">
-            <div class="version">v1.0.0</div>
+        <div class="logo">📝 仙宝内容平台</div>
+        <div class="nav">
+            <a href="/" class="{% if request.path == '/' %}active{% endif %}">📊 工作台</a>
+            <a href="/articles" class="{% if '/articles' in request.path %}active{% endif %}">✍️ 文案</a>
+            <a href="/images" class="{% if '/images' in request.path %}active{% endif %}">🖼 配图</a>
+            <a href="/video" class="{% if '/video' in request.path %}active{% endif %}">🎬 视频制作</a>
+            <a href="/library" class="{% if request.path == '/library' %}active{% endif %}">📦 素材库</a>
+            <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">⚙️ 设置</a>
         </div>
     </div>
     
     <div class="main">
         <div class="topbar">
-            <div class="topbar-left">
-                <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
-                <h1 class="page-title">{% block page_title %}{% endblock %}</h1>
-            </div>
-            <div class="topbar-right">
-                {% block topbar_right %}{% endblock %}
-            </div>
+            <h1>{% block page_title %}{% endblock %}</h1>
+            <div>{% block topbar_right %}{% endblock %}</div>
         </div>
-        
         <div class="content">
             {% block content %}{% endblock %}
         </div>
     </div>
     
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <div class="modal-overlay" id="modal">
+        <div class="modal">
+            <h2 id="modal-title"></h2>
+            <div id="modal-body"></div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" id="modal-confirm">确定</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="toast" id="toast" style="display:none;"></div>
+    
+    <script>
+        // 通用工具函数
+        async function api(url, opts={}) {
+            const r = await fetch(url, {headers:{'Content-Type':'application/json'}, ...opts});
+            return r.json();
+        }
+        
+        function toast(msg, type='success') {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.className = 'toast ' + type;
+            el.style.display = 'block';
+            setTimeout(() => el.style.display = 'none', 3000);
+        }
+        
+        function openModal(title, body, onConfirm) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-body').innerHTML = body;
+            document.getElementById('modal').classList.add('show');
+            document.getElementById('modal-confirm').onclick = () => {
+                onConfirm();
+                closeModal();
+            };
+        }
+        
+        function closeModal() {
+            document.getElementById('modal').classList.remove('show');
+        }
+        
+        function formatDate(d) {
+            if (!d) return '-';
+            return new Date(d).toLocaleString('zh-CN');
+        }
+        
+        function statusLabel(s) {
+            const map = {
+                'draft': '草稿', 'scripting': '编剧中', 'script_done': '脚本完成',
+                'storyboard': '分镜中', 'storyboard_done': '分镜完成',
+                'asset_production': '资产制作中', 'asset_done': '资产完成',
+                'rendering': '渲染中', 'render_done': '渲染完成', 'published': '已发布'
+            };
+            return map[s] || s;
+        }
+        
+        function statusClass(s) {
+            const map = {
+                'draft': 'tag-gray', 'scripting': 'tag-blue', 'script_done': 'tag-green',
+                'storyboard': 'tag-blue', 'storyboard_done': 'tag-green',
+                'asset_production': 'tag-yellow', 'asset_done': 'tag-green',
+                'rendering': 'tag-yellow', 'render_done': 'tag-green', 'published': 'tag-purple'
+            };
+            return map[s] || 'tag-gray';
+        }
+        
+        function platformLabel(p) {
+            const map = {'video_account':'视频号', 'douyin':'抖音', 'bilibili':'B站', 'xiaohongshu':'小红书'};
+            return map[p] || p;
+        }
+        
+        function videoTypeLabel(t) {
+            const map = {'narration_visual':'口播+画面', 'ai_visual':'纯AI画面', 'mixed':'混合'};
+            return map[t] || t;
+        }
+        
+        function styleLabel(s) {
+            const map = {'realistic':'写实风', 'illustration':'插画风', 'anime':'动漫风', '3d':'3D风', 'artistic':'意境风'};
+            return map[s] || s;
+        }
+    </script>
+    <script src="/static/js/app.js"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

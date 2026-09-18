@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}素材库 - 仙宝内容平台{% endblock %}
+{% block page_title %}📦 素材库{% endblock %}
+
+{% block topbar_right %}
+<button class="btn btn-outline" onclick="load()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
+        <button id="sc-all" class="btn btn-primary" onclick="setScope('all')">全部</button>
+        <button id="sc-private" class="btn btn-outline" onclick="setScope('private')">我的素材</button>
+        <button id="sc-shared" class="btn btn-outline" onclick="setScope('shared')">平台共享</button>
+        <span style="flex:1;"></span>
+        <select id="type-filter" onchange="load()" style="padding:7px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;">
+            <option value="all">全部类型</option>
+            <option value="image">图片</option>
+            <option value="audio">音频</option>
+            <option value="video">视频</option>
+            <option value="template">模板</option>
+        </select>
+    </div>
+    <div id="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let SCOPE = 'all';
+
+const CATEGORY_LABEL = {brand:'品牌', tarot:'塔罗', maya:'玛雅', poster:'海报', qrcode:'二维码', other:'其他'};
+
+function setScope(s) {
+    SCOPE = s;
+    ['all','private','shared'].forEach(k => {
+        document.getElementById('sc-' + k).className = 'btn ' + (k === s ? 'btn-primary' : 'btn-outline');
+    });
+    load();
+}
+
+async function load() {
+    const type = document.getElementById('type-filter').value;
+    const rows = await api('/api/library?scope=' + SCOPE + '&type=' + type);
+    const el = document.getElementById('grid');
+    if (!Array.isArray(rows) || !rows.length) {
+        el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
+            + '📭 暂无素材' + (SCOPE === 'shared' ? '（平台共享素材整理中）' : '—— 配图生成的素材会出现在这里') + '</div>';
+        return;
+    }
+    el.innerHTML = rows.map(m => `<div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+        <div style="height:120px;background:#f8fafc;display:flex;align-items:center;justify-content:center;font-size:28px;color:#cbd5e1;">
+            ${m.type==='image' ? '🖼' : m.type==='audio' ? '🎵' : m.type==='video' ? '🎬' : '📄'}
+        </div>
+        <div style="padding:10px;">
+            <div style="font-size:13px;font-weight:500;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.name || '未命名'}</div>
+            <div style="font-size:11px;color:#94a3b8;">
+                ${CATEGORY_LABEL[m.category] || m.category || ''} · ${m.scope === 'shared' ? '平台' : '我的'}
+            </div>
+        </div>
+    </div>`).join('');
+}
+
+load();
+</script>
+{% endblock %}

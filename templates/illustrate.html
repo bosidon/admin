@@ -1,0 +1,438 @@
+{% extends "base.html" %}
+
+{% block title %}配图 - 仙宝内容平台{% endblock %}
+{% block page_title %}🖼 配图{% endblock %}
+
+{% block topbar_right %}
+<button class="btn btn-outline" onclick="location.href='/images'">← 返回</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h3 id="art-title" style="margin-bottom:6px;">加载中…</h3>
+    <div id="art-meta" style="font-size:12px;color:#64748b;"></div>
+</div>
+
+<!-- ① 配图方案 -->
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+        <div>
+            <div style="font-weight:600;font-size:15px;">① 配图方案（AI 生成 · 可编辑 · 勾选出图条目）</div>
+            <div style="font-size:12px;color:#64748b;margin-top:3px;">AI 分析出两组候选（金句组 + 场景组）· 不开机不花钱 · 勾选要出的条目后再生成</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <label style="font-size:12px;color:#64748b;">配色</label>
+            <select id="plan-style" class="form-select" style="width:auto;padding:5px 10px;font-size:13px;">
+                <option value="purple">深紫 · 灵性塔罗</option>
+                <option value="dark">玄黑 · 心理哲思</option>
+                <option value="gold">米金 · 疗愈温柔</option>
+                <option value="maya">青绿 · 玛雅图腾</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="genPlanNow()">① 生成方案</button>
+        </div>
+    </div>
+
+    <div id="plan-empty" style="display:none;padding:24px;text-align:center;color:#94a3b8;font-size:13px;">
+        📭 还没有配图方案 —— 点右上「① 生成方案」让 AI 分析文案
+    </div>
+
+    <div id="plan-quotes-wrap" style="display:none;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🎴 金句组
+            <span id="q-count" style="color:#94a3b8;font-weight:400;"></span></div>
+        <div id="plan-quotes"></div>
+    </div>
+
+    <div id="plan-scenes-wrap" style="display:none;margin-top:18px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🖼 场景组
+            <span id="s-count" style="color:#94a3b8;font-weight:400;"></span></div>
+        <div id="plan-scenes"></div>
+    </div>
+</div>
+
+<!-- ② 生成 -->
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <div>
+            <div style="font-weight:600;font-size:15px;">② 生成配图（AutoDL ComfyUI）</div>
+            <div style="font-size:12px;color:#64748b;margin-top:3px;">只出①里勾选的条目 · 一次开机一次关机 · 用完自动关闭实例</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+            <button class="btn btn-primary" id="btn-gen" onclick="genNow()">② 生成配图</button>
+            <button class="btn btn-outline" onclick="shutdownComfy()">⏻ 关闭实例</button>
+        </div>
+    </div>
+    <div id="gen-msg" style="font-size:12px;color:#94a3b8;margin-top:10px;"></div>
+    <div id="gen-progress" style="display:none;margin-top:12px;">
+        <div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;">
+            <div id="gen-bar" style="height:100%;width:0;background:#6366f1;transition:width .4s;"></div>
+        </div>
+        <pre id="gen-log" style="margin-top:10px;max-height:200px;overflow:auto;background:#0f172a;color:#cbd5e1;font-size:11px;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,monospace;"></pre>
+    </div>
+</div>
+
+<!-- ③ 已配图 -->
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
+        <h3 style="margin:0;">③ 已配图（<span id="img-count">0</span> 张）</h3>
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+            <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                <input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" style="width:auto;"> 全选
+            </label>
+            <span id="sel-count" style="font-size:12px;color:#94a3b8;">已选 0 张</span>
+            <button class="btn btn-primary" id="btn-qr" onclick="overlayQr()">🔗 叠加二维码</button>
+        </div>
+    </div>
+    <div id="img-groups"></div>
+</div>
+
+<!-- 灯箱 -->
+<div id="lb" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.92);z-index:9999;align-items:center;justify-content:center;flex-direction:column;padding:20px;">
+    <img id="lb-img" alt="" style="max-width:92vw;max-height:78vh;box-shadow:0 10px 40px rgba(0,0,0,.7);border-radius:4px;">
+    <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center;">
+        <button class="btn btn-outline btn-sm" onclick="lbPrev()">‹ 上一张</button>
+        <span id="lb-info" style="color:#cbd5e1;font-size:12px;min-width:60px;text-align:center;"></span>
+        <button class="btn btn-outline btn-sm" onclick="lbNext()">下一张 ›</button>
+        <a id="lb-dl" class="btn btn-success btn-sm" style="text-decoration:none;" download>⬇ 下载原图</a>
+        <button class="btn btn-outline btn-sm" onclick="lbClose()">✕ 关闭（Esc）</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ARTICLE_ID = {{ article_id }};
+const STYLE_LABEL = {purple:'深紫', dark:'玄黑', gold:'米金', maya:'青绿'};
+const ASPECTS = ['3:4','1:1','9:16','2.35:1'];
+let PLAN = {style:'', quotes:[], scenes:[]};
+let IMAGES = [];
+const SEL = new Set();
+let LB_LIST = [], LB_IDX = 0;
+let JOB_TIMER = null;
+
+/* ============ ① 方案 ============ */
+function renderPlan() {
+    const empty = document.getElementById('plan-empty');
+    const qw = document.getElementById('plan-quotes-wrap');
+    const sw = document.getElementById('plan-scenes-wrap');
+    if (!PLAN.quotes.length && !PLAN.scenes.length) {
+        empty.style.display = 'block'; qw.style.display = 'none'; sw.style.display = 'none';
+        return;
+    }
+    empty.style.display = 'none';
+    updatePickCount();
+    qw.style.display = PLAN.quotes.length ? 'block' : 'none';
+    sw.style.display = PLAN.scenes.length ? 'block' : 'none';
+
+    document.getElementById('plan-quotes').innerHTML = PLAN.quotes.map((q, i) => `
+        <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" data-i="${i}" data-f="on" ${q.on !== false ? 'checked' : ''} style="width:auto;"> 金句 ${i+1}
+                </label>
+                <button class="btn btn-danger btn-sm" onclick="delQuote(${i})">✕</button>
+            </div>
+            <input type="text" data-i="${i}" data-f="text" value="${(q.text||'').replace(/"/g,'&quot;')}"
+                placeholder="金句（10-28 字）"
+                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">背景提示词（英文 · 只画背景不出现文字）</div>
+            <textarea rows="3" data-i="${i}" data-f="bg"
+                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${q.bg||''}</textarea>
+        </div>`).join('');
+
+    document.getElementById('plan-scenes').innerHTML = PLAN.scenes.map((s, i) => `
+        <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" data-i="${i}" data-f="on" ${s.on !== false ? 'checked' : ''} style="width:auto;"> 画面 ${i+1}
+                </label>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <select data-i="${i}" data-f="aspect" style="padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;">
+                        ${ASPECTS.map(a => `<option value="${a}" ${s.aspect===a?'selected':''}>${a}</option>`).join('')}
+                    </select>
+                    <button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button>
+                </div>
+            </div>
+            <input type="text" data-i="${i}" data-f="scene" value="${(s.scene||'').replace(/"/g,'&quot;')}"
+                placeholder="画面描述（中文，20 字内）"
+                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">绘图提示词（英文 · 传给 ComfyUI）</div>
+            <textarea rows="3" data-i="${i}" data-f="prompt"
+                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${s.prompt||''}</textarea>
+        </div>`).join('');
+
+    document.querySelectorAll('#plan-quotes input, #plan-quotes textarea').forEach(el => {
+        el.onchange = function() {
+            PLAN.quotes[+this.dataset.i][this.dataset.f] = (this.type === 'checkbox') ? this.checked : this.value;
+            if (this.type === 'checkbox') updatePickCount();
+        };
+    });
+    document.querySelectorAll('#plan-scenes input, #plan-scenes textarea, #plan-scenes select').forEach(el => {
+        el.onchange = function() {
+            PLAN.scenes[+this.dataset.i][this.dataset.f] = (this.type === 'checkbox') ? this.checked : this.value;
+            if (this.type === 'checkbox') updatePickCount();
+        };
+    });
+}
+
+function updatePickCount() {
+    const qn = PLAN.quotes.filter(q => q.on !== false).length;
+    const sn = PLAN.scenes.filter(s => s.on !== false).length;
+    const qe = document.getElementById('q-count');
+    const se = document.getElementById('s-count');
+    if (qe) qe.textContent = '（' + PLAN.quotes.length + ' 句 · 已选 ' + qn + '）';
+    if (se) se.textContent = '（' + PLAN.scenes.length + ' 个 · 已选 ' + sn + '）';
+}
+
+function delQuote(i) { PLAN.quotes.splice(i, 1); renderPlan(); }
+function delScene(i) { PLAN.scenes.splice(i, 1); renderPlan(); }
+
+async function loadPlan() {
+    const r = await api('/api/articles/' + ARTICLE_ID + '/image-script', {method: 'GET'});
+    if (r && r.plan) PLAN = {style: r.plan.style || '', quotes: r.plan.quotes || [], scenes: r.plan.scenes || []};
+    document.getElementById('plan-style').value = PLAN.style || 'purple';
+    renderPlan();
+}
+
+async function savePlan(silent) {
+    PLAN.style = document.getElementById('plan-style').value;
+    const r = await api('/api/articles/' + ARTICLE_ID + '/image-script',
+                        {method: 'POST', body: JSON.stringify({plan: PLAN})});
+    const ok = !!(r && r.ok);
+    if (silent !== true) toast(ok ? '✅ 方案已保存' : '❌ 保存失败', ok ? 'success' : 'error');
+    return ok;
+}
+
+async function genPlanNow() {
+    if (!confirm('生成方案会覆盖当前方案（你编辑过的提示词与勾选都会丢失），继续？')) return;
+    await startJob({article_id: ARTICLE_ID, cards: false, scenes: false, replan: true, plan_only: true});
+}
+
+/* ============ ② 生成 ============ */
+function hint(m) { document.getElementById('gen-msg').textContent = m; }
+function progress(on) { document.getElementById('gen-progress').style.display = on ? 'block' : 'none'; }
+function busy(on) {
+    const b = document.getElementById('btn-gen');
+    if (b) { b.disabled = on; b.style.opacity = on ? .55 : 1; }
+}
+
+async function genNow() {
+    const cards = PLAN.quotes.filter(q => q.on !== false).length > 0;
+    const scenes = PLAN.scenes.filter(s => s.on !== false).length > 0;
+    if (!cards && !scenes) {
+        toast('还没有勾选要出的条目 —— 请先点「① 生成方案」并勾选', 'error');
+        return;
+    }
+    await savePlan(true);
+    await startJob({article_id: ARTICLE_ID, cards: cards, scenes: scenes, count: 3});
+}
+
+async function startJob(payload) {
+    const r = await api('/api/illustrate/generate', {method: 'POST', body: JSON.stringify(payload)});
+    if (!r || r.error || !r.job_id) { toast('❌ ' + ((r && r.error) || '启动失败'), 'error'); return; }
+    progress(true); busy(true);
+    document.getElementById('gen-bar').style.width = '0%';
+    hint('任务已启动，正在处理…');
+    pollJob(r.job_id);
+}
+
+function pollJob(jobId) {
+    if (JOB_TIMER) clearInterval(JOB_TIMER);
+    JOB_TIMER = setInterval(async function() {
+        const j = await api('/api/illustrate/job/' + jobId);
+        if (!j || j.error) { clearInterval(JOB_TIMER); JOB_TIMER = null; busy(false); return; }
+        const pct = j.total ? Math.round(j.done / j.total * 100) : 0;
+        document.getElementById('gen-bar').style.width = pct + '%';
+        const lg = document.getElementById('gen-log');
+        lg.textContent = (j.log || []).join('\n');
+        lg.scrollTop = lg.scrollHeight;
+        hint('状态：' + j.status + ' · ' + j.done + '/' + j.total);
+        if (j.quotes || j.scenes) {
+            PLAN.style = j.style || PLAN.style;
+            if (j.quotes && j.quotes.length) PLAN.quotes = j.quotes;
+            if (j.scenes && j.scenes.length) PLAN.scenes = j.scenes;
+            document.getElementById('plan-style').value = PLAN.style || 'purple';
+            renderPlan();
+        }
+        if (j.status === 'done' || j.status === 'failed') {
+            clearInterval(JOB_TIMER); JOB_TIMER = null; busy(false);
+            await loadImages();
+            if (j.status === 'done') {
+                if (j.want_cards === false && j.want_scenes === false) {
+                    toast('✅ 方案已更新 —— 勾选要出的条目后点「② 生成配图」', 'success');
+                    hint('✅ 方案已更新');
+                } else {
+                    toast('✅ 生成完成，实例已自动关机', 'success');
+                    hint('✅ 完成 · 实例已关机');
+                }
+            } else {
+                toast('❌ ' + (j.error || '生成失败'), 'error');
+                hint('❌ ' + (j.error || '生成失败'));
+            }
+        }
+    }, 3000);
+}
+
+async function shutdownComfy() {
+    const r = await api('/api/illustrate/shutdown', {method: 'POST'});
+    toast(r.ok ? '✅ 已下发关机指令' : ('❌ 关机失败：' + (r.msg || '未知')), r.ok ? 'success' : 'error');
+}
+
+/* ============ ③ 已配图 ============ */
+function groupOf(u) {
+    if (/\/qa_|\/auto_/.test(u)) return 'card';
+    if (/\/qr_/.test(u)) return 'qr';
+    if (/\/ai_/.test(u)) return 'scene';
+    return 'other';
+}
+function isStamped(u) { return /_q\.png$/.test(u); }
+function isSelectable(u) { return groupOf(u) !== 'qr' && !isStamped(u); }
+const GROUPS = [
+    ['card',  '🎴 金句卡'],
+    ['scene', '🖼 场景图'],
+    ['qr',    '🔗 二维码'],
+    ['other', '📦 其他'],
+];
+
+function renderImages() {
+    document.getElementById('img-count').textContent = IMAGES.length;
+    SEL.forEach(u => { if (IMAGES.indexOf(u) < 0 || !isSelectable(u)) SEL.delete(u); });
+    const host = document.getElementById('img-groups');
+    if (!IMAGES.length) {
+        host.innerHTML = '<div style="text-align:center;padding:30px;color:#94a3b8;">📭 暂无配图</div>';
+        updateSelCount();
+        return;
+    }
+    let html = '';
+    GROUPS.forEach(([key, label]) => {
+        const list = IMAGES.filter(u => groupOf(u) === key);
+        if (!list.length) return;
+        html += '<div style="font-weight:600;font-size:13px;margin:6px 0 10px;">' + label +
+                ' <span style="color:#94a3b8;font-weight:400;">（' + list.length + ' 张）</span></div>' +
+                '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px;">' +
+                list.map(u => {
+                    const stamped = isStamped(u);
+                    const box = isSelectable(u)
+                        ? `<input type="checkbox" data-u="${u}"${SEL.has(u) ? ' checked' : ''} onchange="toggleOne(this)" style="width:auto;position:absolute;top:6px;left:6px;z-index:2;transform:scale(1.4);cursor:pointer;">`
+                        : '';
+                    const badge = stamped
+                        ? '<div style="font-size:11px;color:#059669;margin-bottom:2px;">✅ 已叠码</div>'
+                        : '';
+                    return `<div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;position:relative;">
+                    ${box}
+                    <img src="${u}" loading="lazy" title="点击放大"
+                         style="width:100%;display:block;cursor:zoom-in;"
+                         onclick="lbOpen('${u}')" onerror="this.style.opacity=.3">
+                    <div style="padding:6px;text-align:center;">
+                        ${badge}
+                        <a href="${u}" download style="font-size:12px;color:#7c3aed;text-decoration:none;margin-right:10px;">下载</a>
+                        <a href="javascript:;" onclick="delImage('${u}')" style="font-size:12px;color:#dc2626;text-decoration:none;">删除</a>
+                    </div>
+                </div>`;
+                }).join('') + '</div>';
+    });
+    host.innerHTML = html;
+    updateSelCount();
+}
+
+function toggleOne(el) {
+    const u = el.dataset.u;
+    if (el.checked) SEL.add(u); else SEL.delete(u);
+    updateSelCount();
+}
+
+function toggleAll(on) {
+    SEL.clear();
+    if (on) IMAGES.forEach(u => { if (isSelectable(u)) SEL.add(u); });
+    renderImages();
+}
+
+function updateSelCount() {
+    const n = SEL.size;
+    const c = document.getElementById('sel-count');
+    if (c) c.textContent = '已选 ' + n + ' 张';
+    const b = document.getElementById('btn-qr');
+    if (b) { b.disabled = !n; b.style.opacity = n ? 1 : .55; }
+}
+
+async function overlayQr() {
+    const picked = IMAGES.filter(u => SEL.has(u));
+    if (!picked.length) { toast('请先勾选要叠加二维码的图片', 'error'); return; }
+    if (!confirm('给选中的 ' + picked.length + ' 张图叠加推广二维码？\n（另存为新图，原图保留）')) return;
+    const b = document.getElementById('btn-qr');
+    const oldTxt = b.textContent;
+    b.disabled = true; b.textContent = '⏳ 叠加中…';
+    const r = await api('/api/illustrate/overlay-qr',
+                        {method: 'POST', body: JSON.stringify({article_id: ARTICLE_ID, images: picked})});
+    b.textContent = oldTxt;
+    if (!r || r.error) {
+        toast('❌ ' + ((r && r.error) || '叠加失败'), 'error');
+        updateSelCount();
+        return;
+    }
+    SEL.clear();
+    await loadImages();
+    toast('✅ 已叠加 ' + r.count + ' 张' +
+          ((r && r.skipped && r.skipped.length) ? '（跳过 ' + r.skipped.length + ' 张）' : ''), 'success');
+}
+
+async function delImage(url) {
+    if (!confirm('永久删除这张图？\n文件将从服务器删除，无法恢复。')) return;
+    const r = await api('/api/illustrate/delete-image',
+                        {method: 'POST', body: JSON.stringify({article_id: ARTICLE_ID, url: url})});
+    if (!r || r.error) { toast('❌ ' + ((r && r.error) || '删除失败'), 'error'); return; }
+    SEL.delete(url);
+    await loadImages();
+    toast(r.deleted ? '🗑 已删除文件' : '⚠️ 列表已移除（文件原不存在）',
+          r.deleted ? 'success' : 'info');
+}
+
+async function loadImages() {
+    const r = await api('/api/articles/' + ARTICLE_ID + '/images', {method: 'GET'});
+    IMAGES = (r && r.images) || [];
+    renderImages();
+}
+
+/* ============ 灯箱 ============ */
+function lbOpen(url) {
+    LB_LIST = IMAGES.slice();
+    LB_IDX = Math.max(0, LB_LIST.indexOf(url));
+    lbShow();
+    document.getElementById('lb').style.display = 'flex';
+}
+function lbShow() {
+    if (!LB_LIST.length) return;
+    const u = LB_LIST[LB_IDX];
+    document.getElementById('lb-img').src = u;
+    const dl = document.getElementById('lb-dl');
+    dl.href = u; dl.setAttribute('download', u.split('/').pop());
+    document.getElementById('lb-info').textContent = (LB_IDX + 1) + ' / ' + LB_LIST.length;
+}
+function lbPrev() { if (!LB_LIST.length) return; LB_IDX = (LB_IDX - 1 + LB_LIST.length) % LB_LIST.length; lbShow(); }
+function lbNext() { if (!LB_LIST.length) return; LB_IDX = (LB_IDX + 1) % LB_LIST.length; lbShow(); }
+function lbClose() {
+    document.getElementById('lb').style.display = 'none';
+    document.getElementById('lb-img').src = '';
+}
+document.addEventListener('keydown', function(e) {
+    if (document.getElementById('lb').style.display !== 'flex') return;
+    if (e.key === 'Escape') lbClose();
+    else if (e.key === 'ArrowLeft') lbPrev();
+    else if (e.key === 'ArrowRight') lbNext();
+});
+
+/* ============ 启动 ============ */
+async function loadArt() {
+    const arts = await api('/api/articles');
+    const art = (arts || []).find(a => a.id === ARTICLE_ID);
+    if (art) {
+        document.getElementById('art-title').textContent = art.title || '未命名';
+        document.getElementById('art-meta').textContent =
+            (art.platform || '') + ' · ' + (art.content_type || '') + ' · 推广人 ID: ' + (art.promo_uid || '未设置');
+    } else {
+        document.getElementById('art-title').textContent = '文案不存在';
+    }
+    await Promise.all([loadPlan(), loadImages()]);
+}
+loadArt();
+</script>
+{% endblock %}

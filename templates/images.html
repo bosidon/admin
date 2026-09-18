@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}配图 - 仙宝内容平台{% endblock %}
+{% block page_title %}🖼 配图{% endblock %}
+
+{% block topbar_right %}
+<button class="btn btn-outline" onclick="load()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="font-size:13px;color:#64748b;margin-bottom:14px;">
+        阶段 ② —— 为「已审核 / 已发布」的文案配图（AI 配图方案 → 金句卡 / 场景配图）
+    </div>
+    <div id="copy-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PLATFORM_MAP = {wechat:'公众号', xiaohongshu:'小红书', video_account:'视频号', douyin:'抖音', bilibili:'B站', kuaishou:'快手', podcast:'播客', zhihu:'知乎', toutiao:'头条'};
+const CTYPE_MAP = {article:'图文文章', xhs_note:'小红书笔记', short_video:'短视频脚本', long_video:'长视频脚本', speech:'口播稿', podcast_script:'播客脚本', qa:'问答'};
+
+async function load() {
+    const all = await api('/api/articles');
+    const list = (all || []).filter(a => a.status === 'approved' || a.status === 'published');
+    const el = document.getElementById('copy-list');
+    if (!Array.isArray(list) || !list.length) {
+        el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
+            + '📭 暂无「已审核 / 已发布」的文案 —— 请先到 <a href="/articles" style="color:#7c3aed;">✍️ 文案</a> 生成并审核</div>';
+        return;
+    }
+    el.innerHTML = list.map(a => {
+        let imgs = [];
+        try { imgs = JSON.parse(a.images_json || '[]'); } catch(e) { imgs = []; }
+        const hasImg = imgs.length > 0;
+        return `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:16px;">
+            <div style="font-weight:600;margin-bottom:8px;">${a.title || '未命名'}</div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">
+                ${a.status === 'published'
+                    ? '<span style="background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:8px;font-size:11px;">已发布</span> '
+                    : '<span style="background:#dcfce7;color:#166534;padding:1px 6px;border-radius:8px;font-size:11px;">已审核</span> '}
+                ${PLATFORM_MAP[a.platform] || a.platform || '-'} · ${CTYPE_MAP[a.content_type] || '-'} · ${a.word_count || 0} 字
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-size:12px;padding:3px 8px;border-radius:4px;${hasImg ? 'background:#d1fae5;color:#065f46;' : 'background:#f1f5f9;color:#64748b;'}">
+                    ${hasImg ? '🎨 已配 ' + imgs.length + ' 张' : '⚪ 未配图'}
+                </span>
+                <a href="/illustrate/${a.id}" class="btn btn-primary btn-sm" style="text-decoration:none;">配图</a>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+load();
+</script>
+{% endblock %}

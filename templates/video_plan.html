@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block title %}分镜脚本 - 仙宝内容平台{% endblock %}
+{% block page_title %}✍️ 分镜脚本{% endblock %}
+
+{% block topbar_right %}
+<button class="btn btn-success" onclick="saveAll()">💾 保存</button>
+<button class="btn btn-outline" onclick="location.href='/video'">← 返回</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 id="plan-title">加载中…</h3>
+        <span id="plan-status" class="tag"></span>
+    </div>
+
+    <!-- 原始文案（参考） -->
+    <details style="margin-bottom:18px;">
+        <summary style="cursor:pointer;font-size:13px;color:#64748b;">📄 查看原始文案</summary>
+        <div id="src-content" style="margin-top:10px;padding:14px;background:#f8fafc;border-radius:8px;font-size:13px;line-height:1.8;white-space:pre-wrap;max-height:300px;overflow:auto;"></div>
+    </details>
+
+    <!-- ① 视频脚本 -->
+    <div style="margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <label style="font-weight:600;font-size:14px;">① 视频脚本</label>
+            <button class="btn btn-primary btn-sm" onclick="genScript()">🤖 AI 生成脚本</button>
+        </div>
+        <textarea id="script" rows="10" placeholder="视频开场 → 内容主体 → 行动引导（可手写或 AI 生成）"
+            style="width:100%;padding:12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;line-height:1.7;font-family:inherit;resize:vertical;"></textarea>
+    </div>
+
+    <!-- ② 分镜表 -->
+    <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <label style="font-weight:600;font-size:14px;">② 分镜表（画面 / 台词 / 时长）</label>
+            <div>
+                <button class="btn btn-primary btn-sm" onclick="genStoryboard()">🤖 AI 生成分镜</button>
+                <button class="btn btn-outline btn-sm" onclick="addScene()">＋ 添加镜头</button>
+            </div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead>
+                <tr style="background:#f8fafc;">
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">镜号</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;">画面</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;">台词/字幕</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
+                </tr>
+            </thead>
+            <tbody id="sb-body"></tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PLAN_ID = {{ plan_id }};
+let PLAN = null;
+let SCENES = [];
+
+function renderScenes() {
+    const tb = document.getElementById('sb-body');
+    if (!SCENES.length) {
+        tb.innerHTML = '<tr><td colspan="5" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        return;
+    }
+    tb.innerHTML = SCENES.map((s, i) => `<tr>
+        <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;">${i+1}</td>
+        <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="visual" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.visual||''}</textarea></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="line" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.line||''}</textarea></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
+    </tr>`).join('');
+    tb.querySelectorAll('textarea,input').forEach(el => {
+        el.onchange = function() {
+            const i = +this.dataset.i, f = this.dataset.f;
+            SCENES[i][f] = (f === 'duration') ? (+this.value || 5) : this.value;
+        };
+    });
+}
+
+function addScene() { SCENES.push({visual:'', line:'', duration:5}); renderScenes(); }
+function delScene(i) { SCENES.splice(i,1); renderScenes(); }
+
+async function load() {
+    const d = await api('/api/video-plans/' + PLAN_ID, {method:'GET'});
+    if (d.error) { toast('❌ ' + d.error, 'error'); return; }
+    PLAN = d;
+    document.getElementById('plan-title').textContent = d.title || '未命名视频';
+    document.getElementById('plan-status').textContent = d.status || 'draft';
+    document.getElementById('script').value = d.script || '';
+    try { SCENES = JSON.parse(d.storyboard || '[]'); } catch(e) { SCENES = []; }
+    if (!Array.isArray(SCENES)) SCENES = [];
+    renderScenes();
+    // 加载原始文案
+    const arts = await api('/api/articles');
+    const art = (arts || []).find(a => a.id === d.article_id);
+    if (art) document.getElementById('src-content').textContent = art.content_md || '';
+}
+
+async function saveAll() {
+    const r = await api('/api/video-plans/' + PLAN_ID, {
+        method: 'PUT',
+        body: JSON.stringify({
+            script: document.getElementById('script').value,
+            storyboard: JSON.stringify(SCENES),
+            status: SCENES.length ? 'storyboard_done' : 'script_done'
+        })
+    });
+    if (r.ok) { toast('✅ 已保存', 'success'); load(); }
+    else { toast('❌ ' + (r.error||'保存失败'), 'error'); }
+}
+
+async function genScript() {
+    toast('AI 生成脚本：会把文案转为视频脚本（开发中，可先手动编辑）', 'info');
+}
+
+async function genStoryboard() {
+    if (!document.getElementById('script').value.trim()) { toast('请先生成或填写视频脚本', 'error'); return; }
+    toast('AI 生成分镜：将根据脚本生成分镜表（开发中，可手动添加镜头）', 'info');
+}
+
+load();
+</script>
+{% endblock %}

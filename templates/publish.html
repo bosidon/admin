@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}发布管理{% endblock %}
+{% block page_title %}📤 发布管理{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h3 style="margin-bottom:14px;">📋 已完成内容</h3>
+    <div id="done-list"></div>
+</div>
+
+<div class="card">
+    <h3 style="margin-bottom:14px;">📊 发布记录</h3>
+    <div id="publish-list"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function load() {
+    // 加载已完成内容
+    const recent = await api('/api/recent');
+    const doneItems = recent.filter(r => r.stage === 'done');
+    
+    const doneEl = document.getElementById('done-list');
+    if (doneItems.length === 0) {
+        doneEl.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;">暂无已完成内容</div>';
+    } else {
+        doneEl.innerHTML = doneItems.map(r => `
+            <div class="list-item">
+                <div class="list-item-content">
+                    <div class="list-item-title">${r.title || '未命名'}</div>
+                    <div class="list-item-meta">
+                        <span>📖 ${r.book||'-'}</span>
+                        <span>🎯 ${r.topic||'-'}</span>
+                        <span class="tag tag-green">已完成</span>
+                    </div>
+                </div>
+                <div class="list-item-actions">
+                    <button class="btn btn-primary btn-sm" onclick="publish('${r.uuid}', '${r.title}')">📤 记录发布</button>
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    // 加载发布记录
+    const records = await api('/api/publish/records');
+    const pubEl = document.getElementById('publish-list');
+    if (records.length === 0) {
+        pubEl.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;">暂无发布记录</div>';
+    } else {
+        pubEl.innerHTML = records.map(r => `
+            <div class="list-item">
+                <div class="list-item-content">
+                    <div class="list-item-title">${r.title || '未命名'}</div>
+                    <div class="list-item-meta">
+                        <span>📅 ${r.published_at}</span>
+                        ${r.published_url ? `<a href="${r.published_url}" target="_blank">🔗 查看链接</a>` : ''}
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+}
+
+async function publish(uuid, title) {
+    const url = prompt(`请输入「${title}」的发布链接（可留空）：`);
+    if (url === null) return; // 用户取消
+    
+    const r = await api('/api/publish/record', {
+        method: 'POST',
+        body: JSON.stringify({
+            uuid: uuid,
+            platform: 'wechat',
+            published_url: url || ''
+        })
+    });
+    
+    if (r.ok) {
+        showToast('发布记录已保存', 'success');
+        load();
+    } else {
+        showToast(r.error || '保存失败', 'error');
+    }
+}
+
+load();
+</script>
+{% endblock %}

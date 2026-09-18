@@ -1,88 +1,89 @@
 {% extends "base.html" %}
-
-{% block title %}{{ article.title }} - 公众号文章{% endblock %}
-{% block page_title %}📝 {{ article.title }}{% endblock %}
-
+{% block title %}文章详情 - 公众号{% endblock %}
+{% block page_title %}📝 文章详情{% endblock %}
 {% block topbar_right %}
 <a href="/articles" class="btn btn-outline">← 返回列表</a>
-{% if article.status == 'pending' %}
-    <button class="btn btn-success" onclick="updateStatus('articles', '{{ article.id }}', 'approved')">✅ 通过</button>
-    <button class="btn btn-danger" onclick="updateStatus('articles', '{{ article.id }}', 'rejected')">❌ 拒绝</button>
-{% elif article.status == 'approved' %}
-    <button class="btn btn-primary" onclick="updateStatus('articles', '{{ article.id }}', 'published')">📤 发布</button>
-{% endif %}
+<span id="action-btns"></span>
 {% endblock %}
 
 {% block content %}
-<!-- 文章信息 -->
-<div class="card">
-    <div class="card-header">
-        <h2 class="card-title">📊 文章信息</h2>
-        {{ getStatusTag(article.status) | safe }}
-    </div>
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">📖 书目</div>
-            <div style="font-weight: 600;">{{ article.book }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">🎯 话题</div>
-            <div style="font-weight: 600;">{{ article.topic }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">📐 角度</div>
-            <div style="font-weight: 600;">{{ article.angle }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">🏗️ 结构</div>
-            <div style="font-weight: 600;">{{ article.structure }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">🪝 钩子</div>
-            <div style="font-weight: 600;">{{ article.hook }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">🎨 风格</div>
-            <div style="font-weight: 600;">{{ article.tone }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">📅 生成时间</div>
-            <div style="font-weight: 600;">{{ article.created_at[:16] if article.created_at else '-' }}</div>
-        </div>
-        <div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">🏷️ 标签</div>
-            <div style="font-weight: 600;">{{ article.tags }}</div>
-        </div>
-    </div>
-</div>
-
-<!-- 摘要 -->
-{% if article.summary %}
-<div class="card" style="background: #fffbeb; border: 1px solid #fef3c7;">
-    <h3 style="font-size: 14px; color: #92400e; margin-bottom: 8px;">📋 摘要（{{ article.summary[:120] | length }}/120字）</h3>
-    <p style="font-size: 14px; color: #78350f; line-height: 1.6;">{{ article.summary[:120] }}</p>
-</div>
-{% endif %}
-
-<!-- 文章内容 -->
-<div class="card">
-    <div class="card-header">
-        <h2 class="card-title">📄 文章内容</h2>
-        <button class="btn btn-outline btn-sm" onclick="copyContent()">📋 复制</button>
-    </div>
-    <div id="article-content" style="line-height: 1.8; font-size: 15px;">
-        {{ content | safe }}
-    </div>
+<div id="article-info" class="card">
+    <div style="text-align:center;padding:40px;color:var(--text2);">加载中...</div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function copyContent() {
-    const content = document.getElementById('article-content').innerText;
-    navigator.clipboard.writeText(content).then(() => {
-        showToast('内容已复制到剪贴板', 'success');
-    });
+const ARTICLE_ID = {{ article_id }};
+const PLATFORM_MAP = {wechat:'公众号',xiaohongshu:'小红书',video_account:'视频号',douyin:'抖音',bilibili:'B站'};
+const TYPE_MAP = {article:'图文文章',xhs_note:'小红书笔记',short_video:'短视频脚本',long_video:'长视频脚本',speech:'口播稿'};
+
+function formatCST(utcStr) {
+    if (!utcStr) return '-';
+    const d = new Date(utcStr + 'Z');
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
 }
+
+async function load() {
+    const a = await api(`/api/articles/${ARTICLE_ID}`);
+    if (a.error) {
+        document.getElementById('article-info').innerHTML = '<div class="empty-state"><div class="emoji">😢</div><h3>文章不存在</h3></div>';
+        return;
+    }
+    
+    // 操作按钮
+    const btns = document.getElementById('action-btns');
+    if (a.status === 'pending') {
+        btns.innerHTML = `
+            <button class="btn btn-success btn-sm" onclick="updateStatus('articles', ${a.id}, 'approved')">✅ 通过</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteArticle(${a.id})">❌ 删除</button>`;
+    } else if (a.status === 'approved') {
+        btns.innerHTML = `<button class="btn btn-primary btn-sm" onclick="updateStatus('articles', ${a.id}, 'published')">📤 发布</button>`;
+    }
+    
+    // 信息卡片
+    const info = document.getElementById('article-info');
+    info.innerHTML = `
+        <div class="card-header">
+            <h2 class="card-title">📊 文章信息</h2>
+            ${getStatusTag(a.status)}
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 16px;">
+            <div><div style="font-size:12px;color:var(--text2);">📱 平台</div><div style="font-weight:600;">${PLATFORM_MAP[a.platform]||a.platform||'-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">📋 类型</div><div style="font-weight:600;">${TYPE_MAP[a.content_type]||a.content_type||'-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">📖 书目</div><div style="font-weight:600;">${a.book ? '<a href="https://lingxiu.xianbao.online/search?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;border-bottom:1px dashed var(--border);">'+a.book+'</a>' : '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">🎯 话题</div><div style="font-weight:600;">${a.topic || '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">📐 角度</div><div style="font-weight:600;">${a.angle || '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">🏗️ 结构</div><div style="font-weight:600;">${a.structure || '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">🪝 钩子</div><div style="font-weight:600;">${a.hook || '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">🎨 风格</div><div style="font-weight:600;">${a.tone || '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">📅 生成时间</div><div style="font-weight:600;">${formatCST(a.created_at)}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">🏷️ 标签</div><div style="font-weight:600;">${a.tags || '-'}</div></div>
+        </div>
+        ${a.summary ? `<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:12px;margin-bottom:16px;">
+            <div style="font-size:12px;color:#92400e;margin-bottom:4px;">📋 摘要（${(a.summary||'').length}/120字）</div>
+            <p style="font-size:14px;color:#78350f;line-height:1.6;">${a.summary}</p>
+        </div>` : ''}
+        <div class="card-header" style="margin-top:16px;">
+            <h2 class="card-title">📄 文章内容</h2>
+            <button class="btn btn-outline btn-sm" onclick="copyContent()">📋 复制</button>
+        </div>
+        <div id="article-content" style="line-height:1.8;font-size:15px;white-space:pre-wrap;">${a.content_md || a.content_html || '（无内容）'}</div>
+    `;
+}
+
+function copyContent() {
+    const text = document.getElementById('article-content').innerText;
+    navigator.clipboard.writeText(text).then(() => showToast('已复制', 'success'));
+}
+
+async function deleteArticle(id) {
+    if (!confirm('确定删除这篇内容？')) return;
+    const r = await api('/api/articles/' + id, {method:'DELETE'});
+    if (r.ok) { showToast('已删除', 'success'); setTimeout(() => location.href='/articles', 500); }
+    else { showToast('删除失败', 'error'); }
+}
+
+load();
 </script>
 {% endblock %}

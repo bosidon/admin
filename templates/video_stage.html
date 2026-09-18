@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}视频制作 - 仙宝内容平台{% endblock %}
+{% block page_title %}🎬 视频制作{% endblock %}
+
+{% block topbar_right %}
+<button class="btn btn-outline" onclick="load()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex;gap:8px;margin-bottom:18px;">
+    <button id="tab-script" class="btn btn-primary" onclick="switchTab('script')">✍️ 分镜脚本</button>
+    <button id="tab-video" class="btn btn-outline" onclick="switchTab('video')">🎞️ 分镜视频</button>
+</div>
+
+<div class="card">
+    <div id="tab-desc" style="font-size:13px;color:#64748b;margin-bottom:14px;"></div>
+    <div id="list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PLATFORM_MAP = {wechat:'公众号', xiaohongshu:'小红书', video_account:'视频号', douyin:'抖音', bilibili:'B站', kuaishou:'快手', podcast:'播客', zhihu:'知乎', toutiao:'头条'};
+const CTYPE_MAP = {article:'图文文章', xhs_note:'小红书笔记', short_video:'短视频脚本', long_video:'长视频脚本', speech:'口播稿', podcast_script:'播客脚本', qa:'问答'};
+let CUR_TAB = 'script';
+let ARTICLES = [];
+let PLANS = [];
+
+function switchTab(t) {
+    CUR_TAB = t;
+    document.getElementById('tab-script').className = 'btn ' + (t==='script' ? 'btn-primary' : 'btn-outline');
+    document.getElementById('tab-video').className  = 'btn ' + (t==='video'  ? 'btn-primary' : 'btn-outline');
+    document.getElementById('tab-desc').textContent = t==='script'
+        ? '阶段 ③-1 —— 为「已配图」的文案生成视频脚本 + 分镜表（画面 / 台词 / 时长）'
+        : '阶段 ③-2 —— 基于分镜生成素材、合成并导出视频';
+    render();
+}
+
+function render() {
+    const el = document.getElementById('list');
+    if (CUR_TAB === 'script') {
+        // 已配图的文案（images_json 非空）
+        const illustrated = ARTICLES.filter(a => {
+            let imgs = [];
+            try { imgs = JSON.parse(a.images_json || '[]'); } catch(e) { imgs = []; }
+            return imgs.length > 0;
+        });
+        if (!illustrated.length) {
+            el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
+                + '📭 暂无「已配图」的文案 —— 请先到 <a href="/images" style="color:#7c3aed;">🖼 配图</a> 完成配图</div>';
+            return;
+        }
+        el.innerHTML = illustrated.map(a => {
+            let imgs = [];
+            try { imgs = JSON.parse(a.images_json || '[]'); } catch(e) { imgs = []; }
+            const plan = PLANS.find(p => p.article_id === a.id);
+            return `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:16px;">
+                <div style="font-weight:600;margin-bottom:8px;">${a.title || '未命名'}</div>
+                <div style="font-size:12px;color:#64748b;margin-bottom:10px;">
+                    ${PLATFORM_MAP[a.platform]||'-'} · ${CTYPE_MAP[a.content_type]||'-'} · 🎨 ${imgs.length} 张配图
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <span style="font-size:12px;padding:3px 8px;border-radius:4px;${plan ? 'background:#d1fae5;color:#065f46;' : 'background:#f1f5f9;color:#64748b;'}">
+                        ${plan ? '📝 已有脚本' : '⚪ 未生成'}
+                    </span>
+                    <button class="btn btn-primary btn-sm" onclick="openPlan(${a.id}, '${(a.title||'').replace(/'/g, '')}')">
+                        ${plan ? '继续编辑' : '生成分镜脚本'}
+                    </button>
+                </div>
+            </div>`;
+        }).join('');
+    } else {
+        // 已有分镜的 → 素材/渲染
+        const ready = PLANS.filter(p => p.status === 'storyboard_done' || p.status === 'rendering' || p.status === 'done');
+        if (!ready.length) {
+            el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
+                + '📭 暂无已生成分镜的视频 —— 请先完成「分镜脚本」</div>';
+            return;
+        }
+        el.innerHTML = ready.map(p => `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:16px;">
+            <div style="font-weight:600;margin-bottom:8px;">${p.article_title || p.title || '未命名'}</div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">状态：${p.status}</div>
+            <button class="btn btn-outline btn-sm" onclick="toast('分镜视频（素材生成 + 渲染导出）开发中', 'info')">制作视频</button>
+        </div>`).join('');
+    }
+}
+
+async function openPlan(articleId, title) {
+    const r = await api('/api/video-plans', {method:'POST', body: JSON.stringify({article_id: articleId, title: title})});
+    if (r.ok) { location.href = '/video-plan/' + r.id; }
+    else { toast('❌ ' + (r.error || '创建失败'), 'error'); }
+}
+
+async function load() {
+    ARTICLES = await api('/api/articles');
+    if (!Array.isArray(ARTICLES)) ARTICLES = [];
+    PLANS = await api('/api/video-plans');
+    if (!Array.isArray(PLANS)) PLANS = [];
+    switchTab(CUR_TAB);
+}
+
+load();
+</script>
+{% endblock %}

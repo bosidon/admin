@@ -1,82 +1,172 @@
 {% extends "base.html" %}
-
-{% block title %}设置 - 自媒体管理后台{% endblock %}
+{% block title %}设置 - 视频创作平台{% endblock %}
 {% block page_title %}⚙️ 设置{% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="card-header">
-        <h2 class="card-title">🔧 服务器配置</h2>
+<div class="card" style="max-width:600px;">
+    <h3 style="margin-bottom:20px;">API配置</h3>
+    
+    <div class="form-group">
+        <label class="form-label">接口地址</label>
+        <input type="text" class="form-input" id="llm-base-url" placeholder="https://api.deepseek.com/v1/chat/completions">
     </div>
-    <form id="settings-form">
-        <div class="form-group">
-            <label class="form-label">云服务器地址</label>
-            <input type="text" class="form-input" name="cloud_host" value="{{ config.cloud_host }}" placeholder="ubuntu@124.222.139.97">
-        </div>
-        <div class="form-group">
-            <label class="form-label">飞书 App ID</label>
-            <input type="text" class="form-input" name="feishu_app_id" value="{{ config.feishu_app_id }}" placeholder="cli_xxxxx">
-        </div>
-        <div class="form-group">
-            <label class="form-label">DeepSeek API Key</label>
-            <input type="password" class="form-input" name="deepseek_api_key" value="{{ config.deepseek_api_key }}" placeholder="sk-xxxxx">
-        </div>
-        <div class="form-group">
-            <label class="form-label">百炼 API Key</label>
-            <input type="password" class="form-input" name="bailian_api_key" value="{{ config.bailian_api_key }}" placeholder="sk-xxxxx">
-        </div>
-    </form>
+    
+    <div class="form-group">
+        <label class="form-label">模型名</label>
+        <input type="text" class="form-input" id="llm-model" placeholder="deepseek-chat">
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">LLM API Key</label>
+        <input type="password" class="form-input" id="llm-api-key" placeholder="sk-...">
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">图像生成 API Key（可灵/百炼等）</label>
+        <input type="password" class="form-input" id="image-key" placeholder="API Key">
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">TTS API Key（语音合成）</label>
+        <input type="password" class="form-input" id="tts-key" placeholder="API Key">
+    </div>
+    
+    <button class="btn btn-primary" onclick="saveSettings()">保存配置</button>
 </div>
 
-<div class="card">
-    <div class="card-header">
-        <h2 class="card-title">⏰ 定时任务</h2>
-    </div>
+<div class="card" style="max-width:600px;">
+    <h3 style="margin-bottom:20px;">🎨 AI 生图（AutoDL ComfyUI）</h3>
+
     <div class="form-group">
-        <label class="form-label">
-            <input type="checkbox" name="auto_generate" {% if config.auto_generate %}checked{% endif %}>
-            启用自动定时生成
+        <label class="form-label">应用实例 UUID（pro- 开头）</label>
+        <input type="text" class="form-input" id="comfy-instance-uuid" placeholder="pro-xxxxxxxxxxxx">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">AutoDL 开发者 Token（开关机用）</label>
+        <input type="password" class="form-input" id="comfy-api-token" placeholder="粘贴开发者Token">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">ComfyUI 地址（留空则自动从实例详情取）</label>
+        <input type="text" class="form-input" id="comfy-base-url" placeholder="https://xxx.seetacloud.com:8443">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">绘图模型（unet）</label>
+        <input type="text" class="form-input" id="comfy-unet" placeholder="qwen_image_fp8_e4m3fn.safetensors">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="comfy-auto-shutdown" style="width:auto;"> 任务结束后自动关机（省钱）
         </label>
     </div>
-    <div class="form-group">
-        <label class="form-label">生成频率</label>
-        <select class="form-input" name="generate_schedule">
-            <option value="每周二/五 09:00" {% if config.generate_schedule == '每周二/五 09:00' %}selected{% endif %}>每周二/五 09:00</option>
-            <option value="每天 09:00" {% if config.generate_schedule == '每天 09:00' %}selected{% endif %}>每天 09:00</option>
-            <option value="每周一/三/五 09:00" {% if config.generate_schedule == '每周一/三/五 09:00' %}selected{% endif %}>每周一/三/五 09:00</option>
-        </select>
+
+    <div style="display:flex;gap:10px;align-items:center;">
+        <button class="btn btn-primary" onclick="saveComfy()">保存生图配置</button>
+        <button class="btn btn-outline" onclick="checkInstance()">查看实例状态</button>
+        <span id="comfy-status" style="font-size:12px;color:#64748b;"></span>
     </div>
 </div>
 
-<div style="display: flex; gap: 12px; justify-content: flex-end;">
-    <button class="btn btn-primary" onclick="saveSettings()">💾 保存设置</button>
+<div class="card" style="max-width:600px;">
+    <h3 style="margin-bottom:20px;">默认配置</h3>
+    
+    <div class="form-group">
+        <label class="form-label">默认视频类型</label>
+        <select class="form-select" id="default-type">
+            <option value="mixed">混合</option>
+            <option value="narration_visual">口播+画面</option>
+            <option value="ai_visual">纯AI画面</option>
+        </select>
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">默认视觉风格</label>
+        <select class="form-select" id="default-style">
+            <option value="realistic">写实风</option>
+            <option value="illustration">插画风</option>
+            <option value="anime">动漫风</option>
+            <option value="3d">3D风</option>
+            <option value="artistic">意境风</option>
+        </select>
+    </div>
+    
+    <div class="form-group">
+        <label class="form-label">默认目标平台</label>
+        <select class="form-select" id="default-platform">
+            <option value="video_account">视频号</option>
+            <option value="douyin">抖音</option>
+            <option value="bilibili">B站</option>
+            <option value="xiaohongshu">小红书</option>
+        </select>
+    </div>
+    
+    <button class="btn btn-primary" onclick="saveDefaults()">保存默认配置</button>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function saveSettings() {
-    const form = document.getElementById('settings-form');
+async function saveComfy() {
     const data = {
-        cloud_host: form.cloud_host.value,
-        feishu_app_id: form.feishu_app_id.value,
-        deepseek_api_key: form.deepseek_api_key.value,
-        bailian_api_key: form.bailian_api_key.value,
-        auto_generate: form.auto_generate.checked,
-        generate_schedule: form.generate_schedule.value
+        comfy_instance_uuid: document.getElementById('comfy-instance-uuid').value.trim(),
+        comfy_api_token: document.getElementById('comfy-api-token').value.trim(),
+        comfy_base_url: document.getElementById('comfy-base-url').value.trim(),
+        comfy_unet: document.getElementById('comfy-unet').value.trim(),
+        comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0'
     };
-    
-    fetch('/api/settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(data)
-    }).then(r => r.json()).then(result => {
-        if (result.ok) {
-            showToast('设置已保存', 'success');
-        } else {
-            showToast('保存失败', 'error');
-        }
-    });
+    await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
+    toast('生图配置已保存');
 }
+
+async function checkInstance() {
+    const el = document.getElementById('comfy-status');
+    el.textContent = '查询中…';
+    const r = await api('/api/illustrate/instance');
+    el.textContent = r.ok ? ('实例状态：' + r.status) : ('查询失败：' + (r.msg || '未知'));
+}
+
+async function loadSettings() {
+    const settings = await api('/api/settings');
+    document.getElementById('llm-base-url').value = settings['llm_base_url'] || 'https://api.deepseek.com/v1/chat/completions';
+    document.getElementById('llm-model').value = settings['llm_model'] || 'deepseek-chat';
+    if (settings['llm_api_key']) document.getElementById('llm-api-key').value = settings['llm_api_key'];
+    document.getElementById('comfy-instance-uuid').value = settings['comfy_instance_uuid'] || '';
+    document.getElementById('comfy-api-token').value = settings['comfy_api_token'] || '';
+    document.getElementById('comfy-base-url').value = settings['comfy_base_url'] || '';
+    document.getElementById('comfy-unet').value = settings['comfy_unet'] || 'qwen_image_fp8_e4m3fn.safetensors';
+    document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
+    if (settings['image_key']) document.getElementById('image-key').value = settings['image_key'];
+    if (settings['tts_key']) document.getElementById('tts-key').value = settings['tts_key'];
+    if (settings['default_type']) document.getElementById('default-type').value = settings['default_type'];
+    if (settings['default_style']) document.getElementById('default-style').value = settings['default_style'];
+    if (settings['default_platform']) document.getElementById('default-platform').value = settings['default_platform'];
+}
+
+async function saveSettings() {
+    const data = {
+        llm_base_url: document.getElementById('llm-base-url').value,
+        llm_model: document.getElementById('llm-model').value,
+        llm_api_key: document.getElementById('llm-api-key').value,
+        image_key: document.getElementById('image-key').value,
+        tts_key: document.getElementById('tts-key').value
+    };
+    await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
+    toast('配置保存成功');
+}
+
+async function saveDefaults() {
+    const data = {
+        default_type: document.getElementById('default-type').value,
+        default_style: document.getElementById('default-style').value,
+        default_platform: document.getElementById('default-platform').value
+    };
+    await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
+    toast('默认配置保存成功');
+}
+
+loadSettings();
 </script>
 {% endblock %}

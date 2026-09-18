@@ -41,7 +41,8 @@ LLM_DEFAULTS = {
 }
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
-                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, NEG, rewrite_plan_item)
+                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, NEG, rewrite_plan_item,
+                     load_plan_prompt, save_plan_prompt)
 
 # ============================================================
 # 工具函数
@@ -63,7 +64,7 @@ def get_llm_config():
     try:
         rows = get_db().execute(
             "SELECT key, value FROM settings WHERE key IN "
-            "('llm_base_url','llm_model','llm_api_key','llm_plan_prompt')").fetchall()
+            "('llm_base_url','llm_model','llm_api_key')").fetchall()
         for r in rows:
             if r["value"]:
                 cfg[r["key"]] = r["value"]
@@ -253,7 +254,7 @@ def library():
 @app.route('/settings')
 def settings_page():
     return render_template("settings.html",
-                           default_plan_prompt=PLAN_PROMPT_DEFAULT, default_neg=NEG)
+                           default_neg=NEG)
 
 # ============================================================
 # 页面 - 公众号文章
@@ -735,6 +736,24 @@ def api_get_article_images(article_id):
     except Exception:
         imgs = []
     return jsonify({"ok": True, "images": imgs})
+
+
+@app.route('/api/prompts/plan', methods=['GET'])
+def api_get_plan_prompt():
+    """配图 Agent 的 System Prompt（文件 prompts/image_agent.md）"""
+    return jsonify({"ok": True, "content": load_plan_prompt(),
+                    "path": "prompts/image_agent.md"})
+
+
+@app.route('/api/prompts/plan', methods=['POST'])
+def api_save_plan_prompt():
+    """保存 System Prompt（写文件）· body {content} 或 {reset:true} 恢复出厂默认"""
+    data = request.json or {}
+    ok, err = save_plan_prompt(PLAN_PROMPT_DEFAULT) if data.get('reset') \
+        else save_plan_prompt(data.get('content') or '')
+    if not ok:
+        return jsonify({"error": err}), 400
+    return jsonify({"ok": True, "content": load_plan_prompt()})
 
 
 @app.route('/api/articles/<int:article_id>/illustrations/logs')

@@ -149,7 +149,11 @@ function renderPlan() {
             <input type="text" data-i="${i}" data-f="text" value="${(q.text||'').replace(/"/g,'&quot;')}"
                 placeholder="金句（10-28 字）"
                 style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">背景提示词（英文 · 只画背景不出现文字）</div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">中文画面描述（给你看 · 背景画的是什么）</div>
+            <input type="text" data-i="${i}" data-f="cn" value="${(q.cn||'').replace(/"/g,'&quot;')}"
+                placeholder="中文画面描述"
+                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;margin-bottom:8px;">
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">背景提示词（英文 · 提交给 ComfyUI · 只画背景不出现文字）</div>
             <textarea rows="3" data-i="${i}" data-f="bg"
                 style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${q.bg||''}</textarea>
         </div>`).join('');
@@ -234,7 +238,8 @@ async function rewriteItem(kind, i) {
 
 async function loadPlan() {
     const r = await api('/api/articles/' + ARTICLE_ID + '/image-script', {method: 'GET'});
-    if (r && r.plan) PLAN = {style: r.plan.style || '', quotes: r.plan.quotes || [], scenes: r.plan.scenes || []};
+    if (r && r.plan) PLAN = {style: r.plan.style || '', quotes: r.plan.quotes || [],
+                             scenes: r.plan.scenes || [], note: r.plan.note || {}};
     document.getElementById('plan-style').value = PLAN.style || 'purple';
     renderPlan();
 }

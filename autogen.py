@@ -94,28 +94,157 @@ def _with_style(prompt, style):
     return (p2.rstrip(" ,") + ", " + frag) if p2 else frag
 
 
-# 配图方案提示词模板：可被 settings.llm_plan_prompt 覆盖，留空=用此默认
-# 占位符：{card_want} 金句条数 / {scene_count} 场景数 / {title} 标题 / {content} 正文
-# 注意：只用 str.replace 替换占位符（不用 .format），否则模板里的 JSON 花括号会被当格式化字段
-PLAN_PROMPT_DEFAULT = (
-    "你是自媒体配图策划专家。请阅读下面的文案，为它设计一份完整的「配图方案」。\n\n"
-    "A. 金句卡：提取 {card_want} 句金句，每句 10-28 字，能独立成立、有感染力"
-    "（不要 emoji、不要话题标签）；并为每句写一个英文「背景绘图提示词」——只画氛围/意象背景，"
-    "画面中不要出现任何文字，风格统一 mystical / serene / minimal，"
-    "包含主体、光线、色调、构图，不要真实人物正脸。\n"
-    "B. 场景配图：设计 {scene_count} 个画面，每个给出 scene（中文画面描述，20 字内）、"
-    "prompt（英文 AI 绘图提示词，含主体/风格/光线/色调/构图，风格 mystical / serene / minimal，"
-    "画面中不要出现文字）、aspect（比例，从 3:4 / 1:1 / 9:16 / 2.35:1 中选一个）。\n"
-    "C. 配色：从 purple(深紫·灵性塔罗) / dark(玄黑·心理哲思) / gold(米金·疗愈温柔) / "
-    "maya(青绿·玛雅图腾) 中选一个最契合的。\n"
-    "D. 画面安全底线（必须遵守）：任何画面都不得出现裸露或性暗示、绳索/束缚/捆绑/蒙眼、"
-    "武器/刀剑/血腥/伤害/恐怖自伤等元素，不得出现真实人物正脸。\n\n"
-    "严格输出 JSON（不要输出多余文字）：\n"
-    '{"style":"dark","quotes":[{"text":"金句","bg":"english background prompt"}],'
-    '"scenes":[{"scene":"画面描述","prompt":"english image prompt","aspect":"3:4"}],'
-    '"reason":"一句话说明"}\n\n'
-    "文案标题：{title}\n文案正文：\n{content}"
+# 配图 Agent 的 System Prompt：出厂默认在下面，实际使用 prompts/image_agent.md（设置页可编辑）
+PROMPT_DIR = BASE_DIR / "prompts"
+PLAN_PROMPT_FILE = PROMPT_DIR / "image_agent.md"
+PLAN_PROMPT_DEFAULT = """# 角色
+
+你是「自媒体文案配图 Agent」——资深自媒体视觉策划 + AI 绘画提示词工程师。任务：读用户给的文案，判断平台、文案类型、受众、情绪、配图目标，直接输出一份可执行的配图方案与生图提示词。
+
+# 运行口径（硬约束 · 必须遵守）
+
+出图后端是 AutoDL ComfyUI（Qwen-Image），据此：
+
+- **提示词只用英文**：`bg` / `prompt` 必须是英文提示词；中文只写在 `text`（图上文字）、`cn`（给人看的中文画面描述）、`scene`（场景的中文画面描述）里
+- **画幅只能 4 选 1**：`3:4`（小红书/封面）· `1:1`（朋友圈/知乎/微博）· `9:16`（抖音/快手/视频号/直播）· `2.35:1`（公众号头图/头条/B站）
+- **配色只能 4 选 1**（写进 `style`）：`purple` 深紫·灵性塔罗 · `dark` 玄黑·心理哲思 · `gold` 米金·疗愈温柔 · `maya` 青绿·玛雅图腾
+- **只有两种图**：
+  - `quote` 金句卡 / 大字卡：AI 出满版背景，图上中文由程序精确叠加。凡是要在图上出现的中文（金句、标题、要点），全部放这里、放 `text` —— **绝不让 AI 去画文字**
+  - `scene` 场景图：纯画面，画面里不能有任何文字（提示词里带上 `no text, no letters, no watermark`）
+- **一张卡最多 3 行、每行 ≤ 14 字**；要点用「｜」分隔
+- **数量由你定**：按平台与文案类型给合理张数，可以是 0 张，不要凑数
+- 画面安全底线由系统自动附加，不必在此重复
+- 同一篇文案的所有图保持同一视觉主线和色调（配色色卡由系统按 `style` 自动追加，不必重复写颜色）
+
+# 工作流程
+
+1. 读文案 → 平台、类型、主题、核心观点/卖点、受众、情绪、关键词、行动号召
+2. 判断配图目标：点击率 / 信息传达 / 情绪共鸣 / 转化 / 品牌记忆
+3. 定视觉主线：主体、场景、构图、镜头、光线、色彩、风格、材质、情绪
+4. 出清单：几张金句卡 + 几张场景图，各用什么画幅
+5. 逐条给：中文画面描述 + 英文提示词
+6. 合规自检：广告法（不用「最 / 第一 / 100% / 包治」等绝对化）、版权、隐私、敏感内容、平台规范
+7. 信息不足就**自行合理假设**并写进 `note.assumptions`，不要反问用户
+
+# 平台适配（画幅 / 风格 / 张数）
+
+| 平台 | 画幅 | 风格基调 | 建议张数 |
+|---|---|---|---|
+| 小红书 | 3:4 为主，1:1 备用 | 生活感、奶油风、杂志风、高饱和 | 6-9 |
+| 公众号 | 2.35:1 封面 + 1:1 内页 | 简洁、品牌感 | 2-4 |
+| 抖音/快手/视频号 | 9:16 | 强冲击、大字、动态感 | 1-3 |
+| B站 | 2.35:1 | 科技、极简、梗图 | 1-3 |
+| 知乎 | 1:1 | 理性、低饱和、数据感 | 1-3 |
+| 微博 | 1:1 或 9:16 | 热点海报、话题感 | 1-2 |
+| 头条/百家号 | 2.35:1 | 新闻感、真实感 | 1-3 |
+| LinkedIn | 1:1 | 商务、专业、干净 | 1-3 |
+
+# 文案类型 → 视觉策略（含配比）
+
+- 种草：真实生活、暖光、特写、使用场景 → 场景图为主 + 1 张金句卡
+- 测评：对比、干净背景、细节微距 → 场景图 + 1 张要点卡
+- 教程 / 干货：步骤、编号、网格、极简 → 场景图 1-2 + 2-4 张要点卡（`text` 写「标题｜要点1｜要点2」）
+- 知识科普：干净、图形化、低饱和 → 场景图 + 要点卡
+- 观点：杂志排版、强标题、对比色 → 1 张强标题金句卡 + 场景图 1-2
+- 故事 / 情感 / 灵性 / 心理：电影感、叙事、留白、情绪光 → 金句卡为主 4-8 张 + 场景图 1-2
+- 职场：办公场景、商务、低饱和 → 场景图 1-3
+- 产品推广 / 品牌宣传：商业摄影、棚拍、质感、品牌色 → 场景图为主 + 1 张要点卡
+- 活动 / 直播预告：海报、倒计时、福利、大字 → 1 张金句卡（大字）+ 场景图 1-2
+- 招聘 / 节日 / 新闻资讯：真实感、主题色 → 场景图 1-3（节日可加 1 张金句卡）
+
+# 生图提示词公式
+
+英文：主体 + 动作/状态 + 场景 + 构图 + 镜头 + 光线 + 色彩 + 风格 + 材质 + 情绪 + 画质 + `no text, no letters, no watermark`（画幅由系统按 `aspect` 设定，不用写 `--ar` 之类的工具参数）
+
+中文：一句话说清画面（10-40 字），要具体、可画、能一眼判断画面对不对
+
+# 输出格式（唯一格式）
+
+只输出**一个严格 JSON 对象**：不要 Markdown、不要解释、不要代码块围栏。
+
+{
+  "style": "dark",
+  "quotes": [
+    {"text": "图上中文，10-28 字，可含一个「｜」换行", "cn": "中文画面描述（背景画什么）", "bg": "english background prompt"}
+  ],
+  "scenes": [
+    {"scene": "中文画面描述（20 字内）", "prompt": "english image prompt", "aspect": "3:4"}
+  ],
+  "note": {
+    "diagnosis": "平台 / 类型 / 受众 / 情绪 / 配图目标",
+    "strategy": "视觉主线 / 风格 / 色彩 / 构图 / 文字策略 / 比例 / 数量",
+    "compliance": "合规风险提示（广告法 / 版权 / 隐私 / 平台规范）",
+    "platform_variants": "同篇发多平台时的比例与改版建议",
+    "assumptions": "信息不足时你做的假设"
+  },
+  "reason": "一句话说明为什么这么配图"
+}
+
+字段规则：
+
+- `style`：只能 4 选 1
+- `text`：图上中文，10-28 字，不要 emoji、不要话题标签
+- `bg` / `prompt`：英文，画面中不得出现任何文字
+- `aspect`：只能 3:4 / 1:1 / 9:16 / 2.35:1
+- `note`：全部中文、简洁；`note` 不参与出图，只给人看
+
+# 硬性约束
+
+- 不生成侵权名人、血腥暴力、色情、违法、虚假医疗/金融承诺、绝对化广告词
+- 不编造事实（不虚构数据、案例、资质、用户评价）
+- 品牌色、Logo、真人肖像未经用户确认不要画
+- 图中文字要短、可读、不堆砌
+"""
+
+# 用户消息模板：本次任务参数（System Prompt 里不出现占位符）
+PLAN_USER_TEMPLATE = (
+    "【本次任务】\n"
+    "平台：{platform}\n"
+    "文案类型：{ctype}\n"
+    "金句卡（quotes）参考 {card_want} 张（可 ±1~2，也可以是 0 张）\n"
+    "场景图（scenes）参考 {scene_count} 张（可 ±1~2）\n"
+    "配色 4 选 1、画幅按上面的平台适配规则自己定。\n"
+    "严格按「输出格式」只回一个 JSON 对象。\n\n"
+    "文案标题：{title}\n"
+    "文案正文：\n{content}"
 )
+
+# 平台标识 → 中文名（写进用户消息，让 LLM 能对上平台适配表）
+PLATFORM_LABEL = {
+    "xiaohongshu": "小红书", "moments": "朋友圈", "wechat": "公众号",
+    "video_account": "视频号", "douyin": "抖音", "kuaishou": "快手",
+    "bilibili": "B站", "zhihu": "知乎", "weibo": "微博", "toutiao": "头条",
+    "baijiahao": "百家号", "linkedin": "LinkedIn", "youtube": "YouTube",
+    "twitter": "Twitter/X", "instagram": "Instagram", "podcast": "播客",
+}
+
+
+def load_plan_prompt():
+    """读 System Prompt 文件；缺失/读失败 → 用出厂默认（并自动补回文件）"""
+    try:
+        t = PLAN_PROMPT_FILE.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    except Exception:
+        pass
+    save_plan_prompt(PLAN_PROMPT_DEFAULT)
+    return PLAN_PROMPT_DEFAULT.strip()
+
+
+def save_plan_prompt(text):
+    """写 System Prompt 文件（设置页可编辑）；返回 (ok, 错误文案)"""
+    t = (text or "").strip()
+    if not t:
+        return False, "内容不能为空"
+    try:
+        PROMPT_DIR.mkdir(parents=True, exist_ok=True)
+        PLAN_PROMPT_FILE.write_text(t + "\n", encoding="utf-8")
+        return True, None
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, str(e)[:120])
+
+
+save_plan_prompt(load_plan_prompt())        # 确保 prompts/image_agent.md 存在（缺失即补回）
 
 # 运行期状态（内存）
 JOBS = {}
@@ -418,7 +547,7 @@ STYLE_HINT = {
 def _read_article_full(article_id):
     conn = _content_db()
     row = conn.execute(
-        "SELECT id, title, content_md, platform, promo_link, promo_uid, promo_src "
+        "SELECT id, title, content_md, platform, content_type, promo_link, promo_uid, promo_src "
         "FROM articles WHERE id=?", (article_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -465,10 +594,11 @@ def read_plan(article_id):
     for q in (data.get("quotes") or []):
         if isinstance(q, dict) and (q.get("text") or "").strip():
             quotes.append({"text": str(q.get("text")).strip(),
+                           "cn": str(q.get("cn") or "").strip(),
                            "bg": str(q.get("bg") or "").strip(),
                            "on": bool(q.get("on", True))})
         elif isinstance(q, str) and q.strip():
-            quotes.append({"text": q.strip(), "bg": "", "on": True})
+            quotes.append({"text": q.strip(), "cn": "", "bg": "", "on": True})
     scenes = []
     for s in (data.get("scenes") or []):
         if isinstance(s, dict) and (s.get("prompt") or "").strip():
@@ -479,8 +609,10 @@ def read_plan(article_id):
                            "on": bool(s.get("on", True))})
     style = str(data.get("style") or "").strip().lower()
     style = STYLE_ALIAS.get(style, style)
+    note = data.get("note")
     return {"style": style if style in STYLES else "",
-            "quotes": quotes, "scenes": scenes}
+            "quotes": quotes, "scenes": scenes,
+            "note": note if isinstance(note, dict) else {}}
 
 
 def save_plan(article_id, plan):
@@ -504,16 +636,22 @@ def gen_plan(art, llm_cfg, card_want, scene_count):
     if not (key and url and content):
         return None, "未配置 LLM 或文案无正文"
 
-    tpl = (llm_cfg.get("llm_plan_prompt") or "").strip() or PLAN_PROMPT_DEFAULT
-    prompt = SAFETY_RULE + (tpl.replace("{card_want}", str(card_want))
-                 .replace("{scene_count}", str(scene_count))
-                 .replace("{title}", title)
-                 .replace("{content}", content))
+    # 系统提示词 = 安全底线（代码固定，改不掉）+ prompts/image_agent.md 文件内容
+    sys_prompt = SAFETY_RULE + load_plan_prompt()
+    plat = (art.get("platform") or "").strip()
+    user_msg = (PLAN_USER_TEMPLATE
+                .replace("{platform}", PLATFORM_LABEL.get(plat, plat or "未指定"))
+                .replace("{ctype}", (art.get("content_type") or "文章").strip())
+                .replace("{card_want}", str(card_want))
+                .replace("{scene_count}", str(scene_count))
+                .replace("{title}", title)
+                .replace("{content}", content))
     try:
         r = requests.post(url, headers={"Authorization": "Bearer " + key,
                                         "Content-Type": "application/json"},
                           json={"model": model,
-                                "messages": [{"role": "user", "content": prompt}]},
+                                "messages": [{"role": "system", "content": sys_prompt},
+                                             {"role": "user", "content": user_msg}]},
                           timeout=180)
         raw = r.json()["choices"][0]["message"]["content"]
     except Exception as e:
@@ -530,13 +668,15 @@ def gen_plan(art, llm_cfg, card_want, scene_count):
     style = str(j.get("style") or "").strip().lower()
     style = STYLE_ALIAS.get(style, style)
     quotes = []
-    for q in (j.get("quotes") or [])[:card_want]:
+    for q in (j.get("quotes") or [])[:8]:          # 数量由 LLM 定，这里只兜底防爆
         if isinstance(q, dict) and str(q.get("text") or "").strip():
-            quotes.append({"text": str(q["text"]).strip(), "bg": str(q.get("bg") or "").strip()})
+            quotes.append({"text": str(q["text"]).strip(),
+                           "cn": str(q.get("cn") or "").strip(),
+                           "bg": str(q.get("bg") or "").strip()})
         elif isinstance(q, str) and q.strip():
-            quotes.append({"text": q.strip(), "bg": ""})
+            quotes.append({"text": q.strip(), "cn": "", "bg": ""})
     scenes = []
-    for s in (j.get("scenes") or [])[:scene_count]:
+    for s in (j.get("scenes") or [])[:6]:          # 数量由 LLM 定，这里只兜底防爆
         if not isinstance(s, dict) or not str(s.get("prompt") or "").strip():
             continue
         asp = str(s.get("aspect") or "3:4").strip()
@@ -545,8 +685,10 @@ def gen_plan(art, llm_cfg, card_want, scene_count):
                        "aspect": asp if asp in ASPECTS else "3:4"})
     if not quotes and not scenes:
         return None, "LLM 返回的方案是空的"
+    note = j.get("note")
     return ({"style": style if style in STYLES else "purple",
-             "quotes": quotes, "scenes": scenes}, j.get("reason", ""))
+             "quotes": quotes, "scenes": scenes,
+             "note": note if isinstance(note, dict) else {}}, j.get("reason", ""))
 
 
 # ============================================================
@@ -593,8 +735,8 @@ def rewrite_plan_item(article_id, kind, index, hint, llm_cfg):
         requirement = ("换一个完全不同的氛围/意象背景（不要沿用当前的意象）。"
                        "bg 为英文绘图提示词：只画氛围与意象背景，画面中不要出现任何文字，"
                        "风格统一 mystical / serene / minimal，包含主体、光线、色调、构图，"
-                       "不要真实人物正脸。")
-        shape = '{"bg":"english background prompt"}'
+                       "不要真实人物正脸。同时给出新的中文画面描述 cn（10-40 字，给人看）。")
+        shape = '{"cn":"中文画面描述","bg":"english background prompt"}'
     else:
         others = "；".join([(x.get("scene") or "") for j, x in enumerate(items) if j != index][:8])
         cur = "画面描述：%s\n当前绘图提示词（英文）：%s\n当前比例：%s" % (
@@ -639,7 +781,9 @@ def rewrite_plan_item(article_id, kind, index, hint, llm_cfg):
         bg = str(j.get("bg") or "").strip()
         if not bg:
             return None, "LLM 没给出新的背景提示词"
-        new_item = {"text": item.get("text") or "", "bg": bg, "on": item.get("on", True)}
+        new_item = {"text": item.get("text") or "",
+                    "cn": str(j.get("cn") or item.get("cn") or "").strip(),
+                    "bg": bg, "on": item.get("on", True)}
         plan["quotes"][index] = new_item
     else:
         pr = str(j.get("prompt") or "").strip()

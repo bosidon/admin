@@ -49,49 +49,6 @@ async function updateStatus(type, id, status) {
     }
 }
 
-// 同步文章
-async function syncArticles() {
-    showToast('正在从服务器同步...', 'info');
-    const result = await api('/api/sync', { method: 'POST' });
-    
-    if (result.ok) {
-        showToast('同步成功', 'success');
-        setTimeout(() => location.reload(), 1000);
-    } else {
-        showToast('同步失败: ' + (result.error || '未知错误'), 'error');
-    }
-}
-
-// 生成文章
-async function generateArticle() {
-    if (!confirm('确定要生成新文章吗？')) return;
-    
-    showToast('正在生成文章，请稍候...', 'info');
-    const result = await api('/api/articles/generate', { method: 'POST' });
-    
-    if (result.ok) {
-        showToast('文章生成成功！', 'success');
-        setTimeout(() => location.reload(), 1000);
-    } else {
-        showToast('生成失败: ' + (result.error || '未知错误'), 'error');
-    }
-}
-
-// 格式化时间
-function formatTime(timeStr) {
-    if (!timeStr) return '-';
-    const date = new Date(timeStr);
-    const now = new Date();
-    const diff = now - date;
-    
-    if (diff < 60000) return '刚刚';
-    if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
-    if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
-    if (diff < 604800000) return Math.floor(diff / 86400000) + '天前';
-    
-    return date.toLocaleDateString('zh-CN');
-}
-
 // 状态标签
 function getStatusTag(status) {
     const map = {

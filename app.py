@@ -13,7 +13,7 @@ import shutil
 import requests
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request, g
+from flask import Flask, render_template, jsonify, request, g, redirect
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -34,7 +34,6 @@ DATABASE = os.environ.get('TEST_DATABASE', str(DATA_DIR / "database.db"))
 
 # 外部API配置
 ENV_PATH = Path(__file__).parent / ".env" if (Path(__file__).parent / ".env").exists() else Path("/var/www/.env")
-LINGXIU_BASE = "http://localhost:3099"
 # LLM 参数默认值（默认走 DeepSeek 官网）
 LLM_DEFAULTS = {
     "llm_base_url": "https://api.deepseek.com/v1/chat/completions",
@@ -211,8 +210,9 @@ def getStatusTag(status):
 # 路由 - 页面
 # ============================================================
 @app.route('/')
-def dashboard():
-    return render_template("dashboard.html")
+def home():
+    """首页 → 文案列表"""
+    return redirect('/articles')
 
 
 @app.route('/images')

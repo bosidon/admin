@@ -121,7 +121,6 @@
     <div class="sidebar">
         <div class="logo">📝 仙宝内容平台</div>
         <div class="nav">
-            <a href="/" class="{% if request.path == '/' %}active{% endif %}">📊 工作台</a>
             <a href="/articles" class="{% if '/articles' in request.path %}active{% endif %}">✍️ 文案</a>
             <a href="/images" class="{% if '/images' in request.path %}active{% endif %}">🖼 配图</a>
             <a href="/video" class="{% if '/video' in request.path %}active{% endif %}">🎬 视频制作</a>
@@ -182,45 +181,6 @@
             document.getElementById('modal').classList.remove('show');
         }
         
-        function formatDate(d) {
-            if (!d) return '-';
-            return new Date(d).toLocaleString('zh-CN');
-        }
-        
-        function statusLabel(s) {
-            const map = {
-                'draft': '草稿', 'scripting': '编剧中', 'script_done': '脚本完成',
-                'storyboard': '分镜中', 'storyboard_done': '分镜完成',
-                'asset_production': '资产制作中', 'asset_done': '资产完成',
-                'rendering': '渲染中', 'render_done': '渲染完成', 'published': '已发布'
-            };
-            return map[s] || s;
-        }
-        
-        function statusClass(s) {
-            const map = {
-                'draft': 'tag-gray', 'scripting': 'tag-blue', 'script_done': 'tag-green',
-                'storyboard': 'tag-blue', 'storyboard_done': 'tag-green',
-                'asset_production': 'tag-yellow', 'asset_done': 'tag-green',
-                'rendering': 'tag-yellow', 'render_done': 'tag-green', 'published': 'tag-purple'
-            };
-            return map[s] || 'tag-gray';
-        }
-        
-        function platformLabel(p) {
-            const map = {'video_account':'视频号', 'douyin':'抖音', 'bilibili':'B站', 'xiaohongshu':'小红书'};
-            return map[p] || p;
-        }
-        
-        function videoTypeLabel(t) {
-            const map = {'narration_visual':'口播+画面', 'ai_visual':'纯AI画面', 'mixed':'混合'};
-            return map[t] || t;
-        }
-        
-        function styleLabel(s) {
-            const map = {'realistic':'写实风', 'illustration':'插画风', 'anime':'动漫风', '3d':'3D风', 'artistic':'意境风'};
-            return map[s] || s;
-        }
     </script>
     <script src="/static/js/app.js"></script>
     {% block scripts %}{% endblock %}

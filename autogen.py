@@ -48,7 +48,20 @@ ASPECT_SIZE = {
     "3:4":    (1080, 1440),
     "1:1":    (1080, 1080),
     "9:16":   (1080, 1920),
+    "16:9":   (1920, 1080),
     "2.35:1": (1080, 460),
+}
+
+# 图型：统一清单 images[] 的元素类型（① 生成方案 的输出契约）
+IMAGE_TYPES = ("cover", "quote", "points", "photo")
+ITYPE_LABEL = {"cover": "封面卡", "quote": "金句卡", "points": "要点卡", "photo": "画面"}
+
+# 文案类型（articles.content_type）→ 写进用户消息，让 LLM 对上「文案类型档位」表
+CTYPE_LABEL = {
+    "article": "article 图文文章", "xhs_note": "xhs_note 小红书笔记",
+    "short_video": "short_video 短视频脚本", "long_video": "long_video 长视频脚本",
+    "speech": "speech 口播稿", "podcast_script": "podcast_script 播客脚本",
+    "qa": "qa 问答",
 }
 
 NEG_QUALITY = ("模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, "
@@ -104,58 +117,67 @@ PROMPT_DIR = BASE_DIR / "prompts"
 PLAN_PROMPT_FILE = PROMPT_DIR / "image_agent.md"
 PLAN_PROMPT_DEFAULT = """# 角色
 
-你是「自媒体文案配图 Agent」——资深自媒体视觉策划 + AI 绘画提示词工程师。任务：读用户给的文案，判断平台、文案类型、受众、情绪、配图目标，直接输出一份可执行的配图方案与生图提示词。
+你是「自媒体文案配图 Agent」——资深自媒体视觉策划 + AI 绘画提示词工程师。任务：读用户给的文案，结合系统给出的**平台**与**文案类型**，判断受众、情绪与配图目标，直接输出一份可执行的配图方案与生图提示词。
 
 # 运行口径（硬约束 · 必须遵守）
 
 出图后端是 AutoDL ComfyUI（Qwen-Image），据此：
 
-- **提示词只用英文**：`bg` / `prompt` 必须是英文提示词；中文只写在 `text`（图上文字）、`cn`（给人看的中文画面描述）、`scene`（场景的中文画面描述）里
-- **画幅只能 4 选 1**：`3:4`（小红书/封面）· `1:1`（朋友圈/知乎/微博）· `9:16`（抖音/快手/视频号/直播）· `2.35:1`（公众号头图/头条/B站）
-- **配色只能 4 选 1**（写进 `style`）：`purple` 深紫·灵性塔罗 · `dark` 玄黑·心理哲思 · `gold` 米金·疗愈温柔 · `maya` 青绿·玛雅图腾
-- **只有两种图**：
-  - `quote` 金句卡 / 大字卡：AI 出满版背景，图上中文由程序精确叠加。凡是要在图上出现的中文（金句、标题、要点），全部放这里、放 `text` —— **绝不让 AI 去画文字**
-  - `scene` 场景图：纯画面，画面里不能有任何文字（提示词里带上 `no text, no letters, no watermark`）
-- **一张卡最多 3 行、每行 ≤ 14 字**；要点用「｜」分隔
-- **数量由你定**：按平台与文案类型给合理张数，可以是 0 张，不要凑数
+- **提示词英文优先**：`bg` 必须是英文提示词（本套模型的文本编码器 Qwen2.5-VL 双语可读，英文是为了命中率与风格稳定）。中文只写在 `texts`（图上文字）与 `cn`（给人看的中文画面描述）里
+- **画幅 5 选 1**：`3:4`（小红书/封面）· `1:1`（朋友圈/知乎/微博）· `9:16`（抖音/快手/视频号/直播）· `16:9`（长视频/B站/公众号内页）· `2.35:1`（公众号头图）
+- **配色 4 选 1**（写进 `style`）：`purple` 深紫·灵性塔罗 · `dark` 玄黑·心理哲思 · `gold` 米金·疗愈温柔 · `maya` 青绿·玛雅图腾
+- **4 种图型**（每张图必须标 `type`）：
+  - `cover` 封面卡：主标题 + 副标题（可加时间/地点），AI 出满版背景，文字由程序精确叠加
+  - `quote` 金句卡：一句金句，居中大字
+  - `points` 要点卡：标题 + 3-5 条编号要点
+  - `photo` 纯画面：画面里不得出现任何文字
+- **凡要在图上出现的中文，一律放 `texts` 数组，绝不让 AI 去画文字**
+- **文字上限**：cover 主标题 ≤ 12 字 + 副标题 ≤ 18 字；quote ≤ 28 字；points 标题 ≤ 14 字、每条要点 ≤ 16 字；整张不超过 5 行
+- **`texts` 里只写正文，不要写序号或项目符号**（「1.」「一、」「·」一律不要，编号由程序自动加）
+- **数量与配比由你定**：按平台 + 文案类型给合理张数与图型配比，可以是 0 张，不要凑数
+- 视频类（长视频 / 口播 / 播客）每条必须带 `section`（段落或镜号）与 `at`（时间点），图文类填 `""`
 - 画面安全底线由系统自动附加，不必在此重复
-- 同一篇文案的所有图保持同一视觉主线和色调（配色色卡由系统按 `style` 自动追加，不必重复写颜色）
+- 同一篇文案的所有图保持同一视觉主线与色调（配色色卡由系统按 `style` 自动追加，不必重复写颜色）
 
 # 工作流程
 
-1. 读文案 → 平台、类型、主题、核心观点/卖点、受众、情绪、关键词、行动号召
+1. 读文案 → 主题、核心观点/卖点、受众、情绪、关键词、行动号召
 2. 判断配图目标：点击率 / 信息传达 / 情绪共鸣 / 转化 / 品牌记忆
 3. 定视觉主线：主体、场景、构图、镜头、光线、色彩、风格、材质、情绪
-4. 出清单：几张金句卡 + 几张场景图，各用什么画幅
-5. 逐条给：中文画面描述 + 英文提示词
+4. 按「文案类型档位」出清单：几张、什么图型、各用什么画幅
+5. 逐条给：中文画面描述 + 图上文字 + 英文提示词
 6. 合规自检：广告法（不用「最 / 第一 / 100% / 包治」等绝对化）、版权、隐私、敏感内容、平台规范
 7. 信息不足就**自行合理假设**并写进 `note.assumptions`，不要反问用户
 
-# 平台适配（画幅 / 风格 / 张数）
+# 平台适配（画幅 / 风格基调）
 
-| 平台 | 画幅 | 风格基调 | 建议张数 |
+| 平台 | 画幅 | 风格基调 |
+|---|---|---|
+| 小红书 | 3:4 为主，1:1 备用 | 生活感、奶油风、杂志风、高饱和 |
+| 公众号 | 2.35:1 头图 + 16:9 内页 | 简洁、品牌感 |
+| 抖音/快手/视频号 | 9:16 | 强冲击、大字、动态感 |
+| B站 | 16:9 | 科技、极简、梗图 |
+| 知乎 | 1:1 或 16:9 | 理性、低饱和、数据感 |
+| 微博 | 1:1 或 9:16 | 热点海报、话题感 |
+| 头条/百家号 | 2.35:1 或 16:9 | 新闻感、真实感 |
+| 播客 | 1:1 封面 + 16:9 章节 | 沉静、声音感、抽象 |
+| LinkedIn | 1:1 或 16:9 | 商务、专业、干净 |
+
+# 文案类型档位（按系统给出的「文案类型」选一档）
+
+| 类型 | 画幅 | 图型配比 | 数量 |
 |---|---|---|---|
-| 小红书 | 3:4 为主，1:1 备用 | 生活感、奶油风、杂志风、高饱和 | 6-9 |
-| 公众号 | 2.35:1 封面 + 1:1 内页 | 简洁、品牌感 | 2-4 |
-| 抖音/快手/视频号 | 9:16 | 强冲击、大字、动态感 | 1-3 |
-| B站 | 2.35:1 | 科技、极简、梗图 | 1-3 |
-| 知乎 | 1:1 | 理性、低饱和、数据感 | 1-3 |
-| 微博 | 1:1 或 9:16 | 热点海报、话题感 | 1-2 |
-| 头条/百家号 | 2.35:1 | 新闻感、真实感 | 1-3 |
-| LinkedIn | 1:1 | 商务、专业、干净 | 1-3 |
+| article 图文文章 | 2.35:1 头图 + 3:4/1:1 内页 | cover 1 + quote + photo | 3-9 |
+| xhs_note 小红书笔记 | 3:4 为主，1:1 备用 | cover 1 + quote 为主 + photo | 6-9 |
+| short_video 短视频脚本 | 9:16 | cover 1 + quote(章节) + photo(关键帧) | 3-8 |
+| long_video 长视频脚本 | 16:9 | cover 1 + points(章节卡) + photo(B-roll) | 时长(分)×1.2~1.5 |
+| speech 口播稿 | 9:16 短 / 16:9 长 | cover 1 + points + photo | 按分钟 ×1 |
+| podcast_script 播客脚本 | 1:1 封面 + 16:9 章节 | cover 1 + points | 2-6 |
+| qa 问答 | 3:4 | quote 或 points + photo | 3-6 |
 
-# 文案类型 → 视觉策略（含配比）
-
-- 种草：真实生活、暖光、特写、使用场景 → 场景图为主 + 1 张金句卡
-- 测评：对比、干净背景、细节微距 → 场景图 + 1 张要点卡
-- 教程 / 干货：步骤、编号、网格、极简 → 场景图 1-2 + 2-4 张要点卡（`text` 写「标题｜要点1｜要点2」）
-- 知识科普：干净、图形化、低饱和 → 场景图 + 要点卡
-- 观点：杂志排版、强标题、对比色 → 1 张强标题金句卡 + 场景图 1-2
-- 故事 / 情感 / 灵性 / 心理：电影感、叙事、留白、情绪光 → 金句卡为主 4-8 张 + 场景图 1-2
-- 职场：办公场景、商务、低饱和 → 场景图 1-3
-- 产品推广 / 品牌宣传：商业摄影、棚拍、质感、品牌色 → 场景图为主 + 1 张要点卡
-- 活动 / 直播预告：海报、倒计时、福利、大字 → 1 张金句卡（大字）+ 场景图 1-2
-- 招聘 / 节日 / 新闻资讯：真实感、主题色 → 场景图 1-3（节日可加 1 张金句卡）
+- 系统给出的类型不在上表时，按最接近的一档处理，并在 `note.assumptions` 里说明
+- 长视频 / 口播 / 播客：先给 1-2 张**角色卡或主场景卡**作为全片视觉锚点，后续镜头沿用同一主体描述与色调
+- 题材（种草 / 测评 / 教程 / 观点 / 故事 / 情感 / 职场 / 节日 / 招聘…）只影响**内容与画面风格**，不改变画幅与图型档位
 
 # 生图提示词公式
 
@@ -169,11 +191,17 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 {
   "style": "dark",
-  "quotes": [
-    {"text": "图上中文，10-28 字，可含一个「｜」换行", "cn": "中文画面描述（背景画什么）", "bg": "english background prompt"}
-  ],
-  "scenes": [
-    {"scene": "中文画面描述（20 字内）", "prompt": "english image prompt", "aspect": "3:4"}
+  "platform": "xiaohongshu",
+  "images": [
+    {"type": "cover", "aspect": "3:4", "section": "", "at": "",
+     "cn": "中文画面描述（背景画什么）", "texts": ["主标题", "副标题"],
+     "bg": "english background prompt"},
+    {"type": "quote", "aspect": "3:4", "section": "", "at": "",
+     "cn": "中文画面描述", "texts": ["金句"], "bg": "english background prompt"},
+    {"type": "points", "aspect": "3:4", "section": "", "at": "",
+     "cn": "中文画面描述", "texts": ["标题", "要点一", "要点二", "要点三"], "bg": "english background prompt"},
+    {"type": "photo", "aspect": "3:4", "section": "", "at": "",
+     "cn": "中文画面描述", "texts": [], "bg": "english image prompt"}
   ],
   "note": {
     "diagnosis": "平台 / 类型 / 受众 / 情绪 / 配图目标",
@@ -187,10 +215,13 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 字段规则：
 
+- `type`：`cover` / `quote` / `points` / `photo`，4 选 1
+- `aspect`：`3:4` / `1:1` / `9:16` / `16:9` / `2.35:1`，5 选 1
+- `texts`：数组。cover = [主标题, 副标题]；quote = [金句]；points = [标题, 要点1, 要点2…]；photo = []
+- `section` / `at`：视频类填段落（镜号）与时间点，如 `"第2段"`、`"00:45"`；图文类填 `""`
+- `cn`：中文画面描述，10-40 字，给人看
+- `bg`：英文提示词，画面中不得出现任何文字
 - `style`：只能 4 选 1
-- `text`：图上中文，10-28 字，不要 emoji、不要话题标签
-- `bg` / `prompt`：英文，画面中不得出现任何文字
-- `aspect`：只能 3:4 / 1:1 / 9:16 / 2.35:1
 - `note`：全部中文、简洁；`note` 不参与出图，只给人看
 
 # 硬性约束
@@ -210,9 +241,8 @@ PLAN_USER_TEMPLATE = (
     "【本次任务】\n"
     "平台：{platform}\n"
     "文案类型：{ctype}\n"
-    "金句卡（quotes）参考 {card_want} 张（可 ±1~2，也可以是 0 张）\n"
-    "场景图（scenes）参考 {scene_count} 张（可 ±1~2）\n"
-    "配色 4 选 1、画幅按上面的平台适配规则自己定。\n"
+    "画幅按「平台适配」自己定；数量与图型配比按「文案类型档位」自己定（可以是 0 张）。\n"
+    "配色 4 选 1（写进 style）。\n"
     "严格按「输出格式」只回一个 JSON 对象。\n\n"
     "文案标题：{title}\n"
     "文案正文：\n{content}"
@@ -616,11 +646,158 @@ def _extract_quotes_fallback(content, title, want):
 # ============================================================
 # 配图方案（一次 LLM 出两组：金句组 + 场景组）
 # ============================================================
-ASPECTS = ("3:4", "1:1", "9:16", "2.35:1")
+ASPECTS = ("3:4", "1:1", "9:16", "16:9", "2.35:1")
+
+
+def _pick_json(raw):
+    """从 LLM 输出里取出第一个可解析的 JSON 对象
+    容错：```json 代码围栏 / 前后多余说明文字 / 输出里出现多个对象"""
+    if not raw:
+        return None
+    t = raw.strip()
+    t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
+    t = re.sub(r"\s*```$", "", t).strip()
+    try:
+        j = json.loads(t)
+        if isinstance(j, dict):
+            return j
+    except Exception:
+        pass
+    depth, start, in_str, esc = 0, -1, False, False      # 花括号配平扫描
+    for i, ch in enumerate(t):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == chr(92):
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        j = json.loads(t[start:i + 1])
+                        if isinstance(j, dict):
+                            return j
+                    except Exception:
+                        pass
+                    start = -1
+    return None
+
+
+def _llm_json(url, key, model, messages, tries=2):
+    """调 LLM 并取出 JSON 对象；解析不出来再试一次。返回 (json|None, 错误文案)"""
+    err = "LLM 未返回 JSON"
+    for _ in range(max(1, tries)):
+        try:
+            r = requests.post(url, headers={"Authorization": "Bearer " + key,
+                                            "Content-Type": "application/json"},
+                              json={"model": model, "messages": messages}, timeout=180)
+            raw = r.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            err = "LLM 调用失败（%s）" % str(e)[:60]
+            continue
+        j = _pick_json(raw)
+        if j is not None:
+            return j, None
+        err = "LLM 返回的 JSON 解析失败"
+    return None, err
+
+
+def _norm_image(d):
+    """规范化清单里的一条；无法成图（既没 bg 也没文字）返回 None"""
+    if not isinstance(d, dict):
+        return None
+    t = str(d.get("type") or "").strip().lower()
+    if t not in IMAGE_TYPES:
+        t = "photo" if not (d.get("texts") or d.get("text")) else "quote"
+    texts = d.get("texts")
+    if not isinstance(texts, list):
+        texts = [d.get("text")] if d.get("text") else []
+    texts = [str(x).strip() for x in texts if str(x or "").strip()]
+    if t == "photo":
+        texts = []
+    bg = str(d.get("bg") or d.get("prompt") or "").strip()
+    if not bg and not texts:
+        return None
+    asp = str(d.get("aspect") or "3:4").strip()
+    return {"type": t,
+            "aspect": asp if asp in ASPECTS else "3:4",
+            "section": str(d.get("section") or "").strip(),
+            "at": str(d.get("at") or "").strip(),
+            "cn": str(d.get("cn") or d.get("scene") or "").strip(),
+            "texts": texts,
+            "bg": bg,
+            "on": bool(d.get("on", True))}
+
+
+def _legacy_views(images):
+    """② 出图路径仍按 quotes / scenes 两组走：由 images[] 派生，出图逻辑不动"""
+    quotes, scenes = [], []
+    for it in images:
+        if it.get("type") == "photo":
+            scenes.append({"scene": it.get("cn") or "", "prompt": it.get("bg") or "",
+                           "aspect": it.get("aspect") or "3:4",
+                           "on": it.get("on", True)})
+        else:
+            quotes.append({"text": "｜".join(it.get("texts") or []),
+                           "cn": it.get("cn") or "", "bg": it.get("bg") or "",
+                           "on": it.get("on", True)})
+    return quotes, scenes
+
+
+def _type_brief(images):
+    """图型配比简报，如 cover1 · quote3 · photo2"""
+    return " · ".join("%s%d" % (t, sum(1 for x in images if x.get("type") == t))
+                      for t in IMAGE_TYPES if any(x.get("type") == t for x in images)) or "-"
+
+
+def _plan_out(data, default_style=""):
+    """把库里的 image_script / LLM 返回的 JSON 统一成一个方案对象（images[] 为唯一来源）"""
+    if isinstance(data, list):
+        data = {"scenes": data}
+    if not isinstance(data, dict):
+        data = {}
+    images = []
+    for it in (data.get("images") or []):
+        n = _norm_image(it)
+        if n:
+            images.append(n)
+    if not images:                                     # 兼容旧格式：quotes / scenes
+        for q in (data.get("quotes") or []):
+            if isinstance(q, str):
+                q = {"text": q}
+            if isinstance(q, dict):
+                n = _norm_image(dict(q, type=q.get("type") or "quote"))
+                if n:
+                    images.append(n)
+        for s in (data.get("scenes") or []):
+            if isinstance(s, dict):
+                n = _norm_image({"type": "photo", "aspect": s.get("aspect"),
+                                 "cn": s.get("scene"), "bg": s.get("prompt"),
+                                 "on": s.get("on", True)})
+                if n:
+                    images.append(n)
+    quotes, scenes = _legacy_views(images)
+    style = str(data.get("style") or "").strip().lower()
+    style = STYLE_ALIAS.get(style, style)
+    note = data.get("note")
+    return {"style": style if style in STYLES else default_style,
+            "platform": str(data.get("platform") or "").strip(),
+            "images": images, "quotes": quotes, "scenes": scenes,
+            "note": note if isinstance(note, dict) else {}}
 
 
 def read_plan(article_id):
-    """读配图方案；兼容旧格式（纯数组 = 只有场景组）"""
+    """读配图方案：统一成 images[]（旧 quotes/scenes 自动映射），并派生 ② 出图用的两组视图"""
     conn = _content_db()
     row = conn.execute("SELECT image_script FROM articles WHERE id=?", (article_id,)).fetchone()
     conn.close()
@@ -629,46 +806,28 @@ def read_plan(article_id):
         data = json.loads(raw or "{}")
     except Exception:
         data = {}
-    if isinstance(data, list):                     # 旧格式：场景数组
-        data = {"scenes": data}
-    if not isinstance(data, dict):
-        data = {}
-    quotes = []
-    for q in (data.get("quotes") or []):
-        if isinstance(q, dict) and (q.get("text") or "").strip():
-            quotes.append({"text": str(q.get("text")).strip(),
-                           "cn": str(q.get("cn") or "").strip(),
-                           "bg": str(q.get("bg") or "").strip(),
-                           "on": bool(q.get("on", True))})
-        elif isinstance(q, str) and q.strip():
-            quotes.append({"text": q.strip(), "cn": "", "bg": "", "on": True})
-    scenes = []
-    for s in (data.get("scenes") or []):
-        if isinstance(s, dict) and (s.get("prompt") or "").strip():
-            asp = str(s.get("aspect") or "3:4").strip()
-            scenes.append({"scene": str(s.get("scene") or "").strip(),
-                           "prompt": str(s.get("prompt")).strip(),
-                           "aspect": asp if asp in ASPECTS else "3:4",
-                           "on": bool(s.get("on", True))})
-    style = str(data.get("style") or "").strip().lower()
-    style = STYLE_ALIAS.get(style, style)
-    note = data.get("note")
-    return {"style": style if style in STYLES else "",
-            "quotes": quotes, "scenes": scenes,
-            "note": note if isinstance(note, dict) else {}}
+    return _plan_out(data)
 
 
 def save_plan(article_id, plan):
+    """写库：只存 {style, platform, images, note}；quotes/scenes 是派生视图，不入库"""
+    if isinstance(plan, dict) and plan.get("images") is not None:
+        p = {k: plan.get(k) for k in ("style", "platform", "images", "note")}
+    else:                                              # 极旧调用方（纯 quotes/scenes）
+        p = plan
     conn = _content_db()
     conn.execute("UPDATE articles SET image_script=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                 (json.dumps(plan, ensure_ascii=False), article_id))
+                 (json.dumps(p, ensure_ascii=False), article_id))
     conn.commit()
     conn.close()
     return plan
 
 
-def gen_plan(art, llm_cfg, card_want, scene_count):
-    """一次 LLM 调用产出整份方案；返回 (plan|None, reason)"""
+def gen_plan(art, llm_cfg, card_want=0, scene_count=0):
+    """一次 LLM 调用产出整份方案（契约 images[]）；返回 (plan|None, reason)
+
+    card_want / scene_count 保留仅为兼容旧调用方，数量与配比由 LLM 按平台+类型决定。
+    """
     import re as _re
     llm_cfg = llm_cfg or {}
     key = llm_cfg.get("llm_api_key", "")
@@ -682,65 +841,35 @@ def gen_plan(art, llm_cfg, card_want, scene_count):
     # 系统提示词 = 安全底线（代码固定，改不掉）+ prompts/image_agent.md 文件内容
     sys_prompt = SAFETY_RULE + load_plan_prompt()
     plat = (art.get("platform") or "").strip()
+    ctype = (art.get("content_type") or "").strip()
     user_msg = (PLAN_USER_TEMPLATE
                 .replace("{platform}", PLATFORM_LABEL.get(plat, plat or "未指定"))
-                .replace("{ctype}", (art.get("content_type") or "文章").strip())
-                .replace("{card_want}", str(card_want))
-                .replace("{scene_count}", str(scene_count))
+                .replace("{ctype}", CTYPE_LABEL.get(ctype, ctype or "article 图文文章"))
                 .replace("{title}", title)
                 .replace("{content}", content))
-    try:
-        r = requests.post(url, headers={"Authorization": "Bearer " + key,
-                                        "Content-Type": "application/json"},
-                          json={"model": model,
-                                "messages": [{"role": "system", "content": sys_prompt},
-                                             {"role": "user", "content": user_msg}]},
-                          timeout=180)
-        raw = r.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return None, "LLM 调用失败（%s）" % str(e)[:60]
+    j, err = _llm_json(url, key, model,
+                       [{"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_msg}])
+    if j is None:
+        return None, err
 
-    m = _re.search(r"\{[\s\S]*\}", raw)
-    if not m:
-        return None, "LLM 未返回 JSON"
-    try:
-        j = json.loads(m.group())
-    except Exception:
-        return None, "LLM 返回的 JSON 解析失败"
-
-    style = str(j.get("style") or "").strip().lower()
-    style = STYLE_ALIAS.get(style, style)
-    quotes = []
-    for q in (j.get("quotes") or [])[:8]:          # 数量由 LLM 定，这里只兜底防爆
-        if isinstance(q, dict) and str(q.get("text") or "").strip():
-            quotes.append({"text": str(q["text"]).strip(),
-                           "cn": str(q.get("cn") or "").strip(),
-                           "bg": str(q.get("bg") or "").strip()})
-        elif isinstance(q, str) and q.strip():
-            quotes.append({"text": q.strip(), "cn": "", "bg": ""})
-    scenes = []
-    for s in (j.get("scenes") or [])[:6]:          # 数量由 LLM 定，这里只兜底防爆
-        if not isinstance(s, dict) or not str(s.get("prompt") or "").strip():
-            continue
-        asp = str(s.get("aspect") or "3:4").strip()
-        scenes.append({"scene": str(s.get("scene") or "").strip(),
-                       "prompt": str(s["prompt"]).strip(),
-                       "aspect": asp if asp in ASPECTS else "3:4"})
-    if not quotes and not scenes:
+    if not j.get("platform"):
+        j["platform"] = plat
+    plan = _plan_out(j, default_style="purple")
+    plan["images"] = plan["images"][:12]               # 数量由 LLM 定，这里只兜底防爆
+    plan["quotes"], plan["scenes"] = _legacy_views(plan["images"])
+    if not plan["images"]:
         return None, "LLM 返回的方案是空的"
-    note = j.get("note")
-    return ({"style": style if style in STYLES else "purple",
-             "quotes": quotes, "scenes": scenes,
-             "note": note if isinstance(note, dict) else {}}, j.get("reason", ""))
+    return plan, j.get("reason", "")
+
 
 
 # ============================================================
 # 单条重写提示词（只重写一条，不整组重跑 · 纯 LLM 不开机）
-# ============================================================
 REWRITE_PROMPT = (
     "你是自媒体配图策划专家。下面这条【{kind_label}】的配图描述不理想，请只重写这一条，"
     "其它条目一律不要改动。\n\n"
-    "当前条目：\n{current}\n\n"
+    "当前条目（type={itype} · 画幅 {aspect}）：\n{current}\n\n"
     "要求：{requirement}\n"
     "{palette}"
     "{hint}"
@@ -749,9 +878,28 @@ REWRITE_PROMPT = (
     "严格输出 JSON（不要输出多余文字）：{shape}"
 )
 
+# 各图型的重写要求与输出形状（texts 是数组）
+REWRITE_REQ = {
+    "cover": "封面卡：主标题 ≤12 字 + 副标题 ≤18 字，抓一眼就想点开；bg 换成完全不同的氛围/意象背景"
+             "（只画背景，画面中不要出现任何文字）。",
+    "quote": "金句卡：换一句与当前不同的金句（≤28 字，不要 emoji、不要话题标签）；bg 换成完全不同的"
+             "氛围/意象背景（不要沿用当前意象），画面中不要出现任何文字。",
+    "points": "要点卡：标题 ≤14 字 + 3-5 条要点（每条 ≤16 字，是同一主题下的并列要点）；bg 换成完全"
+              "不同的氛围/意象背景，画面中不要出现任何文字。",
+    "photo": "纯画面：换一个完全不同的画面构思（不要沿用当前构思）；画面中不要出现任何文字；"
+             "texts 必须是空数组。",
+}
+REWRITE_SHAPE = {
+    "cover": '{"cn":"中文画面描述","texts":["主标题","副标题"],"bg":"english background prompt"}',
+    "quote": '{"cn":"中文画面描述","texts":["金句"],"bg":"english background prompt"}',
+    "points": '{"cn":"中文画面描述","texts":["标题","要点一","要点二","要点三"],'
+              '"bg":"english background prompt"}',
+    "photo": '{"cn":"中文画面描述","texts":[],"bg":"english image prompt"}',
+}
 
-def rewrite_plan_item(article_id, kind, index, hint, llm_cfg):
-    """只让 LLM 重写某一条的 bg（kind='quote'）/ prompt（kind='scene'）。
+
+def rewrite_plan_item(article_id, index, hint, llm_cfg):
+    """只让 LLM 重写方案里第 index 条（cn / texts / bg；图型、画幅、段落位置不变）。
 
     返回 (新条目|None, 错误文案|None)；任何解析/校验失败都保持原值不动。"""
     import re as _re
@@ -764,82 +912,59 @@ def rewrite_plan_item(article_id, kind, index, hint, llm_cfg):
     if not (key and url):
         return None, "未配置 LLM"
     plan = read_plan(article_id)
-    items = plan["quotes"] if kind == "quote" else plan["scenes"]
+    items = plan["images"]
     if not (0 <= index < len(items)):
         return None, "条目不存在"
     item = items[index]
+    itype = item.get("type") or "quote"
     art = _read_article_full(article_id) or {}
     title = art.get("title") or ""
     content = (art.get("content_md") or "")[:2000]
-    if kind == "quote":
-        others = "；".join([(q.get("text") or "") for j, q in enumerate(items) if j != index][:8])
-        cur = "金句：%s\n当前背景提示词（英文）：%s" % (
-            item.get("text") or "", item.get("bg") or "（空）")
-        requirement = ("换一个完全不同的氛围/意象背景（不要沿用当前的意象）。"
-                       "bg 为英文绘图提示词：只画氛围与意象背景，画面中不要出现任何文字，"
-                       "风格统一 mystical / serene / minimal，包含主体、光线、色调、构图，"
-                       "不要真实人物正脸。同时给出新的中文画面描述 cn（10-40 字，给人看）。")
-        shape = '{"cn":"中文画面描述","bg":"english background prompt"}'
-    else:
-        others = "；".join([(x.get("scene") or "") for j, x in enumerate(items) if j != index][:8])
-        cur = "画面描述：%s\n当前绘图提示词（英文）：%s\n当前比例：%s" % (
-            item.get("scene") or "", item.get("prompt") or "（空）", item.get("aspect") or "3:4")
-        requirement = ("换一个完全不同的画面构思（不要沿用当前的构思）。"
-                       "scene 为中文画面描述（20 字内）；prompt 为英文绘图提示词，"
-                       "含主体/风格/光线/色调/构图，画面中不要出现文字；"
-                       "aspect 从 3:4 / 1:1 / 9:16 / 2.35:1 中选一个。")
-        shape = '{"scene":"画面描述","prompt":"english image prompt","aspect":"3:4"}'
-    h = (hint or "").strip()
+    others = "；".join([("|".join(x.get("texts") or []) or x.get("cn") or "")
+                        for k, x in enumerate(items) if k != index][:8])
+    cur = ("图上文字：%s\n中文画面描述：%s\n当前提示词（英文）：%s\n当前画幅：%s"
+           % ("｜".join(item.get("texts") or []) or "（无）", item.get("cn") or "（无）",
+              item.get("bg") or "（空）", item.get("aspect") or "3:4"))
     _frag = STYLE_PROMPT.get(plan.get("style") or "")
     palette = ("配色：本次整套配图的配色是 %s，画面色调请围绕「%s」。\n"
                % (plan.get("style"), _frag)) if _frag else ""
+    h = (hint or "").strip()
     prompt = (SAFETY_RULE + REWRITE_PROMPT
-              .replace("{kind_label}", "金句卡" if kind == "quote" else "场景图")
+              .replace("{kind_label}", ITYPE_LABEL.get(itype, itype))
+              .replace("{itype}", itype)
+              .replace("{aspect}", item.get("aspect") or "3:4")
               .replace("{current}", cur)
-              .replace("{requirement}", requirement)
+              .replace("{requirement}", REWRITE_REQ.get(itype, REWRITE_REQ["quote"]))
               .replace("{palette}", palette)
               .replace("{hint}", ("额外要求（优先满足）：%s\n" % h) if h else "")
               .replace("{title}", title)
               .replace("{content}", content)
-              .replace("{shape}", shape))
+              .replace("{shape}", REWRITE_SHAPE.get(itype, REWRITE_SHAPE["quote"])))
     if others:
         prompt += "\n其它条目（不要与它们重复）：" + others
-    try:
-        r = requests.post(url, headers={"Authorization": "Bearer " + key,
-                                        "Content-Type": "application/json"},
-                          json={"model": model,
-                                "messages": [{"role": "user", "content": prompt}]},
-                          timeout=180)
-        raw = r.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return None, "LLM 调用失败（%s）" % str(e)[:60]
-    m = _re.search(r"\{[\s\S]*\}", raw)
-    if not m:
-        return None, "LLM 未返回 JSON"
-    try:
-        j = json.loads(m.group())
-    except Exception:
-        return None, "LLM 返回的 JSON 解析失败"
-    if kind == "quote":
-        bg = str(j.get("bg") or "").strip()
-        if not bg:
-            return None, "LLM 没给出新的背景提示词"
-        new_item = {"text": item.get("text") or "",
-                    "cn": str(j.get("cn") or item.get("cn") or "").strip(),
-                    "bg": bg, "on": item.get("on", True)}
-        plan["quotes"][index] = new_item
-    else:
-        pr = str(j.get("prompt") or "").strip()
-        if not pr:
-            return None, "LLM 没给出新的绘图提示词"
-        asp = str(j.get("aspect") or "").strip()
-        new_item = {"scene": str(j.get("scene") or item.get("scene") or "").strip(),
-                    "prompt": pr,
-                    "aspect": asp if asp in ASPECTS else (item.get("aspect") or "3:4"),
-                    "on": item.get("on", True)}
-        plan["scenes"][index] = new_item
+    j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}])
+    if j is None:
+        return None, err
+    bg = str(j.get("bg") or "").strip()
+    if not bg:
+        return None, "LLM 没给出新的提示词"
+    texts = j.get("texts")
+    if not isinstance(texts, list):
+        texts = item.get("texts") or []
+    texts = [str(x).strip() for x in texts if str(x or "").strip()]
+    if itype == "photo":
+        texts = []
+    elif not texts:
+        texts = item.get("texts") or []
+    new_item = dict(item)
+    new_item["cn"] = str(j.get("cn") or item.get("cn") or "").strip()
+    new_item["texts"] = texts
+    new_item["bg"] = bg
+    items[index] = new_item
+    plan["quotes"], plan["scenes"] = _legacy_views(items)
     save_plan(article_id, plan)
     return new_item, None
+
 
 
 # ============================================================
@@ -905,8 +1030,8 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
                 if newp:
                     plan = newp
                     save_plan(article_id, plan)
-                    log("方案已生成：金句 %d 句 · 场景 %d 个 · 配色 %s"
-                        % (len(plan["quotes"]), len(plan["scenes"]), plan["style"]))
+                    log("方案已生成：%d 张（%s）· 配色 %s"
+                        % (len(plan["images"]), _type_brief(plan["images"]), plan["style"]))
                 else:
                     log("方案生成失败：%s" % reason)
                     if want_cards and not plan["quotes"]:
@@ -920,8 +1045,8 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
 
             if opts.get("plan_only"):
                 _set(job_id, status="done", finished_at=time.time(), total=0, done=0,
-                     quotes=plan["quotes"], scenes=plan["scenes"], style=plan["style"],
-                     want_cards=False, want_scenes=False)
+                     plan_images=plan["images"], quotes=plan["quotes"], scenes=plan["scenes"],
+                     style=plan["style"], want_cards=False, want_scenes=False)
                 log("方案已更新（仅分析，未出图、未开机）")
                 return
 

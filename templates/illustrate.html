@@ -18,7 +18,7 @@
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
         <div>
             <div style="font-weight:600;font-size:15px;">① 配图方案（AI 生成 · 可编辑 · 勾选出图条目）</div>
-            <div style="font-size:12px;color:#64748b;margin-top:3px;">AI 分析出两组候选（金句组 + 场景组）· 不开机不花钱 · 勾选要出的条目后再生成</div>
+            <div style="font-size:12px;color:#64748b;margin-top:3px;">AI 按平台 + 文案类型出清单（封面卡 / 金句卡 / 要点卡 / 画面）· 不开机不花钱 · 勾选要出的条目后再生成</div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;">
             <label style="font-size:12px;color:#64748b;">配色</label>
@@ -36,16 +36,10 @@
         📭 还没有配图方案 —— 点右上「① 生成方案」让 AI 分析文案
     </div>
 
-    <div id="plan-quotes-wrap" style="display:none;">
-        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🎴 金句组
-            <span id="q-count" style="color:#94a3b8;font-weight:400;"></span></div>
-        <div id="plan-quotes"></div>
-    </div>
-
-    <div id="plan-scenes-wrap" style="display:none;margin-top:18px;">
-        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🖼 场景组
-            <span id="s-count" style="color:#94a3b8;font-weight:400;"></span></div>
-        <div id="plan-scenes"></div>
+    <div id="plan-list-wrap" style="display:none;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🖼 配图清单
+            <span id="list-count" style="color:#94a3b8;font-weight:400;"></span></div>
+        <div id="plan-list"></div>
     </div>
 </div>
 
@@ -113,8 +107,9 @@
 <script>
 const ARTICLE_ID = {{ article_id }};
 const STYLE_LABEL = {purple:'深紫', dark:'玄黑', gold:'米金', maya:'青绿'};
-const ASPECTS = ['3:4','1:1','9:16','2.35:1'];
-let PLAN = {style:'', quotes:[], scenes:[]};
+const ASPECTS = ['3:4','1:1','9:16','16:9','2.35:1'];
+const ITYPE_LABEL = {cover:'封面卡', quote:'金句卡', points:'要点卡', photo:'画面'};
+let PLAN = {style:'', platform:'', images:[], quotes:[], scenes:[], note:{}};
 let IMAGES = [];
 const SEL = new Set();
 let LB_LIST = [], LB_IDX = 0;
@@ -124,113 +119,87 @@ let JOB_TIMER = null;
 /* ============ ① 方案 ============ */
 function renderPlan() {
     const empty = document.getElementById('plan-empty');
-    const qw = document.getElementById('plan-quotes-wrap');
-    const sw = document.getElementById('plan-scenes-wrap');
-    if (!PLAN.quotes.length && !PLAN.scenes.length) {
-        empty.style.display = 'block'; qw.style.display = 'none'; sw.style.display = 'none';
+    const wrap = document.getElementById('plan-list-wrap');
+    const list = PLAN.images || [];
+    if (!list.length) {
+        empty.style.display = 'block'; wrap.style.display = 'none';
         return;
     }
-    empty.style.display = 'none';
+    empty.style.display = 'none'; wrap.style.display = 'block';
     updatePickCount();
-    qw.style.display = PLAN.quotes.length ? 'block' : 'none';
-    sw.style.display = PLAN.scenes.length ? 'block' : 'none';
-
-    document.getElementById('plan-quotes').innerHTML = PLAN.quotes.map((q, i) => `
+    document.getElementById('plan-list').innerHTML = list.map((it, i) => `
         <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:10px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
                 <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                    <input type="checkbox" data-i="${i}" data-f="on" ${q.on !== false ? 'checked' : ''} style="width:auto;"> 金句 ${i+1}
+                    <input type="checkbox" data-i="${i}" data-f="on" ${it.on !== false ? 'checked' : ''} style="width:auto;">
+                    ${i+1}. ${ITYPE_LABEL[it.type] || it.type}
                 </label>
-                <div style="display:flex;align-items:center;gap:6px;">
-                    <button class="btn btn-outline btn-sm" id="rw-q-${i}" onclick="rewriteItem('quote',${i})">🔄 重写</button>
-                    <button class="btn btn-danger btn-sm" onclick="delQuote(${i})">✕</button>
-                </div>
-            </div>
-            <input type="text" data-i="${i}" data-f="text" value="${(q.text||'').replace(/"/g,'&quot;')}"
-                placeholder="金句（10-28 字）"
-                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">中文画面描述（给你看 · 背景画的是什么）</div>
-            <input type="text" data-i="${i}" data-f="cn" value="${(q.cn||'').replace(/"/g,'&quot;')}"
-                placeholder="中文画面描述"
-                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;margin-bottom:8px;">
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">背景提示词（英文 · 提交给 ComfyUI · 只画背景不出现文字）</div>
-            <textarea rows="3" data-i="${i}" data-f="bg"
-                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${q.bg||''}</textarea>
-        </div>`).join('');
-
-    document.getElementById('plan-scenes').innerHTML = PLAN.scenes.map((s, i) => `
-        <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:10px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
-                    <input type="checkbox" data-i="${i}" data-f="on" ${s.on !== false ? 'checked' : ''} style="width:auto;"> 画面 ${i+1}
-                </label>
-                <div style="display:flex;align-items:center;gap:6px;">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    ${(it.section || it.at) ? `
+                    <input type="text" data-i="${i}" data-f="section" value="${(it.section||'').replace(/"/g,'&quot;')}" placeholder="段落/镜号"
+                        style="width:96px;padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;">
+                    <input type="text" data-i="${i}" data-f="at" value="${(it.at||'').replace(/"/g,'&quot;')}" placeholder="时间点"
+                        style="width:78px;padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;">` : ''}
                     <select data-i="${i}" data-f="aspect" style="padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;">
-                        ${ASPECTS.map(a => `<option value="${a}" ${s.aspect===a?'selected':''}>${a}</option>`).join('')}
+                        ${ASPECTS.map(a => `<option value="${a}" ${it.aspect===a?'selected':''}>${a}</option>`).join('')}
                     </select>
-                    <button class="btn btn-outline btn-sm" id="rw-s-${i}" onclick="rewriteItem('scene',${i})">🔄 重写</button>
-                    <button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button>
+                    <button class="btn btn-outline btn-sm" id="rw-${i}" onclick="rewriteItem(${i})">🔄 重写</button>
+                    <button class="btn btn-danger btn-sm" onclick="delPlanItem(${i})">✕</button>
                 </div>
             </div>
-            <input type="text" data-i="${i}" data-f="scene" value="${(s.scene||'').replace(/"/g,'&quot;')}"
-                placeholder="画面描述（中文，20 字内）"
-                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">绘图提示词（英文 · 传给 ComfyUI）</div>
-            <textarea rows="3" data-i="${i}" data-f="prompt"
-                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${s.prompt||''}</textarea>
+            ${it.type === 'photo' ? '' : `
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">图上文字（一行一句 · 由程序叠加）</div>
+            <textarea rows="${Math.max(1, (it.texts||[]).length)}" data-i="${i}" data-f="texts" placeholder="图上文字"
+                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;resize:vertical;">${(it.texts||[]).join('\n')}</textarea>`}
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">中文画面描述（给你看 · 背景画的是什么）</div>
+            <input type="text" data-i="${i}" data-f="cn" value="${(it.cn||'').replace(/"/g,'&quot;')}" placeholder="中文画面描述"
+                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;margin-bottom:8px;">
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">${it.type === 'photo' ? '绘图提示词' : '背景提示词'}（英文 · 提交给 ComfyUI · 画面不出现文字）</div>
+            <textarea rows="3" data-i="${i}" data-f="bg"
+                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${it.bg||''}</textarea>
         </div>`).join('');
 
-    document.querySelectorAll('#plan-quotes input, #plan-quotes textarea').forEach(el => {
+    document.querySelectorAll('#plan-list input, #plan-list textarea, #plan-list select').forEach(el => {
         el.onchange = function() {
-            PLAN.quotes[+this.dataset.i][this.dataset.f] = (this.type === 'checkbox') ? this.checked : this.value;
-            if (this.type === 'checkbox') updatePickCount();
-        };
-    });
-    document.querySelectorAll('#plan-scenes input, #plan-scenes textarea, #plan-scenes select').forEach(el => {
-        el.onchange = function() {
-            PLAN.scenes[+this.dataset.i][this.dataset.f] = (this.type === 'checkbox') ? this.checked : this.value;
-            if (this.type === 'checkbox') updatePickCount();
+            const it = PLAN.images[+this.dataset.i];
+            if (!it) return;
+            const f = this.dataset.f;
+            if (this.type === 'checkbox') { it[f] = this.checked; updatePickCount(); }
+            else if (f === 'texts') it.texts = this.value.split('\n').map(s => s.trim()).filter(s => s);
+            else it[f] = this.value;
         };
     });
 }
 
 function updatePickCount() {
-    const qn = PLAN.quotes.filter(q => q.on !== false).length;
-    const sn = PLAN.scenes.filter(s => s.on !== false).length;
-    const qe = document.getElementById('q-count');
-    const se = document.getElementById('s-count');
-    if (qe) qe.textContent = '（' + PLAN.quotes.length + ' 句 · 已选 ' + qn + '）';
-    if (se) se.textContent = '（' + PLAN.scenes.length + ' 个 · 已选 ' + sn + '）';
+    const list = PLAN.images || [];
+    const n = list.filter(x => x.on !== false).length;
+    const el = document.getElementById('list-count');
+    if (el) el.textContent = '（共 ' + list.length + ' 张 · 已选 ' + n + '）';
 }
 
-function delQuote(i) { PLAN.quotes.splice(i, 1); renderPlan(); }
-function delScene(i) { PLAN.scenes.splice(i, 1); renderPlan(); }
+function delPlanItem(i) { PLAN.images.splice(i, 1); renderPlan(); }
 
-async function rewriteItem(kind, i) {
-    const arr = kind === 'quote' ? PLAN.quotes : PLAN.scenes;
-    const it = arr[i];
+async function rewriteItem(i) {
+    const it = (PLAN.images || [])[i];
     if (!it) return;
-    const cur = kind === 'quote' ? (it.bg || '（空）') : (it.prompt || '（空）');
-    const ans = prompt('重写「' + (kind === 'quote' ? '金句 ' + (i + 1) : '画面 ' + (i + 1)) + '」的' +
-                       (kind === 'quote' ? '背景提示词' : '绘图提示词') +
-                       '\n\n当前：' + cur +
-                       '\n\n可留空直接重写，也可写一句要求（如「换成山和云」）：', '');
+    const ans = prompt('重写「' + (i + 1) + '. ' + (ITYPE_LABEL[it.type] || it.type) + '」\n\n当前：' +
+                       (it.bg || '（空）') + '\n\n可留空直接重写，也可写一句要求（如「换成山和云」）：', '');
     if (ans === null) return;
-    const btn = document.getElementById((kind === 'quote' ? 'rw-q-' : 'rw-s-') + i);
+    const btn = document.getElementById('rw-' + i);
     const old = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 重写中…'; }
     try {
         const r = await api('/api/illustrate/rewrite-item', {method: 'POST',
-            body: JSON.stringify({article_id: ARTICLE_ID, kind: kind, index: i, hint: ans})});
+            body: JSON.stringify({article_id: ARTICLE_ID, index: i, hint: ans})});
         if (!r || r.error || !r.item) {
             toast('❌ ' + ((r && r.error) || '重写失败'), 'error');
             return;
         }
-        arr[i] = Object.assign({}, it, r.item);
+        PLAN.images[i] = Object.assign({}, it, r.item);
         await savePlan(true);
-        renderPlan();
-        toast('✅ 已重写 ' + (kind === 'quote' ? '金句 ' : '画面 ') + (i + 1) +
-              '（点「② 生成配图」会按新提示词出图）', 'success');
+        await loadPlan();
+        toast('✅ 已重写 ' + (i + 1) + '. ' + (ITYPE_LABEL[it.type] || it.type), 'success');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = old; }
     }
@@ -238,7 +207,8 @@ async function rewriteItem(kind, i) {
 
 async function loadPlan() {
     const r = await api('/api/articles/' + ARTICLE_ID + '/image-script', {method: 'GET'});
-    if (r && r.plan) PLAN = {style: r.plan.style || '', quotes: r.plan.quotes || [],
+    if (r && r.plan) PLAN = {style: r.plan.style || '', platform: r.plan.platform || '',
+                             images: r.plan.images || [], quotes: r.plan.quotes || [],
                              scenes: r.plan.scenes || [], note: r.plan.note || {}};
     document.getElementById('plan-style').value = PLAN.style || 'purple';
     renderPlan();
@@ -247,7 +217,8 @@ async function loadPlan() {
 async function savePlan(silent) {
     PLAN.style = document.getElementById('plan-style').value;
     const r = await api('/api/articles/' + ARTICLE_ID + '/image-script',
-                        {method: 'POST', body: JSON.stringify({plan: PLAN})});
+                        {method: 'POST', body: JSON.stringify({plan: {style: PLAN.style,
+                            platform: PLAN.platform, images: PLAN.images, note: PLAN.note}})});
     const ok = !!(r && r.ok);
     if (silent !== true) toast(ok ? '✅ 方案已保存' : '❌ 保存失败', ok ? 'success' : 'error');
     return ok;
@@ -297,8 +268,9 @@ function pollJob(jobId) {
         lg.textContent = (j.log || []).join('\n');
         lg.scrollTop = lg.scrollHeight;
         hint('状态：' + j.status + ' · ' + j.done + '/' + j.total);
-        if (j.quotes || j.scenes) {
+        if (j.plan_images || j.quotes || j.scenes) {
             PLAN.style = j.style || PLAN.style;
+            if (j.plan_images) PLAN.images = j.plan_images;
             if (j.quotes && j.quotes.length) PLAN.quotes = j.quotes;
             if (j.scenes && j.scenes.length) PLAN.scenes = j.scenes;
             document.getElementById('plan-style').value = PLAN.style || 'purple';

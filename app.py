@@ -842,21 +842,21 @@ def api_illustrate_job(job_id):
 
 @app.route('/api/illustrate/rewrite-item', methods=['POST'])
 def api_rewrite_item():
-    """只让 LLM 重写某一条的 bg/prompt（纯 LLM · 不开机 · 不整组重跑）"""
+    """只让 LLM 重写方案里某一条（纯 LLM · 不开机 · 不整组重跑）"""
     data = request.json or {}
-    article_id, kind, index = data.get('article_id'), data.get('kind'), data.get('index')
-    if not article_id or kind not in ('quote', 'scene') or index is None:
-        return jsonify({"error": "参数不完整（article_id / kind / index）"}), 400
+    article_id, index = data.get('article_id'), data.get('index')
+    if not article_id or index is None:
+        return jsonify({"error": "参数不完整（article_id / index）"}), 400
     try:
         index = int(index)
         article_id = int(article_id)
     except Exception:
         return jsonify({"error": "index / article_id 必须是数字"}), 400
-    item, err = rewrite_plan_item(article_id, kind, index,
+    item, err = rewrite_plan_item(article_id, index,
                                   data.get('hint') or '', get_llm_config())
     if err:
         return jsonify({"error": err})
-    return jsonify({"ok": True, "item": item, "kind": kind, "index": index})
+    return jsonify({"ok": True, "item": item, "index": index})
 
 
 @app.route('/api/illustrate/instance', methods=['GET'])

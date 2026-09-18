@@ -71,6 +71,39 @@
 </div>
 
 <div class="card" style="max-width:600px;">
+    <h3 style="margin-bottom:20px;">📝 配图提示词</h3>
+
+    <div class="form-group">
+        <label class="form-label">配图方案提示词模板（留空 = 用内置默认）</label>
+        <textarea class="form-input" id="llm-plan-prompt" rows="12"
+            placeholder="留空 = 使用内置默认模板（点下方「查看内置默认」可照抄修改）"
+            style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;resize:vertical;"></textarea>
+        <details style="margin-top:10px;">
+            <summary style="cursor:pointer;font-size:12px;color:#64748b;">查看内置默认</summary>
+            <pre style="white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px;font-size:12px;line-height:1.6;margin-top:8px;">{{ default_plan_prompt }}</pre>
+        </details>
+        <div style="font-size:12px;color:#64748b;margin-top:8px;line-height:1.7;">
+            必须保留占位符 <code>{card_want}</code>（金句条数）、<code>{scene_count}</code>（场景数）、<code>{content}</code>（文案正文）；
+            <code>{title}</code> 可选。<br>
+            必须保留「严格输出 JSON」那段与字段名（style / quotes / text / bg / scenes / scene / prompt / aspect / reason），否则方案解析会失败。<br>
+            <b>画面安全底线由系统固定附加</b>（不出现裸露/束缚/蒙眼/武器/血腥等），无论模板怎么写都会带上，无需在模板里重复写。
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">负面提示词 negative（留空 = 用内置默认）</label>
+        <textarea class="form-input" id="comfy-neg" rows="3"
+            placeholder="留空 = 使用内置默认负面词"
+            style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;resize:vertical;"></textarea>
+        <div style="font-size:12px;color:#64748b;margin-top:8px;line-height:1.7;">
+            所有配图共用。内置默认：<span style="color:#334155;">{{ default_neg }}</span>
+        </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="savePrompts()">保存提示词</button>
+</div>
+
+<div class="card" style="max-width:600px;">
     <h3 style="margin-bottom:20px;">默认配置</h3>
     
     <div class="form-group">
@@ -138,6 +171,8 @@ async function loadSettings() {
     document.getElementById('comfy-base-url').value = settings['comfy_base_url'] || '';
     document.getElementById('comfy-unet').value = settings['comfy_unet'] || 'qwen_image_fp8_e4m3fn.safetensors';
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
+    document.getElementById('llm-plan-prompt').value = settings['llm_plan_prompt'] || '';
+    document.getElementById('comfy-neg').value = settings['comfy_neg'] || '';
     if (settings['image_key']) document.getElementById('image-key').value = settings['image_key'];
     if (settings['tts_key']) document.getElementById('tts-key').value = settings['tts_key'];
     if (settings['default_type']) document.getElementById('default-type').value = settings['default_type'];
@@ -155,6 +190,20 @@ async function saveSettings() {
     };
     await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
     toast('配置保存成功');
+}
+
+async function savePrompts() {
+    const tpl = document.getElementById('llm-plan-prompt').value.trim();
+    const neg = document.getElementById('comfy-neg').value.trim();
+    if (tpl) {
+        const miss = ['{card_want}', '{scene_count}', '{content}'].filter(k => tpl.indexOf(k) < 0);
+        if (miss.length) {
+            alert('模板缺少占位符：' + miss.join('、') + '\n这三个是功能必需的（否则 LLM 拿不到对应内容），请补上再保存。');
+            return;
+        }
+    }
+    await api('/api/settings', {method: 'POST', body: JSON.stringify({llm_plan_prompt: tpl, comfy_neg: neg})});
+    toast('提示词已保存');
 }
 
 async function saveDefaults() {

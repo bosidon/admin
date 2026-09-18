@@ -41,7 +41,7 @@ LLM_DEFAULTS = {
 }
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
-                     read_plan, save_plan)
+                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, NEG)
 
 # ============================================================
 # 工具函数
@@ -63,7 +63,7 @@ def get_llm_config():
     try:
         rows = get_db().execute(
             "SELECT key, value FROM settings WHERE key IN "
-            "('llm_base_url','llm_model','llm_api_key')").fetchall()
+            "('llm_base_url','llm_model','llm_api_key','llm_plan_prompt')").fetchall()
         for r in rows:
             if r["value"]:
                 cfg[r["key"]] = r["value"]
@@ -231,7 +231,8 @@ def library():
 
 @app.route('/settings')
 def settings_page():
-    return render_template("settings.html")
+    return render_template("settings.html",
+                           default_plan_prompt=PLAN_PROMPT_DEFAULT, default_neg=NEG)
 
 # ============================================================
 # 页面 - 公众号文章

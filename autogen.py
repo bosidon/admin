@@ -40,6 +40,7 @@ DEFAULTS = {
     "comfy_vae": "qwen_image_vae.safetensors",
     "comfy_steps": "20",
     "comfy_auto_shutdown": "1",
+    "comfy_neg": "",
 }
 
 # aspect → (宽, 高)，与 illustrate.py 的 SIZES 对齐
@@ -51,7 +52,42 @@ ASPECT_SIZE = {
 }
 
 NEG = ("模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, "
-       "人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框")
+       "人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框, "
+       "裸露, 裸体, 绳索, 束缚, 捆绑, 蒙眼, 武器, 刀, 剑, 血腥, 恐怖, "
+       # 英文安全词：正向提示词是英文，中文负面词跨语言压制弱，双语更稳
+       "nude, nudity, naked, rope, bonding, bondage, tied up, blindfold, "
+       "weapon, knife, sword, blood, gore, horror, mutilation")
+
+# 画面安全底线：无论模板怎么改，都由 gen_plan 固定前置到提示词里（不可关闭）
+SAFETY_RULE = (
+    "【硬性安全要求 · 最高优先级 · 不得省略】本次所有配图："
+    "不得出现裸露或性暗示；不得出现人物被束缚、捆绑、蒙眼、镣铐控制等画面；"
+    "不得出现武器、刀剑、血腥、伤害、恐怖自伤；不得出现真实人物正脸（背影/侧影/剪影可以）；"
+    "不要使用绳索、链条、镣铐等束缚意象。若文案本身涉及此类内容，请改用隐喻表达（如光影、门、路、水、天空）。\n\n"
+)
+
+# 配图方案提示词模板：可被 settings.llm_plan_prompt 覆盖，留空=用此默认
+# 占位符：{card_want} 金句条数 / {scene_count} 场景数 / {title} 标题 / {content} 正文
+# 注意：只用 str.replace 替换占位符（不用 .format），否则模板里的 JSON 花括号会被当格式化字段
+PLAN_PROMPT_DEFAULT = (
+    "你是自媒体配图策划专家。请阅读下面的文案，为它设计一份完整的「配图方案」。\n\n"
+    "A. 金句卡：提取 {card_want} 句金句，每句 10-28 字，能独立成立、有感染力"
+    "（不要 emoji、不要话题标签）；并为每句写一个英文「背景绘图提示词」——只画氛围/意象背景，"
+    "画面中不要出现任何文字，风格统一 mystical / serene / minimal，"
+    "包含主体、光线、色调、构图，不要真实人物正脸。\n"
+    "B. 场景配图：设计 {scene_count} 个画面，每个给出 scene（中文画面描述，20 字内）、"
+    "prompt（英文 AI 绘图提示词，含主体/风格/光线/色调/构图，风格 mystical / serene / minimal，"
+    "画面中不要出现文字）、aspect（比例，从 3:4 / 1:1 / 9:16 / 2.35:1 中选一个）。\n"
+    "C. 配色：从 purple(深紫·灵性塔罗) / dark(玄黑·心理哲思) / gold(米金·疗愈温柔) / "
+    "maya(青绿·玛雅图腾) 中选一个最契合的。\n"
+    "D. 画面安全底线（必须遵守）：任何画面都不得出现裸露或性暗示、绳索/束缚/捆绑/蒙眼、"
+    "武器/刀剑/血腥/伤害/恐怖自伤等元素，不得出现真实人物正脸。\n\n"
+    "严格输出 JSON（不要输出多余文字）：\n"
+    '{"style":"dark","quotes":[{"text":"金句","bg":"english background prompt"}],'
+    '"scenes":[{"scene":"画面描述","prompt":"english image prompt","aspect":"3:4"}],'
+    '"reason":"一句话说明"}\n\n'
+    "文案标题：{title}\n文案正文：\n{content}"
+)
 
 # 运行期状态（内存）
 JOBS = {}
@@ -173,7 +209,8 @@ def build_workflow(prompt, w, h, seed, cfg, prefix, neg=None):
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": cfg.get("comfy_vae")}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": neg if neg else NEG, "clip": ["2", 0]}},
+              "inputs": {"text": (neg or cfg.get("comfy_neg") or "").strip() or NEG,
+                         "clip": ["2", 0]}},
         "6": {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
         "7": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": 2.5, "sampler_name": "euler",
@@ -398,23 +435,11 @@ def gen_plan(art, llm_cfg, card_want, scene_count):
     if not (key and url and content):
         return None, "未配置 LLM 或文案无正文"
 
-    prompt = (
-        "你是自媒体配图策划专家。请阅读下面的文案，为它设计一份完整的「配图方案」。\n\n"
-        "A. 金句卡：提取 " + str(card_want) + " 句金句，每句 10-28 字，能独立成立、有感染力"
-        "（不要 emoji、不要话题标签）；并为每句写一个英文「背景绘图提示词」——只画氛围/意象背景，"
-        "画面中不要出现任何文字，风格统一 mystical / serene / minimal，"
-        "包含主体、光线、色调、构图，不要真实人物正脸。\n"
-        "B. 场景配图：设计 " + str(scene_count) + " 个画面，每个给出 scene（中文画面描述，20 字内）、"
-        "prompt（英文 AI 绘图提示词，含主体/风格/光线/色调/构图，风格 mystical / serene / minimal，"
-        "画面中不要出现文字）、aspect（比例，从 3:4 / 1:1 / 9:16 / 2.35:1 中选一个）。\n"
-        "C. 配色：从 purple(深紫·灵性塔罗) / dark(玄黑·心理哲思) / gold(米金·疗愈温柔) / "
-        "maya(青绿·玛雅图腾) 中选一个最契合的。\n\n"
-        "严格输出 JSON（不要输出多余文字）：\n"
-        '{"style":"dark","quotes":[{"text":"金句","bg":"english background prompt"}],'
-        '"scenes":[{"scene":"画面描述","prompt":"english image prompt","aspect":"3:4"}],'
-        '"reason":"一句话说明"}\n\n'
-        "文案标题：" + title + "\n文案正文：\n" + content
-    )
+    tpl = (llm_cfg.get("llm_plan_prompt") or "").strip() or PLAN_PROMPT_DEFAULT
+    prompt = SAFETY_RULE + (tpl.replace("{card_want}", str(card_want))
+                 .replace("{scene_count}", str(scene_count))
+                 .replace("{title}", title)
+                 .replace("{content}", content))
     try:
         r = requests.post(url, headers={"Authorization": "Bearer " + key,
                                         "Content-Type": "application/json"},

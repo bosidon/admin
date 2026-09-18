@@ -41,8 +41,8 @@ LLM_DEFAULTS = {
 }
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
-                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, NEG, rewrite_plan_item,
-                     load_plan_prompt, save_plan_prompt)
+                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
+                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt)
 
 # ============================================================
 # 工具函数
@@ -253,8 +253,7 @@ def library():
 
 @app.route('/settings')
 def settings_page():
-    return render_template("settings.html",
-                           default_neg=NEG)
+    return render_template("settings.html")
 
 # ============================================================
 # 页面 - 公众号文章
@@ -741,7 +740,7 @@ def api_get_article_images(article_id):
 @app.route('/api/prompts/plan', methods=['GET'])
 def api_get_plan_prompt():
     """配图 Agent 的 System Prompt（文件 prompts/image_agent.md）"""
-    return jsonify({"ok": True, "content": load_plan_prompt(),
+    return jsonify({"ok": True, "content": load_plan_prompt_raw(),
                     "path": "prompts/image_agent.md"})
 
 
@@ -753,7 +752,7 @@ def api_save_plan_prompt():
         else save_plan_prompt(data.get('content') or '')
     if not ok:
         return jsonify({"error": err}), 400
-    return jsonify({"ok": True, "content": load_plan_prompt()})
+    return jsonify({"ok": True, "content": load_plan_prompt_raw()})
 
 
 @app.route('/api/articles/<int:article_id>/illustrations/logs')

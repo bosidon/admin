@@ -71,34 +71,17 @@
 </div>
 
 <div class="card" style="max-width:600px;">
-    <h3 style="margin-bottom:6px;">📋 配图 Agent System Prompt</h3>
-    <div style="font-size:12px;color:#64748b;margin-bottom:16px;line-height:1.7;">
-        存成一个文件：<code>prompts/image_agent.md</code>（进 git，可直接编辑）· 改坏可点「恢复内置默认」<br>
-        本次任务的参数（标题 / 正文 / 张数 / 平台）由系统作为另一条消息附上，<b>这里不用写占位符</b>。<br>
-        必须保留「输出格式」那段的字段名（style / quotes / text / cn / bg / scenes / scene / prompt / aspect / note），否则方案解析会失败。<br>
-        <b>画面安全底线由系统固定附加</b>（不出现裸露/束缚/蒙眼/武器/血腥等），无论怎么写都会带上，无需重复写。
-    </div>
+    <h3 style="margin-bottom:16px;">📋 配图 Agent System Prompt</h3>
 
     <div class="form-group">
-        <label class="form-label">System Prompt 内容</label>
+        <label class="form-label">System Prompt</label>
         <textarea class="form-input" id="plan-system-prompt" rows="20"
             style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;resize:vertical;"></textarea>
-    </div>
-
-    <div class="form-group">
-        <label class="form-label">负面提示词 negative（留空 = 用内置默认）</label>
-        <textarea class="form-input" id="comfy-neg" rows="3"
-            placeholder="留空 = 使用内置默认负面词"
-            style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;resize:vertical;"></textarea>
-        <div style="font-size:12px;color:#64748b;margin-top:8px;line-height:1.7;">
-            所有配图共用。内置默认：<span style="color:#334155;">{{ default_neg }}</span>
-        </div>
     </div>
 
     <div style="display:flex;gap:10px;align-items:center;">
         <button class="btn btn-primary" onclick="savePrompts()">保存提示词</button>
         <button class="btn btn-outline" onclick="resetPlanPrompt()">恢复内置默认</button>
-        <span id="prompt-status" style="font-size:12px;color:#64748b;"></span>
     </div>
 </div>
 
@@ -172,7 +155,6 @@ async function loadSettings() {
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
     const pr = await api('/api/prompts/plan');
     document.getElementById('plan-system-prompt').value = (pr && pr.content) || '';
-    document.getElementById('comfy-neg').value = settings['comfy_neg'] || '';
     if (settings['image_key']) document.getElementById('image-key').value = settings['image_key'];
     if (settings['tts_key']) document.getElementById('tts-key').value = settings['tts_key'];
     if (settings['default_type']) document.getElementById('default-type').value = settings['default_type'];
@@ -194,16 +176,12 @@ async function saveSettings() {
 
 async function savePrompts() {
     const sys = document.getElementById('plan-system-prompt').value.trim();
-    const neg = document.getElementById('comfy-neg').value.trim();
     if (!sys) { alert('System Prompt 不能为空（点「恢复内置默认」可找回）'); return; }
     const miss = ['quotes', 'scenes', 'bg', 'aspect', 'style'].filter(k => sys.indexOf(k) < 0);
     if (miss.length && !confirm('没检测到字段名：' + miss.join('、') +
         '\n缺了这些，方案可能解析失败。仍要保存吗？')) return;
-    const st = document.getElementById('prompt-status');
     const r = await api('/api/prompts/plan', {method: 'POST', body: JSON.stringify({content: sys})});
     if (!r || r.error) { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); return; }
-    await api('/api/settings', {method: 'POST', body: JSON.stringify({comfy_neg: neg})});
-    if (st) st.textContent = '已保存到 prompts/image_agent.md';
     toast('提示词已保存');
 }
 

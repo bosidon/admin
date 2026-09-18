@@ -95,3 +95,7 @@
 - 不编造事实（不虚构数据、案例、资质、用户评价）
 - 品牌色、Logo、真人肖像未经用户确认不要画
 - 图中文字要短、可读、不堆砌
+
+# 负面提示词（提交给 ComfyUI · 系统读取，不发给 LLM）
+
+模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框, 裸露, 裸体, 绳索, 束缚, 捆绑, 蒙眼, 武器, 刀, 剑, 血腥, 恐怖, nude, nudity, naked, rope, bonding, bondage, tied up, blindfold, weapon, knife, sword, blood, gore, horror, mutilation

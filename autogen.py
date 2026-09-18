@@ -10,6 +10,7 @@
 """
 import hashlib
 import json
+import re
 import random
 import sqlite3
 import threading
@@ -40,7 +41,6 @@ DEFAULTS = {
     "comfy_vae": "qwen_image_vae.safetensors",
     "comfy_steps": "20",
     "comfy_auto_shutdown": "1",
-    "comfy_neg": "",
 }
 
 # aspect → (宽, 高)，与 illustrate.py 的 SIZES 对齐
@@ -51,12 +51,17 @@ ASPECT_SIZE = {
     "2.35:1": (1080, 460),
 }
 
-NEG = ("模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, "
-       "人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框, "
-       "裸露, 裸体, 绳索, 束缚, 捆绑, 蒙眼, 武器, 刀, 剑, 血腥, 恐怖, "
-       # 英文安全词：正向提示词是英文，中文负面词跨语言压制弱，双语更稳
-       "nude, nudity, naked, rope, bonding, bondage, tied up, blindfold, "
-       "weapon, knife, sword, blood, gore, horror, mutilation")
+NEG_QUALITY = ("模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, "
+               "人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框")
+
+# 画面安全词：由系统强制附加，用户从文件里删掉也会被自动补回（删不掉）
+# 英文部分必要——正向提示词是英文，中文负面词跨语言压制弱，双语更稳
+NEG_SAFETY = ["裸露", "裸体", "绳索", "束缚", "捆绑", "蒙眼", "武器", "刀", "剑", "血腥", "恐怖",
+              "nude", "nudity", "naked", "rope", "bonding", "bondage", "tied up", "blindfold",
+              "weapon", "knife", "sword", "blood", "gore", "horror", "mutilation"]
+
+# 内置默认整条（文件里那段被整段删掉时回落到它）
+NEG = NEG_QUALITY + ", " + ", ".join(NEG_SAFETY)
 
 # 画面安全底线：无论模板怎么改，都由 gen_plan 固定前置到提示词里（不可关闭）
 SAFETY_RULE = (
@@ -194,6 +199,10 @@ PLAN_PROMPT_DEFAULT = """# 角色
 - 不编造事实（不虚构数据、案例、资质、用户评价）
 - 品牌色、Logo、真人肖像未经用户确认不要画
 - 图中文字要短、可读、不堆砌
+
+# 负面提示词（提交给 ComfyUI · 系统读取，不发给 LLM）
+
+模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框, 裸露, 裸体, 绳索, 束缚, 捆绑, 蒙眼, 武器, 刀, 剑, 血腥, 恐怖, nude, nudity, naked, rope, bonding, bondage, tied up, blindfold, weapon, knife, sword, blood, gore, horror, mutilation
 """
 
 # 用户消息模板：本次任务参数（System Prompt 里不出现占位符）
@@ -219,8 +228,13 @@ PLATFORM_LABEL = {
 }
 
 
-def load_plan_prompt():
-    """读 System Prompt 文件；缺失/读失败 → 用出厂默认（并自动补回文件）"""
+# 文件里「负面提示词」段的标题（该段由系统读取，不发给 LLM）
+NEG_HEADING_RE = re.compile(r"^#+\s*负面提示词.*$", re.M)
+NEXT_HEADING_RE = re.compile(r"^#+\s+", re.M)
+
+
+def load_plan_prompt_raw():
+    """整份文件内容（设置页显示/编辑用，含负面提示词段）；缺失/读失败 → 出厂默认并自动补回"""
     try:
         t = PLAN_PROMPT_FILE.read_text(encoding="utf-8").strip()
         if t:
@@ -229,6 +243,36 @@ def load_plan_prompt():
         pass
     save_plan_prompt(PLAN_PROMPT_DEFAULT)
     return PLAN_PROMPT_DEFAULT.strip()
+
+
+def _split_neg_section(raw):
+    """(发给 LLM 的 System Prompt, 负面提示词段文本)；没有该段则负面段为 ""。"""
+    m = NEG_HEADING_RE.search(raw or "")
+    if not m:
+        return (raw or "").strip(), ""
+    head = raw[:m.start()].strip()
+    tail = raw[m.end():]
+    m2 = NEXT_HEADING_RE.search(tail)          # 该段到下一个标题为止
+    if m2:
+        tail = tail[:m2.start()]
+    return head, tail.strip()
+
+
+def load_plan_prompt():
+    """发给 LLM 的 System Prompt：整份文件去掉「负面提示词」段"""
+    return _split_neg_section(load_plan_prompt_raw())[0]
+
+
+def load_negative_prompt():
+    """提交给 ComfyUI 的负面提示词：文件里的段 + 缺失的安全词自动补回（删不掉）"""
+    words = _split_neg_section(load_plan_prompt_raw())[1]
+    words = ", ".join(ln.strip() for ln in words.splitlines()
+                      if ln.strip() and not ln.strip().startswith("#"))
+    if not words:
+        return NEG
+    low = words.lower()
+    missing = [w for w in NEG_SAFETY if w.lower() not in low]
+    return (words + ", " + ", ".join(missing)) if missing else words
 
 
 def save_plan_prompt(text):
@@ -244,7 +288,7 @@ def save_plan_prompt(text):
         return False, "%s: %s" % (type(e).__name__, str(e)[:120])
 
 
-save_plan_prompt(load_plan_prompt())        # 确保 prompts/image_agent.md 存在（缺失即补回）
+save_plan_prompt(load_plan_prompt_raw())    # 确保 prompts/image_agent.md 存在（缺失即补回）
 
 # 运行期状态（内存）
 JOBS = {}
@@ -356,7 +400,7 @@ def comfy_ready(base, timeout=300, logger=None, interval=6):
     return False
 
 
-def build_workflow(prompt, w, h, seed, cfg, prefix, neg=None):
+def build_workflow(prompt, w, h, seed, cfg, prefix, neg):
     steps = int(cfg.get("comfy_steps") or 20)
     return {
         "1": {"class_type": "UNETLoader",
@@ -366,8 +410,7 @@ def build_workflow(prompt, w, h, seed, cfg, prefix, neg=None):
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": cfg.get("comfy_vae")}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
         "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": (neg or cfg.get("comfy_neg") or "").strip() or NEG,
-                         "clip": ["2", 0]}},
+              "inputs": {"text": neg, "clip": ["2", 0]}},
         "6": {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
         "7": {"class_type": "KSampler",
               "inputs": {"seed": seed, "steps": steps, "cfg": SAMPLER_CFG,
@@ -380,14 +423,14 @@ def build_workflow(prompt, w, h, seed, cfg, prefix, neg=None):
     }
 
 
-def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, neg=None, seed=None):
+def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, seed=None):
     """提交一张图并等待完成，返回 (filename, subfolder, meta)
 
     meta = 这张图最终提交给 ComfyUI 的提示词与参数（供任务日志/落库排查）"""
     if seed is None:
         seed = random.randint(1, 2 ** 31 - 1)
-    neg_text = (neg or cfg.get("comfy_neg") or "").strip() or NEG
-    wf = build_workflow(prompt, w, h, seed, cfg, prefix, neg=neg_text)
+    neg_text = load_negative_prompt()                # 文件里的「负面提示词」段 + 强制安全词
+    wf = build_workflow(prompt, w, h, seed, cfg, prefix, neg_text)
     meta = {"prompt": prompt, "neg": neg_text, "seed": seed,
             "steps": int(cfg.get("comfy_steps") or 20), "cfg": SAMPLER_CFG,
             "sampler": SAMPLER_NAME, "scheduler": SCHEDULER,

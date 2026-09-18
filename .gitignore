@@ -5,4 +5,8 @@ data/database.db
 __pycache__/
 *.pyc
 data/projects/
+data/articles/
+data/library/
+data/video/
+data/xhs/
 static/generated/

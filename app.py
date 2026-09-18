@@ -41,7 +41,7 @@ LLM_DEFAULTS = {
 }
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
-                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, NEG)
+                     read_plan, save_plan, PLAN_PROMPT_DEFAULT, NEG, rewrite_plan_item)
 
 # ============================================================
 # 工具函数
@@ -172,6 +172,27 @@ def init_content_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME
         );
+    ''')
+    # 出图参数记录（「参数透明化」：每张图提交给 ComfyUI 的提示词与参数）
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS illustration_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id INTEGER NOT NULL,
+            name VARCHAR(120) NOT NULL,
+            kind VARCHAR(20) DEFAULT '',
+            prompt TEXT,
+            neg TEXT,
+            style VARCHAR(20) DEFAULT '',
+            seed INTEGER,
+            steps INTEGER,
+            cfg REAL,
+            sampler VARCHAR(40) DEFAULT '',
+            scheduler VARCHAR(40) DEFAULT '',
+            width INTEGER,
+            height INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_illu_logs_article ON illustration_logs(article_id);
     ''')
     # Auto-migrate: add platform/content_type if missing
     cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
@@ -716,6 +737,24 @@ def api_get_article_images(article_id):
     return jsonify({"ok": True, "images": imgs})
 
 
+@app.route('/api/articles/<int:article_id>/illustrations/logs')
+def api_illustration_logs(article_id):
+    """每张配图生成时提交的提示词与参数（出图排查用）"""
+    db = get_content_db()
+    try:
+        rows = db.execute(
+            'SELECT name, kind, prompt, neg, style, seed, steps, cfg, sampler, scheduler, '
+            'width, height, created_at FROM illustration_logs WHERE article_id=? '
+            'ORDER BY id DESC', (article_id,)).fetchall()
+    except Exception:
+        rows = []
+    logs = {}
+    for r in rows:
+        d = dict(r)
+        logs.setdefault(d.pop('name'), d)          # 同名只留最新一条
+    return jsonify({"ok": True, "logs": logs})
+
+
 @app.route('/illustrate/<int:article_id>')
 def illustrate_page(article_id):
     """配图编辑页"""
@@ -781,6 +820,25 @@ def api_illustrate_job(job_id):
     if not j:
         return jsonify({"error": "任务不存在或已过期"}), 404
     return jsonify(dict(ok=True, **j))
+
+
+@app.route('/api/illustrate/rewrite-item', methods=['POST'])
+def api_rewrite_item():
+    """只让 LLM 重写某一条的 bg/prompt（纯 LLM · 不开机 · 不整组重跑）"""
+    data = request.json or {}
+    article_id, kind, index = data.get('article_id'), data.get('kind'), data.get('index')
+    if not article_id or kind not in ('quote', 'scene') or index is None:
+        return jsonify({"error": "参数不完整（article_id / kind / index）"}), 400
+    try:
+        index = int(index)
+        article_id = int(article_id)
+    except Exception:
+        return jsonify({"error": "index / article_id 必须是数字"}), 400
+    item, err = rewrite_plan_item(article_id, kind, index,
+                                  data.get('hint') or '', get_llm_config())
+    if err:
+        return jsonify({"error": err})
+    return jsonify({"ok": True, "item": item, "kind": kind, "index": index})
 
 
 @app.route('/api/illustrate/instance', methods=['GET'])
@@ -887,6 +945,11 @@ def api_delete_image():
         if p.is_file():
             p.unlink()
             deleted = True
+    except Exception:
+        pass
+    try:
+        db.execute('DELETE FROM illustration_logs WHERE article_id=? AND name=?',
+                   (article_id, name))
     except Exception:
         pass
     cur = [u for u in cur if u != url]

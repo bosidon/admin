@@ -85,6 +85,17 @@
     <div id="img-groups"></div>
 </div>
 
+<!-- 参数弹窗 -->
+<div id="meta-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:9998;align-items:center;justify-content:center;padding:20px;">
+    <div style="background:#fff;border-radius:12px;max-width:720px;width:100%;max-height:82vh;overflow:auto;padding:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div style="font-weight:600;font-size:15px;">ⓘ 这张图的生成参数</div>
+            <button class="btn btn-outline btn-sm" onclick="document.getElementById('meta-modal').style.display='none'">✕ 关闭</button>
+        </div>
+        <pre id="meta-body" style="white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:12px;line-height:1.7;font-family:ui-monospace,monospace;margin:0;"></pre>
+    </div>
+</div>
+
 <!-- 灯箱 -->
 <div id="lb" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.92);z-index:9999;align-items:center;justify-content:center;flex-direction:column;padding:20px;">
     <img id="lb-img" alt="" style="max-width:92vw;max-height:78vh;box-shadow:0 10px 40px rgba(0,0,0,.7);border-radius:4px;">
@@ -107,6 +118,7 @@ let PLAN = {style:'', quotes:[], scenes:[]};
 let IMAGES = [];
 const SEL = new Set();
 let LB_LIST = [], LB_IDX = 0;
+let LOGS = {};
 let JOB_TIMER = null;
 
 /* ============ ① 方案 ============ */
@@ -129,7 +141,10 @@ function renderPlan() {
                 <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
                     <input type="checkbox" data-i="${i}" data-f="on" ${q.on !== false ? 'checked' : ''} style="width:auto;"> 金句 ${i+1}
                 </label>
-                <button class="btn btn-danger btn-sm" onclick="delQuote(${i})">✕</button>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <button class="btn btn-outline btn-sm" id="rw-q-${i}" onclick="rewriteItem('quote',${i})">🔄 重写</button>
+                    <button class="btn btn-danger btn-sm" onclick="delQuote(${i})">✕</button>
+                </div>
             </div>
             <input type="text" data-i="${i}" data-f="text" value="${(q.text||'').replace(/"/g,'&quot;')}"
                 placeholder="金句（10-28 字）"
@@ -149,6 +164,7 @@ function renderPlan() {
                     <select data-i="${i}" data-f="aspect" style="padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;">
                         ${ASPECTS.map(a => `<option value="${a}" ${s.aspect===a?'selected':''}>${a}</option>`).join('')}
                     </select>
+                    <button class="btn btn-outline btn-sm" id="rw-s-${i}" onclick="rewriteItem('scene',${i})">🔄 重写</button>
                     <button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button>
                 </div>
             </div>
@@ -185,6 +201,36 @@ function updatePickCount() {
 
 function delQuote(i) { PLAN.quotes.splice(i, 1); renderPlan(); }
 function delScene(i) { PLAN.scenes.splice(i, 1); renderPlan(); }
+
+async function rewriteItem(kind, i) {
+    const arr = kind === 'quote' ? PLAN.quotes : PLAN.scenes;
+    const it = arr[i];
+    if (!it) return;
+    const cur = kind === 'quote' ? (it.bg || '（空）') : (it.prompt || '（空）');
+    const ans = prompt('重写「' + (kind === 'quote' ? '金句 ' + (i + 1) : '画面 ' + (i + 1)) + '」的' +
+                       (kind === 'quote' ? '背景提示词' : '绘图提示词') +
+                       '\n\n当前：' + cur +
+                       '\n\n可留空直接重写，也可写一句要求（如「换成山和云」）：', '');
+    if (ans === null) return;
+    const btn = document.getElementById((kind === 'quote' ? 'rw-q-' : 'rw-s-') + i);
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 重写中…'; }
+    try {
+        const r = await api('/api/illustrate/rewrite-item', {method: 'POST',
+            body: JSON.stringify({article_id: ARTICLE_ID, kind: kind, index: i, hint: ans})});
+        if (!r || r.error || !r.item) {
+            toast('❌ ' + ((r && r.error) || '重写失败'), 'error');
+            return;
+        }
+        arr[i] = Object.assign({}, it, r.item);
+        await savePlan(true);
+        renderPlan();
+        toast('✅ 已重写 ' + (kind === 'quote' ? '金句 ' : '画面 ') + (i + 1) +
+              '（点「② 生成配图」会按新提示词出图）', 'success');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+}
 
 async function loadPlan() {
     const r = await api('/api/articles/' + ARTICLE_ID + '/image-script', {method: 'GET'});
@@ -325,6 +371,7 @@ function renderImages() {
                     <div style="padding:6px;text-align:center;">
                         ${badge}
                         <a href="${u}" download style="font-size:12px;color:#7c3aed;text-decoration:none;margin-right:10px;">下载</a>
+                        <a href="javascript:;" onclick="showMeta('${u}')" style="font-size:12px;color:#0369a1;text-decoration:none;margin-right:10px;">ⓘ 参数</a>
                         <a href="javascript:;" onclick="delImage('${u}')" style="font-size:12px;color:#dc2626;text-decoration:none;">删除</a>
                     </div>
                 </div>`;
@@ -387,9 +434,35 @@ async function delImage(url) {
 }
 
 async function loadImages() {
-    const r = await api('/api/articles/' + ARTICLE_ID + '/images', {method: 'GET'});
+    const [r, lg] = await Promise.all([
+        api('/api/articles/' + ARTICLE_ID + '/images', {method: 'GET'}),
+        api('/api/articles/' + ARTICLE_ID + '/illustrations/logs', {method: 'GET'})
+    ]);
     IMAGES = (r && r.images) || [];
+    LOGS = (lg && lg.logs) || {};
     renderImages();
+}
+
+function showMeta(url) {
+    const name = (url || '').split('/').pop();
+    const m = LOGS[name];
+    if (!m) { toast('这张图是本次改动前生成的，没有参数记录', 'info'); return; }
+    const lines = [
+        '文件名：' + name,
+        '类型：' + ({card: '金句卡', scene: '场景图'}[m.kind] || m.kind || '-'),
+        '配色：' + (m.style || '-') + '   尺寸：' + (m.width || '-') + 'x' + (m.height || '-'),
+        '参数：seed=' + m.seed + ' · steps=' + m.steps + ' · cfg=' + m.cfg +
+            ' · ' + m.sampler + '/' + m.scheduler,
+        '生成时间：' + (m.created_at || '-'),
+        '',
+        '—— 正向提示词（最终提交给 ComfyUI）——',
+        m.prompt || '',
+        '',
+        '—— 负面提示词 ——',
+        m.neg || ''
+    ];
+    document.getElementById('meta-body').textContent = lines.join('\n');
+    document.getElementById('meta-modal').style.display = 'flex';
 }
 
 /* ============ 灯箱 ============ */
@@ -414,6 +487,8 @@ function lbClose() {
     document.getElementById('lb-img').src = '';
 }
 document.addEventListener('keydown', function(e) {
+    const mm = document.getElementById('meta-modal');
+    if (mm && mm.style.display === 'flex' && e.key === 'Escape') { mm.style.display = 'none'; return; }
     if (document.getElementById('lb').style.display !== 'flex') return;
     if (e.key === 'Escape') lbClose();
     else if (e.key === 'ArrowLeft') lbPrev();

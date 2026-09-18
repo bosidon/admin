@@ -66,6 +66,34 @@ SAFETY_RULE = (
     "不要使用绳索、链条、镣铐等束缚意象。若文案本身涉及此类内容，请改用隐喻表达（如光影、门、路、水、天空）。\n\n"
 )
 
+# 采样参数（build_workflow 出图与「参数透明化」日志共用，避免两处漂移）
+SAMPLER_CFG = 2.5
+SAMPLER_NAME = "euler"
+SCHEDULER = "simple"
+DENOISE = 1.0
+
+# 配色的英文色卡：出图时追加到正向提示词，让 AI 背景与卡片配色成套
+STYLE_PROMPT = {
+    "purple": "deep indigo and violet color palette, muted gold accents",
+    "dark": "near-black charcoal color palette, low-key quiet lighting",
+    "gold": "warm cream and soft beige color palette, gentle golden light",
+    "maya": "deep teal and jade green color palette, turquoise tones",
+}
+
+# 金句没写 bg 时的兜底背景词（不含颜色，颜色由 STYLE_PROMPT 按当前配色补）
+FALLBACK_BG = ("Mystical serene minimal full-bleed background, soft light, "
+               "no text, no letters, no people")
+
+
+def _with_style(prompt, style):
+    """给正向提示词补上配色色卡；没有对应配色就原样返回"""
+    frag = STYLE_PROMPT.get(style or "")
+    p2 = (prompt or "").strip()
+    if not frag:
+        return p2
+    return (p2.rstrip(" ,") + ", " + frag) if p2 else frag
+
+
 # 配图方案提示词模板：可被 settings.llm_plan_prompt 覆盖，留空=用此默认
 # 占位符：{card_want} 金句条数 / {scene_count} 场景数 / {title} 标题 / {content} 正文
 # 注意：只用 str.replace 替换占位符（不用 .format），否则模板里的 JSON 花括号会被当格式化字段
@@ -213,8 +241,9 @@ def build_workflow(prompt, w, h, seed, cfg, prefix, neg=None):
                          "clip": ["2", 0]}},
         "6": {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
         "7": {"class_type": "KSampler",
-              "inputs": {"seed": seed, "steps": steps, "cfg": 2.5, "sampler_name": "euler",
-                         "scheduler": "simple", "denoise": 1.0, "model": ["1", 0],
+              "inputs": {"seed": seed, "steps": steps, "cfg": SAMPLER_CFG,
+                         "sampler_name": SAMPLER_NAME, "scheduler": SCHEDULER,
+                         "denoise": DENOISE, "model": ["1", 0],
                          "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0]}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "SaveImage",
@@ -223,10 +252,17 @@ def build_workflow(prompt, w, h, seed, cfg, prefix, neg=None):
 
 
 def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, neg=None, seed=None):
-    """提交一张图并等待完成，返回 (filename, subfolder)"""
+    """提交一张图并等待完成，返回 (filename, subfolder, meta)
+
+    meta = 这张图最终提交给 ComfyUI 的提示词与参数（供任务日志/落库排查）"""
     if seed is None:
         seed = random.randint(1, 2 ** 31 - 1)
-    wf = build_workflow(prompt, w, h, seed, cfg, prefix, neg=neg)
+    neg_text = (neg or cfg.get("comfy_neg") or "").strip() or NEG
+    wf = build_workflow(prompt, w, h, seed, cfg, prefix, neg=neg_text)
+    meta = {"prompt": prompt, "neg": neg_text, "seed": seed,
+            "steps": int(cfg.get("comfy_steps") or 20), "cfg": SAMPLER_CFG,
+            "sampler": SAMPLER_NAME, "scheduler": SCHEDULER,
+            "width": w, "height": h}
     r = requests.post(base + "/prompt", json={"prompt": wf}, timeout=60)
     if r.status_code != 200:
         raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, r.text[:300]))
@@ -246,7 +282,7 @@ def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, neg=None, seed=
                     (entry.get("status") or {}).get("messages", []), ensure_ascii=False)[:300])
             for node in (entry.get("outputs") or {}).values():
                 for im in (node.get("images") or []):
-                    return im.get("filename"), im.get("subfolder", "")
+                    return im.get("filename"), im.get("subfolder", ""), meta
     raise RuntimeError("生成超时（%ds）" % timeout)
 
 
@@ -286,6 +322,39 @@ def _merge_images(article_id, new_urls, drop_prefix=None):
     conn.commit()
     conn.close()
     return cur
+
+
+def _save_gen_log(article_id, name, kind, meta, style=""):
+    """把每张图最终提交的提示词与参数落库（出图排查用）；返回 None 或错误文案"""
+    try:
+        conn = _content_db()
+        conn.execute("DELETE FROM illustration_logs WHERE article_id=? AND name=?",
+                     (article_id, name))
+        conn.execute(
+            "INSERT INTO illustration_logs (article_id, name, kind, prompt, neg, style, "
+            "seed, steps, cfg, sampler, scheduler, width, height) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (article_id, name, kind, meta.get("prompt", ""), meta.get("neg", ""), style,
+             meta.get("seed"), meta.get("steps"), meta.get("cfg"),
+             meta.get("sampler"), meta.get("scheduler"),
+             meta.get("width"), meta.get("height")))
+        conn.commit()
+        conn.close()
+        return None
+    except Exception as e:
+        return "%s: %s" % (type(e).__name__, str(e)[:120])
+
+
+def _log_gen_meta(log, article_id, name, kind, meta, style):
+    """任务日志打印 + 落库：这张图最终提交的提示词与参数"""
+    log("\u24d8 参数：seed=%s · steps=%s · cfg=%s · %s/%s · %dx%d · 配色 %s"
+        % (meta.get("seed"), meta.get("steps"), meta.get("cfg"), meta.get("sampler"),
+           meta.get("scheduler"), meta.get("width"), meta.get("height"), style or "-"))
+    log("\u24d8 正向：" + (meta.get("prompt") or ""))
+    log("\u24d8 负面：" + (meta.get("neg") or ""))
+    err = _save_gen_log(article_id, name, kind, meta, style)
+    if err:
+        log("⚠ 参数未落库（%s）" % err)
 
 
 # ============================================================
@@ -481,6 +550,112 @@ def gen_plan(art, llm_cfg, card_want, scene_count):
 
 
 # ============================================================
+# 单条重写提示词（只重写一条，不整组重跑 · 纯 LLM 不开机）
+# ============================================================
+REWRITE_PROMPT = (
+    "你是自媒体配图策划专家。下面这条【{kind_label}】的配图描述不理想，请只重写这一条，"
+    "其它条目一律不要改动。\n\n"
+    "当前条目：\n{current}\n\n"
+    "要求：{requirement}\n"
+    "{palette}"
+    "{hint}"
+    "文案标题：{title}\n"
+    "文案正文（节选）：\n{content}\n\n"
+    "严格输出 JSON（不要输出多余文字）：{shape}"
+)
+
+
+def rewrite_plan_item(article_id, kind, index, hint, llm_cfg):
+    """只让 LLM 重写某一条的 bg（kind='quote'）/ prompt（kind='scene'）。
+
+    返回 (新条目|None, 错误文案|None)；任何解析/校验失败都保持原值不动。"""
+    import re as _re
+    if RUN_LOCK.locked():
+        return None, "有生成任务正在跑，稍后再试"
+    llm_cfg = llm_cfg or {}
+    key = llm_cfg.get("llm_api_key", "")
+    url = llm_cfg.get("llm_base_url") or ""
+    model = llm_cfg.get("llm_model") or "deepseek-chat"
+    if not (key and url):
+        return None, "未配置 LLM"
+    plan = read_plan(article_id)
+    items = plan["quotes"] if kind == "quote" else plan["scenes"]
+    if not (0 <= index < len(items)):
+        return None, "条目不存在"
+    item = items[index]
+    art = _read_article_full(article_id) or {}
+    title = art.get("title") or ""
+    content = (art.get("content_md") or "")[:2000]
+    if kind == "quote":
+        others = "；".join([(q.get("text") or "") for j, q in enumerate(items) if j != index][:8])
+        cur = "金句：%s\n当前背景提示词（英文）：%s" % (
+            item.get("text") or "", item.get("bg") or "（空）")
+        requirement = ("换一个完全不同的氛围/意象背景（不要沿用当前的意象）。"
+                       "bg 为英文绘图提示词：只画氛围与意象背景，画面中不要出现任何文字，"
+                       "风格统一 mystical / serene / minimal，包含主体、光线、色调、构图，"
+                       "不要真实人物正脸。")
+        shape = '{"bg":"english background prompt"}'
+    else:
+        others = "；".join([(x.get("scene") or "") for j, x in enumerate(items) if j != index][:8])
+        cur = "画面描述：%s\n当前绘图提示词（英文）：%s\n当前比例：%s" % (
+            item.get("scene") or "", item.get("prompt") or "（空）", item.get("aspect") or "3:4")
+        requirement = ("换一个完全不同的画面构思（不要沿用当前的构思）。"
+                       "scene 为中文画面描述（20 字内）；prompt 为英文绘图提示词，"
+                       "含主体/风格/光线/色调/构图，画面中不要出现文字；"
+                       "aspect 从 3:4 / 1:1 / 9:16 / 2.35:1 中选一个。")
+        shape = '{"scene":"画面描述","prompt":"english image prompt","aspect":"3:4"}'
+    h = (hint or "").strip()
+    _frag = STYLE_PROMPT.get(plan.get("style") or "")
+    palette = ("配色：本次整套配图的配色是 %s，画面色调请围绕「%s」。\n"
+               % (plan.get("style"), _frag)) if _frag else ""
+    prompt = (SAFETY_RULE + REWRITE_PROMPT
+              .replace("{kind_label}", "金句卡" if kind == "quote" else "场景图")
+              .replace("{current}", cur)
+              .replace("{requirement}", requirement)
+              .replace("{palette}", palette)
+              .replace("{hint}", ("额外要求（优先满足）：%s\n" % h) if h else "")
+              .replace("{title}", title)
+              .replace("{content}", content)
+              .replace("{shape}", shape))
+    if others:
+        prompt += "\n其它条目（不要与它们重复）：" + others
+    try:
+        r = requests.post(url, headers={"Authorization": "Bearer " + key,
+                                        "Content-Type": "application/json"},
+                          json={"model": model,
+                                "messages": [{"role": "user", "content": prompt}]},
+                          timeout=180)
+        raw = r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return None, "LLM 调用失败（%s）" % str(e)[:60]
+    m = _re.search(r"\{[\s\S]*\}", raw)
+    if not m:
+        return None, "LLM 未返回 JSON"
+    try:
+        j = json.loads(m.group())
+    except Exception:
+        return None, "LLM 返回的 JSON 解析失败"
+    if kind == "quote":
+        bg = str(j.get("bg") or "").strip()
+        if not bg:
+            return None, "LLM 没给出新的背景提示词"
+        new_item = {"text": item.get("text") or "", "bg": bg, "on": item.get("on", True)}
+        plan["quotes"][index] = new_item
+    else:
+        pr = str(j.get("prompt") or "").strip()
+        if not pr:
+            return None, "LLM 没给出新的绘图提示词"
+        asp = str(j.get("aspect") or "").strip()
+        new_item = {"scene": str(j.get("scene") or item.get("scene") or "").strip(),
+                    "prompt": pr,
+                    "aspect": asp if asp in ASPECTS else (item.get("aspect") or "3:4"),
+                    "on": item.get("on", True)}
+        plan["scenes"][index] = new_item
+    save_plan(article_id, plan)
+    return new_item, None
+
+
+# ============================================================
 # 统一生成任务（金句卡 + 场景配图，一次开机一次关机）
 # ============================================================
 def start_generate(article_id, opts, llm_cfg, card_size, card_want, scene_count):
@@ -614,12 +789,10 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
             if quotes:
                 cw, ch = SIZES.get(card_size, SIZES["xiaohongshu"])
                 for i, q in enumerate(quotes):
-                    bgp = q.get("bg") or (
-                        "Mystical serene minimal full-bleed background, soft light, "
-                        "deep indigo and muted gold, no text, no letters, no people")
+                    bgp = _with_style(q.get("bg") or FALLBACK_BG, style)
                     log("金句卡 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
-                    fn, sub = comfy_generate(base, bgp, cw, ch,
-                                             "qcbg_%d_%d" % (article_id, i), cfg)
+                    fn, sub, meta = comfy_generate(base, bgp, cw, ch,
+                                                   "qcbg_%d_%d" % (article_id, i), cfg)
                     bg = comfy_download(base, fn, sub)
                     card = compose_card_over_bg(bg, q["text"], style=style,
                                                 size=card_size, qr_link=None)
@@ -633,14 +806,16 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
                             JOBS[job_id]["done"] = done
                             JOBS[job_id]["images"] = list(card_urls + scene_urls)
                     log("金句卡 %d 完成 → %s" % (i + 1, name))
+                    _log_gen_meta(log, article_id, name, "card", meta, style)
 
             # ---- ⑤ 场景配图：纯画面 ----
             for i, s in enumerate(scenes):
                 w, h = ASPECT_SIZE.get(s["aspect"], ASPECT_SIZE["3:4"])
+                sp = _with_style(s["prompt"], style)
                 log("场景图 %d/%d 生成中（%s → %dx%d）…"
                     % (i + 1, len(scenes), s["aspect"], w, h))
-                fn, sub = comfy_generate(base, s["prompt"], w, h,
-                                         "zl_%d_%d" % (article_id, i), cfg)
+                fn, sub, meta = comfy_generate(base, sp, w, h,
+                                               "zl_%d_%d" % (article_id, i), cfg)
                 data = comfy_download(base, fn, sub)
                 name = "ai_%02d_%s.png" % (i, hashlib.md5(data).hexdigest()[:6])
                 (out_dir / name).write_bytes(data)
@@ -651,6 +826,7 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
                         JOBS[job_id]["done"] = done
                         JOBS[job_id]["images"] = list(card_urls + scene_urls)
                 log("场景图 %d 完成 → %s" % (i + 1, name))
+                _log_gen_meta(log, article_id, name, "scene", meta, style)
 
             # ---- ⑥ 二维码图（跟金句卡同组）----
             if card_urls and link:

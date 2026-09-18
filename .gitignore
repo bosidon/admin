@@ -4,3 +4,5 @@ data/*.db-journal
 data/database.db
 __pycache__/
 *.pyc
+data/projects/
+static/generated/

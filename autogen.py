@@ -423,19 +423,44 @@ def adl_power_off():
     return _adl("POST", "/power_off", {"instance_uuid": cfg.get("comfy_instance_uuid", "")})
 
 
+def _comfy_ping(base, timeout=6):
+    """快速探一下 /system_stats（配好的地址可能因实例换区/重建而失效）"""
+    try:
+        return requests.get(base.rstrip("/") + "/system_stats", timeout=timeout).status_code == 200
+    except Exception:
+        return False
+
+
+def _snapshot_domain():
+    """实例实时域名（AutoDL 换区/重建后域名会变）"""
+    try:
+        snap = adl_snapshot().get("data") or {}
+    except Exception:
+        snap = {}
+    dom = str(snap.get("service_6006_domain") or "").strip().rstrip("/")
+    if not dom:
+        return ""
+    return dom if dom.startswith("http") else "https://" + dom
+
+
 def resolve_base_url(logger=None):
-    """ComfyUI 访问地址：settings 优先，空则从 snapshot 的 service_6006_domain 取"""
+    """ComfyUI 访问地址：settings 优先；配了但探不通 → 自动回落到实例实时域名"""
     cfg = get_comfy_config()
     base = (cfg.get("comfy_base_url") or "").strip().rstrip("/")
-    if not base:
-        snap = adl_snapshot().get("data") or {}
-        dom = snap.get("service_6006_domain") or ""
-        if dom:
-            base = "https://" + dom
-            if logger:
-                logger("从 snapshot 自动取到 ComfyUI 地址：" + base)
     if base and not base.startswith("http"):
         base = "https://" + base
+    if base and _comfy_ping(base):
+        return base
+    live = _snapshot_domain()
+    if live and live.rstrip("/") != base.rstrip("/"):
+        if logger:
+            if base:
+                logger("配置的 ComfyUI 地址探不通（%s），改用实例实时域名：%s" % (base, live))
+            else:
+                logger("未配置 ComfyUI 地址，改用实例实时域名：" + live)
+        return live
+    if not base and live:
+        return live
     return base
 
 

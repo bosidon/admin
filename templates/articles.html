@@ -3,10 +3,39 @@
 {% block page_title %}✍️ 文案制作{% endblock %}
 {% block topbar_right %}
 <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
-<button class="btn btn-primary" onclick="showGenerate()">✨ 快速生成</button>
 {% endblock %}
 
 {% block content %}
+<!-- 业务线 -->
+<div class="card" style="padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <div id="line-pills" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+    <span id="line-home" style="margin-left:auto;font-size:12px;color:#94a3b8;"></span>
+</div>
+
+<!-- 制作 -->
+<div class="card">
+    <div id="gen-form"></div>
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px;">
+        <span id="gen-status" style="font-size:12px;color:#94a3b8;"></span>
+        <button class="btn btn-primary" id="gen-btn" onclick="doGenerate()">✨ 生成文案</button>
+    </div>
+</div>
+
+<!-- 成稿 -->
+<div class="card" id="draft-card" style="display:none;">
+    <input id="dr-title" placeholder="标题" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:16px;font-weight:600;margin-bottom:10px;">
+    <textarea id="dr-body" rows="16" placeholder="正文" style="width:100%;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:14px;line-height:1.8;font-family:inherit;resize:vertical;"></textarea>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;">
+        <button class="btn btn-primary btn-sm" onclick="saveDraft()">💾 保存</button>
+        <a class="btn btn-outline btn-sm" id="dr-illustrate" href="#" target="_blank">🖼 去配图</a>
+        <button class="btn btn-outline btn-sm" onclick="copyDraftLink()">🔗 复制推广链接</button>
+        <span style="margin-left:auto;font-size:12px;color:#94a3b8;">改写为</span>
+        <select id="dr-platform" style="padding:5px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;"></select>
+        <select id="dr-type" style="padding:5px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;"></select>
+        <button class="btn btn-outline btn-sm" onclick="rewriteDraft()">🔁 改写</button>
+    </div>
+</div>
+
 <!-- 筛选栏 -->
 <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
     <button class="btn btn-outline btn-sm filter-btn active" onclick="filterStatus('')">全部</button>
@@ -27,7 +56,7 @@
                 <th style="padding:12px 8px;font-weight:600;width:8%;">字数</th>
                 <th style="padding:12px 8px;font-weight:600;width:10%;">状态</th>
                 <th style="padding:12px 8px;font-weight:600;width:8%;">时间</th>
-                <th style="padding:12px 16px;font-weight:600;width:12%;text-align:center;">操作</th>
+                <th style="padding:12px 16px;font-weight:600;width:12%;text-align:center;white-space:nowrap;">操作</th>
             </tr>
         </thead>
         <tbody id="article-tbody">
@@ -36,17 +65,6 @@
     </table>
 </div>
 
-<!-- 生成弹窗 -->
-<div id="gen-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;align-items:center;justify-content:center;">
-    <div style="background:#fff;border-radius:12px;padding:24px;width:520px;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
-        <h3 style="margin-bottom:16px;">✨ 快速生成内容</h3>
-        <div id="gen-form"></div>
-        <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
-            <button class="btn btn-outline" onclick="closeGen()">取消</button>
-            <button class="btn btn-primary" id="gen-btn" onclick="doGenerate()">🚀 开始生成</button>
-        </div>
-    </div>
-</div>
 {% endblock %}
 
 {% block scripts %}
@@ -72,7 +90,11 @@ const STATUS_TAG = {
 };
 
 async function load() {
-    const articles = await api('/api/articles' + (currentFilter ? '?status='+currentFilter : ''));
+    const qs = [];
+    if (currentFilter) qs.push('status=' + currentFilter);
+    if (LINE) qs.push('line=' + LINE);
+    const articles = await api('/api/articles' + (qs.length ? '?' + qs.join('&') : ''));
+    USED = new Set(articles.map(a => a.topic).filter(Boolean));
     const tbody = document.getElementById('article-tbody');
     if (!articles.length) {
         tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#94a3b8;">📭 暂无内容</td></tr>';
@@ -130,209 +152,253 @@ async function deleteArticle(id) {
     else { showToast('删除失败', 'error'); }
 }
 
-// 书目-话题联动
-async function showGenerate() {
-    const modal = document.getElementById('gen-modal');
-    modal.style.display = 'flex';
-    if (!OPTS) OPTS = await api('/api/options');
-    ALL_TOPICS = OPTS.topics || [];
-    filterTopicsByBook();
+/* ============ 业务线 ============ */
+let LINE = 'lingxiu';
+let LINES = [];
+let TOPICS = [];
+let USED = new Set();
+let DRAFT = null;
 
-    // 平台-类型联动映射
-    const PLATFORM_TYPES = {
-        'wechat': ['article', 'speech', 'long_video'],
-        'xiaohongshu': ['article'],
-        'video_account': ['short_video', 'speech', 'long_video'],
-        'douyin': ['short_video', 'speech'],
-        'bilibili': ['long_video', 'article'],
-        'kuaishou': ['short_video', 'speech'],
-        'podcast': ['speech', 'article'],
-        'zhihu': ['article', 'speech'],
-        'toutiao': ['article', 'short_video'],
-    };
-    const DEFAULT_TYPE = {
-        'wechat': 'article',
-        'xiaohongshu': 'article',
-        'video_account': 'short_video',
-        'douyin': 'short_video',
-        'bilibili': 'long_video',
-        'kuaishou': 'short_video',
-        'podcast': 'speech',
-        'zhihu': 'article',
-        'toutiao': 'article',
-    };
+const PLATFORM_TYPES = {
+    'wechat': ['article', 'speech', 'long_video'],
+    'xiaohongshu': ['article'],
+    'video_account': ['short_video', 'speech', 'long_video'],
+    'douyin': ['short_video', 'speech'],
+    'bilibili': ['long_video', 'article'],
+    'kuaishou': ['short_video', 'speech'],
+    'podcast': ['speech', 'article'],
+    'zhihu': ['article', 'speech'],
+    'toutiao': ['article', 'short_video'],
+};
+const DEFAULT_TYPE = {'wechat':'article','xiaohongshu':'article','video_account':'short_video',
+    'douyin':'short_video','bilibili':'long_video','kuaishou':'short_video','podcast':'speech',
+    'zhihu':'article','toutiao':'article'};
+const DEFAULTS = {
+    'zhihu+article': {structure:'qa', hook:'提问式', tone:'reflective'},
+    'podcast+speech': {structure:'story', hook:'故事式', tone:'reflective'},
+    'douyin+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
+    'kuaishou+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
+    'wechat+article': {structure:'standard', hook:'金句开头', tone:'warm'},
+    'toutiao+article': {structure:'listicle', hook:'热点蹭流量', tone:'rational'},
+};
 
-    // 渲染类型下拉框（根据平台联动）
-    function renderTypeOpts(platform) {
-        const types = PLATFORM_TYPES[platform] || OPTS.content_types.map(t=>t.id);
-        const opts = OPTS.content_types.filter(t=>types.includes(t.id));
-        const def = DEFAULT_TYPE[platform] || 'article';
-        return `<select id="gen-content_type" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;">
-            ${opts.map(o=>`<option value="${o.id}" ${o.id===def?'selected':''}>${o.name}</option>`).join('')}
-        </select>`;
-    }
+function v(id) { const e = document.getElementById(id); return e ? e.value : ''; }
+function boxHtml(label, inner) {
+    return '<div>'
+        + '<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:4px;height:18px;line-height:18px;white-space:nowrap;">' + label + '</div>'
+        + inner + '</div>';
+}
+function selHtml(id, opts, def) {
+    return '<select id="' + id + '" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;">'
+        + opts.map(o => '<option value="' + o.id + '"' + (String(o.id) === String(def) ? ' selected' : '') + '>' + o.name + '</option>').join('')
+        + '</select>';
+}
 
-    const fields = [
-        {key:'platform', label:'📱 自媒体平台', opts: OPTS.platforms, default:'wechat'},
-        {key:'book', label:'📖 书目', opts: OPTS.books.map(b=>({id:b.name,name:b.name+(b.author?' · '+b.author:'')})), default:'', required:false},
-        {key:'topic', label:'🎯 话题', opts: [], default:'', required:false},
-        {key:'angle', label:'📐 角度', opts: OPTS.angles.map(a=>({id:a.name,name:a.name})), default:'', required:false},
-        {key:'structure', label:'🏗️ 结构', opts: OPTS.structures.map(s=>({id:s.name,name:s.label})), default:'', required:false},
-        {key:'hook', label:'🪝 钩子', opts: OPTS.hooks.map(h=>({id:h,name:h})), default:'', required:false},
-        {key:'tone', label:'🎨 语气', opts: OPTS.tones.map(t=>({id:t.name,name:t.label})), default:'', required:false},
-    ];
+async function initLines() {
+    const r = await api('/api/lines');
+    LINES = (r && r.lines) || [];
+    if (!LINES.length) return;
+    if (!LINES.some(l => l.id === LINE)) LINE = LINES[0].id;
+    renderPills();
+    await buildForm();
+}
 
-    const form = document.getElementById('gen-form');
-    
-    function renderField(f) {
-        const opts = [{id:'',name:'自动选择'},...(f.opts||[])];
-        const def = f.default || '';
-        return `<div style="flex:1;min-width:200px;">
-            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">${f.label}</label>
-            <select id="gen-${f.key}" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
-                ${opts.map(o=>`<option value="${o.id}" ${o.id===def?'selected':''}>${o.name}</option>`).join('')}
-            </select>
-        </div>`;
-    }
-    
-    // 构建4行布局
-    form.innerHTML = `
-        <div style="display:flex;gap:12px;margin-bottom:12px;">
-            <div style="flex:2;min-width:200px;">
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">📱 自媒体平台</label>
-                <select id="gen-platform" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
-                    ${OPTS.platforms.map(p=>`<option value="${p.id}" ${p.id==='wechat'?'selected':''}>${p.name}</option>`).join('')}
-                </select>
-            </div>
-            <div style="flex:3;min-width:200px;">
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">📋 内容类型</label>
-                ${renderTypeOpts('wechat')}
-            </div>
-        </div>
-        <div style="display:flex;gap:12px;margin-bottom:12px;">
-            ${renderField(fields[1])}
-            ${renderField(fields[2])}
-        </div>
-        <div style="display:flex;gap:12px;margin-bottom:12px;">
-            ${renderField(fields[3])}
-            ${renderField(fields[4])}
-        </div>
-        <div style="display:flex;gap:12px;margin-bottom:12px;">
-            ${renderField(fields[5])}
-            ${renderField(fields[6])}
-        </div>
-        <div style="display:flex;gap:12px;margin-bottom:12px;">
-            <div style="flex:1;">
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">🔗 推广人 ID <span style="font-weight:400;color:#94a3b8;">（生成后自动追加推广链接）</span></label>
-                <input id="gen-promo_uid" type="number" placeholder="如 58（合伙人 user id）" value=""
-                       style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
-            </div>
-            <div style="flex:2;display:flex;align-items:flex-end;padding-bottom:6px;">
-                <span style="font-size:12px;color:#64748b;">留空则不插入推广链接</span>
-            </div>
-        </div>
-    `;
+function renderPills() {
+    document.getElementById('line-pills').innerHTML = LINES.map(l =>
+        '<button class="btn btn-sm ' + (l.id === LINE ? 'btn-primary' : 'btn-outline') + '" onclick="switchLine(\'' + l.id + '\')">'
+        + l.icon + ' ' + l.name + '</button>').join('');
+    const cur = LINES.find(l => l.id === LINE) || {};
+    document.getElementById('line-home').textContent = cur.home ? ('引流落点 ' + cur.home) : '';
+}
 
-    // 书目下拉框绑定 onchange
-    const bookSel = document.getElementById('gen-book');
-    if (bookSel) {
-        bookSel.onchange = filterTopicsByBook;
-    }
+async function switchLine(id) {
+    if (id === LINE) return;
+    LINE = id; DRAFT = null; USED = new Set();
+    document.getElementById('draft-card').style.display = 'none';
+    document.getElementById('gen-status').textContent = '';
+    renderPills();
+    await buildForm();
+    load();
+}
 
-    // 平台+类型联动映射
-    const DEFAULTS = {
-        'zhihu+article': {structure:'qa', hook:'提问式', tone:'reflective'},
-        'podcast+speech': {structure:'story', hook:'故事式', tone:'reflective'},
-        'douyin+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
-        'kuaishou+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
-        'wechat+article': {structure:'standard', hook:'金句开头', tone:'warm'},
-        'toutiao+article': {structure:'listicle', hook:'热点蹭流量', tone:'rational'},
-    };
-    
-    // 联动函数
-    function applyDefaults() {
-        const platform = document.getElementById('gen-platform').value;
-        const type = document.getElementById('gen-content_type').value;
-        const key = platform + '+' + type;
-        const defaults = DEFAULTS[key] || {};
-        
-        if (defaults.structure) {
-            const sel = document.getElementById('gen-structure');
-            if (sel) sel.value = defaults.structure;
-        }
-        if (defaults.hook) {
-            const sel = document.getElementById('gen-hook');
-            if (sel) sel.value = defaults.hook;
-        }
-        if (defaults.tone) {
-            const sel = document.getElementById('gen-tone');
-            if (sel) sel.value = defaults.tone;
-        }
-    }
-    
-    // 平台联动类型
-    document.getElementById('gen-platform').onchange = function() {
-        document.getElementById('gen-content_type').outerHTML = renderTypeOpts(this.value);
-        applyDefaults();
-    };
-    
-    // 类型变化也触发联动
-    document.getElementById('gen-content_type').onchange = function() {
-        applyDefaults();
-    };
-    
-    // 类型 select 的 id 需要加前缀以避免重复
-    document.querySelectorAll('#gen-form select').forEach(s => {
-        if (s.id === 'gen-content_type') return;
+function renderTypes(platform) {
+    const types = PLATFORM_TYPES[platform] || (OPTS.content_types || []).map(t => t.id);
+    const opts = (OPTS.content_types || []).filter(t => types.indexOf(t.id) >= 0);
+    const def = DEFAULT_TYPE[platform] || 'article';
+    const el = document.getElementById('gen-content_type');
+    if (el) el.innerHTML = opts.map(o => '<option value="' + o.id + '"' + (o.id === def ? ' selected' : '') + '>' + o.name + '</option>').join('');
+}
+
+function applyDefaults() {
+    const d = DEFAULTS[v('gen-platform') + '+' + v('gen-content_type')] || {};
+    ['structure', 'hook', 'tone'].forEach(k => {
+        const el = document.getElementById('gen-' + k);
+        if (el && d[k]) el.value = d[k];
     });
 }
-function closeGen() {
-    document.getElementById('gen-modal').style.display = 'none';
+
+async function buildForm() {
+    if (!OPTS) OPTS = await api('/api/options');
+    ALL_TOPICS = OPTS.topics || [];          // 书目-话题联动用（原在已删除的 showGenerate 里赋值）
+    const line = LINES.find(l => l.id === LINE) || {};
+    let html = '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;">';
+    if (LINE === 'lingxiu') {
+        html += boxHtml('📖 书目', selHtml('gen-book', [{id:'',name:'自动选择'}].concat(
+            (OPTS.books || []).map(b => ({id: b.name, name: b.name + (b.author ? ' · ' + b.author : '')}))), ''));
+        html += boxHtml('🎯 话题', '<select id="gen-topic" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>');
+    } else {
+        const kinds = (line.kinds || []).filter(k => k.id !== 'book');
+        html += boxHtml('选题类型', selHtml('gen-topic_kind', kinds, kinds[0] && kinds[0].id));
+        html += boxHtml('选题', '<div style="display:flex;gap:6px;">'
+            + '<select id="gen-topic_obj" style="flex:1;min-width:0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>'
+            + '<button class="btn btn-outline" onclick="randTopic()" title="换一个" style="flex:0 0 auto;padding:8px 10px;">🎲</button></div>');
+    }
+    html += boxHtml('平台', selHtml('gen-platform', (OPTS.platforms || []).map(p => ({id: p.id, name: p.name})), 'wechat'));
+    html += boxHtml('形态', '<select id="gen-content_type" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>');
+    html += boxHtml('语气', selHtml('gen-tone', [{id:'',name:'自动选择'}].concat(
+        (OPTS.tones || []).map(t => ({id: t.name, name: t.label}))), ''));
+    html += boxHtml('角度', selHtml('gen-angle', [{id:'',name:'自动选择'}].concat((OPTS.angles || []).map(a => ({id: a.name, name: a.name}))), ''));
+    html += boxHtml('结构', selHtml('gen-structure', [{id:'',name:'自动选择'}].concat((OPTS.structures || []).map(x => ({id: x.name, name: x.label}))), ''));
+    html += boxHtml('钩子', selHtml('gen-hook', [{id:'',name:'自动选择'}].concat((OPTS.hooks || []).map(h => ({id: h, name: h}))), ''));
+    html += '</div>'
+        + '<input id="gen-promo_uid" placeholder="推广人 ID（留空则不追加链接）" style="width:100%;margin-top:12px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;">'
+        + '<div id="topic-preview" style="margin-top:10px;font-size:12px;color:#94a3b8;line-height:1.6;"></div>';
+    document.getElementById('gen-form').innerHTML = html;
+
+    renderTypes('wechat');
+    applyDefaults();
+    const p = document.getElementById('gen-platform');
+    if (p) p.onchange = function () { renderTypes(this.value); applyDefaults(); };
+    const t = document.getElementById('gen-content_type');
+    if (t) t.onchange = applyDefaults;
+
+    if (LINE === 'lingxiu') {
+        const b = document.getElementById('gen-book');
+        if (b) b.onchange = filterTopicsByBook;
+        filterTopicsByBook();
+    } else {
+        const k = document.getElementById('gen-topic_kind');
+        if (k) k.onchange = loadTopics;
+        await loadTopics();
+    }
 }
 
-// 书目-话题联动
+async function loadTopics() {
+    const kind = v('gen-topic_kind');
+    const r = await api('/api/line-topics?line=' + LINE + '&kind=' + encodeURIComponent(kind));
+    TOPICS = (r && r.items) || [];
+    const sel = document.getElementById('gen-topic_obj');
+    if (!sel) return;
+    sel.innerHTML = TOPICS.map(o => '<option value="' + String(o.id).replace(/"/g, '&quot;') + '">' + o.name + '</option>').join('');
+    sel.onchange = showPreview;
+    const pick = TOPICS.find(o => !USED.has(o.id)) || TOPICS[0];
+    if (pick) sel.value = String(pick.id);
+    showPreview();
+}
+
+function randTopic() {
+    const sel = document.getElementById('gen-topic_obj');
+    if (!TOPICS.length || !sel) return;
+    const pool = TOPICS.filter(o => !USED.has(o.id));
+    const pick = (pool.length ? pool : TOPICS)[Math.floor(Math.random() * (pool.length ? pool.length : TOPICS.length))];
+    sel.value = String(pick.id);
+    showPreview();
+}
+
+function showPreview() {
+    const el = document.getElementById('topic-preview');
+    if (!el) return;
+    const cur = TOPICS.find(o => String(o.id) === v('gen-topic_obj'));
+    el.textContent = cur ? (cur.preview || '') : '';
+}
 
 function filterTopicsByBook() {
     const bookSel = document.getElementById('gen-book');
     const topicSel = document.getElementById('gen-topic');
     if (!bookSel || !topicSel) return;
-    
-    const selectedBook = bookSel.value;
-    let filteredTopics;
-    
-    if (!selectedBook) {
-        // 未选书目，显示所有话题（前50个）
-        filteredTopics = ALL_TOPICS.slice(0, 50);
-    } else {
-        // 选了书目，只显示该书相关话题
-        filteredTopics = ALL_TOPICS.filter(t => t.book_name === selectedBook);
+    const b = bookSel.value;
+    const list = b ? ALL_TOPICS.filter(t => t.book_name === b) : ALL_TOPICS.slice(0, 50);
+    topicSel.innerHTML = [{id:'',name:'自动选择'}].concat(list.map(t => ({id: t.name, name: t.category + '·' + t.name})))
+        .map(o => '<option value="' + o.id + '">' + o.name + '</option>').join('');
+}
+
+function showDraft(a) {
+    DRAFT = a;
+    document.getElementById('dr-title').value = a.title || '';
+    document.getElementById('dr-body').value = a.content_md || '';
+    document.getElementById('dr-illustrate').href = '/illustrate/' + a.id;
+    const pf = document.getElementById('dr-platform');
+    if (!pf.options.length) {
+        pf.innerHTML = (OPTS.platforms || []).map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
+        document.getElementById('dr-type').innerHTML = (OPTS.content_types || []).map(t => '<option value="' + t.id + '">' + t.name + '</option>').join('');
     }
-    
-    // 重新渲染话题下拉框
-    const opts = [{id:'',name:'自动选择'}, ...filteredTopics.map(t=>({id:t.name,name:t.category+'·'+t.name}))];
-    topicSel.innerHTML = opts.map(o=>`<option value="${o.id}">${o.name}</option>`).join('');
+    document.getElementById('draft-card').style.display = 'block';
+    document.getElementById('draft-card').scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
 async function doGenerate() {
     const btn = document.getElementById('gen-btn');
-    btn.disabled = true;
-    btn.textContent = '⏳ 生成中...';
+    const st = document.getElementById('gen-status');
     const params = {};
-    ['platform','content_type','book','topic','angle','structure','hook','tone'].forEach(k => {
-        const v = document.getElementById('gen-'+k).value;
-        if (v) params[k] = v;
+    ['platform', 'content_type', 'tone', 'angle', 'structure', 'hook', 'book', 'topic'].forEach(k => {
+        const val = v('gen-' + k);
+        if (val) params[k] = val;
     });
-    // ⭐ 推广人 ID（自动生成推广链接）
-    const pu = document.getElementById('gen-promo_uid');
-    if (pu && pu.value.trim()) params.promo_uid = pu.value.trim();
+    params.line = LINE;
+    if (LINE !== 'lingxiu') {
+        params.topic_kind = v('gen-topic_kind');
+        params.topic_obj = v('gen-topic_obj');
+    }
+    const pu = v('gen-promo_uid');
+    if (pu) params.promo_uid = pu;
+    btn.disabled = true; btn.textContent = '⏳ 生成中…';
+    st.textContent = '正在生成，约 20~40 秒…';
     try {
-        const r = await api('/api/articles/generate', {method:'POST', body:JSON.stringify(params)});
-        if (r.ok) { showToast('✅ 生成成功：'+r.title, 'success'); closeGen(); load(); }
-        else { showToast('❌ '+r.error, 'error'); }
-    } catch(e) { showToast('❌ '+e.message, 'error'); }
-    finally { btn.disabled = false; btn.textContent = '🚀 开始生成'; }
+        const r = await api('/api/articles/generate', {method: 'POST', body: JSON.stringify(params)});
+        if (r && r.ok) {
+            st.textContent = '';
+            showToast('✅ 生成成功：' + r.title, 'success');
+            const a = await api('/api/articles/' + r.id);
+            showDraft(a);
+            USED.add(params.topic_obj || '');
+            load();
+        } else {
+            st.textContent = '';
+            showToast('❌ ' + ((r && r.error) || '生成失败'), 'error');
+        }
+    } catch (e) { st.textContent = ''; showToast('❌ ' + e.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = '✨ 生成文案'; }
 }
 
-load();
+async function saveDraft() {
+    if (!DRAFT) return;
+    const r = await api('/api/articles/' + DRAFT.id, {method: 'PUT',
+        body: JSON.stringify({title: v('dr-title'), content_md: v('dr-body')})});
+    showToast(r && r.ok ? '已保存' : '保存失败', r && r.ok ? 'success' : 'error');
+    if (r && r.ok) load();
+}
+
+function copyDraftLink() {
+    if (!DRAFT || !DRAFT.promo_link) { showToast('这篇没有推广链接（未填推广人 ID）', 'error'); return; }
+    navigator.clipboard.writeText(DRAFT.promo_link)
+        .then(() => showToast('✅ 已复制：' + DRAFT.promo_link, 'success'))
+        .catch(() => prompt('推广链接：', DRAFT.promo_link));
+}
+
+async function rewriteDraft() {
+    if (!DRAFT) return;
+    showToast('⏳ 改写中…', 'success');
+    const r = await api('/api/articles/' + DRAFT.id + '/rewrite', {method: 'POST',
+        body: JSON.stringify({platform: v('dr-platform'), content_type: v('dr-type')})});
+    if (r && r.ok) {
+        showToast('✅ 改写完成（新篇，原篇保留）', 'success');
+        showDraft(await api('/api/articles/' + r.id));
+        load();
+    } else {
+        showToast('❌ ' + ((r && r.error) || '改写失败'), 'error');
+    }
+}
+
+initLines().then(load);
 </script>
 {% endblock %}

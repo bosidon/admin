@@ -23,28 +23,11 @@
             <label style="font-size:12px;color:#64748b;">风格</label>
             <select id="plan-style" class="form-select" onchange="savePlan(true)"
                 style="width:auto;padding:5px 10px;font-size:13px;">
-                <optgroup label="摄影写实">
-                    <option value="realistic">写实风</option>
-                    <option value="cinematic">电影感</option>
-                    <option value="commercial">商业质感</option>
+                {% for g in style_groups %}
+                <optgroup label="{{ g.name }}">
+                    {% for s in g.styles %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
                 </optgroup>
-                <optgroup label="绘画插画">
-                    <option value="illustration">插画风</option>
-                    <option value="watercolor">水彩风</option>
-                    <option value="ink">水墨国风</option>
-                    <option value="anime">动漫风</option>
-                </optgroup>
-                <optgroup label="数字渲染">
-                    <option value="3d">3D风</option>
-                    <option value="concept">概念艺术</option>
-                </optgroup>
-                <optgroup label="氛围与设计">
-                    <option value="artistic">意境风</option>
-                    <option value="mystic">暗黑神秘</option>
-                    <option value="minimal">极简留白</option>
-                    <option value="editorial">杂志排版</option>
-                    <option value="collage">拼贴杂志</option>
-                </optgroup>
+                {% endfor %}
             </select>
             <button class="btn btn-primary btn-sm" onclick="genPlanNow()">① 生成方案</button>
         </div>
@@ -74,22 +57,6 @@
         </div>
     </div>
     <div id="gen-msg" style="font-size:12px;color:#94a3b8;margin-top:10px;"></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;">
-        <div>
-            <div style="font-size:12px;color:#64748b;margin-bottom:6px;">进行中</div>
-            <div id="job-active"></div>
-        </div>
-        <div>
-            <div style="font-size:12px;color:#64748b;margin-bottom:6px;">最近完成</div>
-            <div id="job-done"></div>
-        </div>
-    </div>
-    <div id="gen-progress" style="display:none;margin-top:12px;">
-        <div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;">
-            <div id="gen-bar" style="height:100%;width:0;background:#6366f1;transition:width .4s;"></div>
-        </div>
-        <pre id="gen-log" style="margin-top:10px;max-height:200px;overflow:auto;background:#0f172a;color:#cbd5e1;font-size:11px;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,monospace;"></pre>
-    </div>
 </div>
 
 <!-- ③ 已配图 -->
@@ -134,10 +101,7 @@
 {% block scripts %}
 <script>
 const ARTICLE_ID = {{ article_id }};
-const STYLE_LABEL = {realistic:'写实风', cinematic:'电影感', commercial:'商业质感',
-    illustration:'插画风', watercolor:'水彩风', ink:'水墨国风', anime:'动漫风',
-    '3d':'3D风', concept:'概念艺术', artistic:'意境风', mystic:'暗黑神秘',
-    minimal:'极简留白', editorial:'杂志排版', collage:'拼贴杂志'};
+const STYLE_LABEL = {{ style_label_map|tojson }};
 const ASPECTS = ['3:4','1:1','9:16','16:9','2.35:1'];
 const ITYPE_LABEL = {cover:'封面卡', quote:'金句卡', points:'要点卡', photo:'画面'};
 let PLAN = {style:'', platform:'', images:[], quotes:[], scenes:[]};
@@ -286,7 +250,6 @@ async function genPlanNow() {
 
 /* ============ ② 生成 ============ */
 function hint(m) { document.getElementById('gen-msg').textContent = m; }
-function progress(on) { document.getElementById('gen-progress').style.display = on ? 'block' : 'none'; }
 function busy(on) {
     const b = document.getElementById('btn-gen');
     if (b) { b.disabled = on; b.style.opacity = on ? .55 : 1; }
@@ -304,8 +267,14 @@ async function genNow() {
 }
 
 async function startJob(payload) {
+    // 出图任务：点击即新标签页弹开任务看板（请求失败则关掉它）
+    const board = payload.plan_only ? null : window.open('/jobs', '_blank');
     const r = await api('/api/illustrate/generate', {method: 'POST', body: JSON.stringify(payload)});
-    if (!r || r.error || !r.job_id) { toast('❌ ' + ((r && r.error) || '启动失败'), 'error'); return; }
+    if (!r || r.error || !r.job_id) {
+        if (board) board.close();
+        toast('❌ ' + ((r && r.error) || '启动失败'), 'error');
+        return;
+    }
     const lbl = (r.kind === 'plan') ? '生成方案' : '生成配图';
     if (r.reused) toast('ℹ️ 同样的任务已在队列里，已复用', 'success');
     else toast('✅ ' + lbl + '已入队' + (r.queue_pos > 1 ? '（排队第 ' + r.queue_pos + ' 位）' : ''), 'success');
@@ -315,7 +284,7 @@ async function startJob(payload) {
     startQueuePoll();
 }
 
-/* ============ 任务队列（进行中 / 最近完成 · 刷新页面自动接回） ============ */
+/* ============ 任务队列（静默轮询：任务跑完自动刷新本页；进度看板在「📊 任务」） ============ */
 let label0 = '';
 function stopQueuePoll() { if (QUEUE_TIMER) { clearInterval(QUEUE_TIMER); QUEUE_TIMER = null; } }
 function startQueuePoll() {
@@ -323,59 +292,24 @@ function startQueuePoll() {
     QUEUE_TIMER = setInterval(refreshJobs, 3000);
 }
 
-function jobRow(j, active) {
-    const st = j.stage_label || j.status_label || '';
-    const qp = (j.status === 'queued' && j.queue_pos > 1) ? ' · 排队第 ' + j.queue_pos + ' 位' : '';
-    const prog = j.total ? ' ' + j.done + '/' + j.total : '';
-    const art = j.article_id ? '#' + j.article_id : '';
-    const color = j.status === 'failed' ? '#ef4444' : (j.status === 'running' ? '#6366f1' : '#64748b');
-    const x = active
-        ? '<span onclick="cancelJob(\'' + j.id + '\')" title="取消" style="cursor:pointer;color:#ef4444;padding:0 4px;">✕</span>'
-        : '';
-    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;'
-        + 'padding:6px 9px;border:1px solid #e2e8f0;border-radius:7px;margin-bottom:5px;">'
-        + '<span>' + (j.kind_label || j.kind) + ' ' + art + '</span>'
-        + '<span style="color:' + color + ';">' + st + qp + prog + '</span>'
-        + '<span>' + x + '</span></div>';
-}
-
-function renderJobs(elId, jobs, active) {
-    const el = document.getElementById(elId);
-    if (!el) return;
-    if (!jobs.length) {
-        el.innerHTML = '<div style="font-size:12px;color:#94a3b8;padding:6px 2px;">' + (active ? '空闲' : '—') + '</div>';
-        return;
-    }
-    el.innerHTML = jobs.map(j => jobRow(j, active)).join('');
-}
-
 async function refreshJobs() {
     const r = await api('/api/jobs?article_id=' + ARTICLE_ID + '&limit=12', {method: 'GET'});
     if (!r || !r.jobs) return;
     const active = r.jobs.filter(j => j.status === 'queued' || j.status === 'running');
     const fin = r.jobs.filter(j => j.status !== 'queued' && j.status !== 'running');
-    renderJobs('job-active', active, true);
-    renderJobs('job-done', fin, false);
     const cur = active.find(j => j.status === 'running') || active[0];
     if (cur) {
         busy(true);
-        progress(true);
-        const pct = cur.total ? Math.round(cur.done / cur.total * 100) : 0;
-        document.getElementById('gen-bar').style.width = pct + '%';
-        const lg = document.getElementById('gen-log');
-        const txt = (cur.log || []).join('\n');
-        if (lg.textContent !== txt) { lg.textContent = txt; lg.scrollTop = lg.scrollHeight; }
         hint('状态：' + (cur.stage_label || cur.status_label || '') + ' · ' + cur.done + '/' + cur.total
              + (cur.status === 'queued' && cur.queue_pos > 1 ? '（排队第 ' + cur.queue_pos + ' 位）' : ''));
     } else {
         busy(false);
-        progress(false);
-        if (ACTIVE_BEFORE > 0) {          // 刚跑完 → 刷新方案与配图
+        if (ACTIVE_BEFORE > 0) {          // 刚跑完 → 刷新本页方案与配图
             await Promise.all([loadPlan(), loadImages()]);
             const last = fin[0];
             if (last && last.status === 'done') {
                 if (last.kind === 'plan') toast('✅ 方案已更新 —— 勾选条目后点「② 生成配图」', 'success');
-                else toast('✅ 生成完成（队列空了会自动关机）', 'success');
+                else toast('✅ 生成完成（过程见「📊 任务」）', 'success');
             } else if (last && last.status === 'failed') {
                 toast('❌ ' + (last.kind_label || '任务') + '失败：' + (last.error || ''), 'error');
             } else if (last && last.status === 'canceled') {
@@ -386,13 +320,6 @@ async function refreshJobs() {
         stopQueuePoll();
     }
     ACTIVE_BEFORE = active.length;
-}
-
-async function cancelJob(id) {
-    if (!confirm('取消这个任务？')) return;
-    const r = await api('/api/jobs/' + id + '/cancel', {method: 'POST'});
-    toast(r && r.ok ? '已请求取消' : ('取消失败：' + ((r && r.error) || '未知')), r && r.ok ? 'success' : 'error');
-    refreshJobs();
 }
 
 async function shutdownComfy() {

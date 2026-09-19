@@ -4,63 +4,376 @@
 {% block page_title %}📦 素材库{% endblock %}
 
 {% block topbar_right %}
+<label class="btn btn-primary" style="cursor:pointer;margin:0;">⬆ 上传
+    <input type="file" id="file" multiple accept="image/*,audio/*,video/*" style="display:none;" onchange="upload(this)">
+</label>
+<button class="btn btn-outline" id="btn-stitch" disabled onclick="openPanel('stitch')">🧩 拼版所选</button>
 <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
 {% endblock %}
 
 {% block content %}
 <div class="card">
-    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
-        <button id="sc-all" class="btn btn-primary" onclick="setScope('all')">全部</button>
-        <button id="sc-private" class="btn btn-outline" onclick="setScope('private')">我的素材</button>
-        <button id="sc-shared" class="btn btn-outline" onclick="setScope('shared')">平台共享</button>
-        <span style="flex:1;"></span>
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">
         <select id="type-filter" onchange="load()" style="padding:7px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;">
             <option value="all">全部类型</option>
             <option value="image">图片</option>
             <option value="audio">音频</option>
             <option value="video">视频</option>
-            <option value="template">模板</option>
         </select>
+        <input id="q" placeholder="搜索名称" oninput="render()" style="padding:7px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;width:150px;">
+        <span id="sel-hint" style="font-size:12px;color:#94a3b8;">勾选素材后可抠图 / 编辑 / 拼版</span>
+        <span style="flex:1;"></span>
+        <span id="count" style="font-size:12px;color:#94a3b8;"></span>
     </div>
-    <div id="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;"></div>
+    <div id="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;"></div>
+</div>
+
+<div id="panel" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:999;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:14px;width:min(560px,92vw);max-height:86vh;overflow:auto;padding:18px 20px;">
+        <div style="display:flex;align-items:center;margin-bottom:12px;">
+            <div id="panel-title" style="font-size:15px;font-weight:600;"></div>
+            <span style="flex:1;"></span>
+            <span onclick="closePanel()" style="cursor:pointer;color:#94a3b8;font-size:20px;line-height:1;">×</span>
+        </div>
+        <div id="panel-body"></div>
+        <div style="display:flex;gap:10px;margin-top:16px;">
+            <button class="btn btn-primary" id="panel-go" style="flex:1;" onclick="submitPanel()">开始加工</button>
+            <button class="btn btn-outline" onclick="closePanel()">取消</button>
+        </div>
+    </div>
+</div>
+
+<div id="viewer" style="display:none;position:fixed;inset:0;background:#0b0e14;z-index:1000;">
+    <div style="position:absolute;top:0;left:0;right:0;height:50px;display:flex;align-items:center;gap:8px;padding:0 14px;color:#e2e8f0;">
+        <div id="viewer-title" style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+        <span style="flex:1;"></span>
+        <span id="viewer-zoom" style="font-size:12px;color:#94a3b8;min-width:44px;text-align:right;"></span>
+        <button onclick="viewerZoom(-0.25)" title="缩小" style="width:26px;height:26px;border-radius:6px;border:1px solid #334155;background:transparent;color:#cbd5e1;cursor:pointer;">－</button>
+        <button onclick="viewerZoom(0.25)" title="放大" style="width:26px;height:26px;border-radius:6px;border:1px solid #334155;background:transparent;color:#cbd5e1;cursor:pointer;">＋</button>
+        <span onclick="closeViewer()" title="关闭" style="cursor:pointer;font-size:24px;line-height:1;padding:0 4px;">×</span>
+    </div>
+    <div id="viewer-stage" style="position:absolute;top:50px;left:0;right:0;bottom:0;overflow:auto;display:flex;padding:0 70px 18px;box-sizing:border-box;"></div>
+    <button id="viewer-prev" onclick="viewerStep(-1)" title="上一个" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);width:40px;height:64px;border-radius:10px;border:0;background:rgba(148,163,184,.2);color:#e2e8f0;font-size:26px;cursor:pointer;">‹</button>
+    <button id="viewer-next" onclick="viewerStep(1)" title="下一个" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);width:40px;height:64px;border-radius:10px;border:0;background:rgba(148,163,184,.2);color:#e2e8f0;font-size:26px;cursor:pointer;">›</button>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let SCOPE = 'all';
+let ITEMS = [], SEL = new Set(), OPTS = {}, PANEL_ACTION = '', SEQ = 0;
+const TYPE_ICON = {image:'🖼', audio:'🎵', video:'🎬'};
+const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版'};
+const LINE_LABEL = {lingxiu:'灵性书籍', maya:'玛雅天赋', tarot:'塔罗', psych:'心理咨询'};
 
-const CATEGORY_LABEL = {brand:'品牌', tarot:'塔罗', maya:'玛雅', poster:'海报', qrcode:'二维码', other:'其他'};
+function esc(s) {
+    return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function val(id) { const e = document.getElementById(id); return e ? e.value : ''; }
+function thumbUrl(m) { return '/api/materials/thumb?u=' + encodeURIComponent(m.file_path || ''); }
 
-function setScope(s) {
-    SCOPE = s;
-    ['all','private','shared'].forEach(k => {
-        document.getElementById('sc-' + k).className = 'btn ' + (k === s ? 'btn-primary' : 'btn-outline');
+async function load() {
+    const my = ++SEQ;                       // 并发守卫：晚发出的请求赢（防快速改筛选/删除后被旧结果覆盖）
+    const t = document.getElementById('type-filter').value;
+    const rows = await api('/api/library?type=' + t);
+    if (my !== SEQ) { return; }
+    ITEMS = Array.isArray(rows) ? rows : [];
+    SEL.clear();
+    render(); syncSel();
+}
+
+function render() {
+    const q = (val('q') || '').trim().toLowerCase();
+    const rows = ITEMS.filter(m => !q || (m.name || '').toLowerCase().includes(q));
+    document.getElementById('count').textContent = rows.length + ' 项';
+    const el = document.getElementById('grid');
+    if (!rows.length) {
+        el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
+            + '📭 暂无素材<br><span style="font-size:12px;">配图生成的图会自动出现在这里，也可以直接上传</span></div>';
+        return;
+    }
+    el.innerHTML = rows.map(card).join('');
+}
+
+const ICON_BTN = 'width:24px;height:24px;line-height:22px;text-align:center;border-radius:6px;'
+    + 'border:1px solid #e2e8f0;background:rgba(255,255,255,.94);color:#475569;font-size:12px;'
+    + 'text-decoration:none;padding:0;cursor:pointer;display:block;';
+
+function card(m) {
+    const on = SEL.has(m.id), isImg = m.type === 'image';
+    const thumb = isImg
+        ? '<img src="' + esc(thumbUrl(m)) + '" loading="lazy" alt="" style="width:100%;height:132px;object-fit:cover;display:block;background:#f1f5f9;">'
+        : '<div style="height:132px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#f8fafc;color:#94a3b8;">'
+          + '<div style="font-size:26px;">▶</div><div style="font-size:20px;">' + (TYPE_ICON[m.type] || '📄') + '</div></div>';
+    return '<div style="position:relative;border:' + (on ? '2px solid #6366f1' : '1px solid #e2e8f0') + ';border-radius:10px;overflow:hidden;background:#fff;">'
+        + (isImg ? '<div style="position:absolute;top:6px;left:6px;z-index:3;"><input type="checkbox" ' + (on ? 'checked' : '')
+          + ' onclick="event.stopPropagation()" onchange="toggle(' + m.id + ')" style="width:16px;height:16px;cursor:pointer;"></div>' : '')
+        + '<div style="position:absolute;top:6px;right:6px;z-index:3;display:flex;gap:4px;">'
+        + '<a href="' + esc(m.file_path) + '" download target="_blank" rel="noopener" title="下载" onclick="event.stopPropagation()" style="' + ICON_BTN + '">⬇</a>'
+        + '<button onclick="event.stopPropagation();del(' + m.id + ')" title="删除" style="' + ICON_BTN + '">✕</button>'
+        + '</div>'
+        + '<div onclick="openViewer(' + m.id + ')" title="' + (isImg ? '点击放大查看' : '点击播放')
+        + '" style="position:relative;cursor:' + (isImg ? 'zoom-in' : 'pointer') + ';">' + thumb
+        + '<div style="position:absolute;bottom:6px;left:6px;z-index:2;font-size:10px;background:rgba(15,23,42,.6);color:#fff;padding:1px 6px;border-radius:6px;">'
+        + esc(SRC_LABEL[m.source] || m.source || '') + '</div>'
+        + '</div>'
+        + '<div style="padding:9px 10px;">'
+        + '<div title="' + esc(m.name) + '" style="font-size:12.5px;font-weight:500;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(m.name || '未命名') + '</div>'
+        + '<div style="font-size:11px;color:#94a3b8;' + (isImg ? 'margin-bottom:8px;' : '') + '">' + esc(LINE_LABEL[m.category] || m.category || m.type || '')
+        + ' · ' + esc((m.created_at || '').slice(0, 16)) + '</div>'
+        + (isImg ? '<div style="display:flex;gap:6px;">'
+                 + '<button class="btn btn-outline btn-sm" onclick="quick(\'cutout\',' + m.id + ')">✂️ 抠图</button>'
+                 + '<button class="btn btn-outline btn-sm" onclick="quick(\'edit\',' + m.id + ')">🎨 编辑</button></div>' : '')
+        + '</div></div>';
+}
+
+function toggle(id) {
+    if (SEL.has(id)) { SEL.delete(id); } else { SEL.add(id); }
+    render(); syncSel();
+}
+
+function syncSel() {
+    const n = SEL.size, b = document.getElementById('btn-stitch');
+    b.disabled = n < 2;
+    b.textContent = n ? ('🧩 拼版所选（' + n + '）') : '🧩 拼版所选';
+    document.getElementById('sel-hint').textContent = n ? ('已选 ' + n + ' 张') : '勾选素材后可抠图 / 编辑 / 拼版';
+}
+
+function quick(action, id) { SEL.clear(); SEL.add(id); syncSel(); render(); openPanel(action); }
+
+async function ensureOpts() { if (!OPTS.cutout) { OPTS = await api('/api/materials/options'); } }
+
+function row(label, inner) {
+    return '<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">'
+        + '<div style="width:60px;font-size:12.5px;color:#475569;">' + label + '</div>'
+        + '<div style="flex:1;">' + inner + '</div></div>';
+}
+const SEL_STYLE = 'padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;width:100%;';
+
+async function openPanel(action) {
+    await ensureOpts();
+    PANEL_ACTION = action;
+    const n = SEL.size;
+    document.getElementById('panel-title').textContent =
+        ({cutout:'✂️ 抠图', edit:'🎨 图生图', stitch:'🧩 拼版'}[action] || action) + ' · 已选 ' + n + ' 张';
+    let h = '';
+    if (action === 'cutout') {
+        h += row('模型', '<select id="p-model" style="' + SEL_STYLE + '">'
+            + OPTS.cutout.models.map(m => '<option value="' + esc(m.id) + '">' + esc(m.label) + '</option>').join('') + '</select>');
+        h += row('背景', '<select id="p-bg" style="' + SEL_STYLE + '" onchange="document.getElementById(\'p-color-wrap\').style.display=(this.value===\'Color\'?\'\':\'none\')">'
+            + OPTS.cutout.backgrounds.map(b => '<option value="' + esc(b.id) + '">' + esc(b.label) + '</option>').join('') + '</select>');
+        h += '<div id="p-color-wrap" style="display:none;">' + row('底色',
+            '<input type="color" id="p-color" value="#FFFFFF" style="width:56px;height:32px;border:1px solid #e2e8f0;border-radius:8px;">') + '</div>';
+    } else if (action === 'edit') {
+        h += row('模式', '<div id="p-mode" style="display:flex;gap:8px;">'
+            + OPTS.edit.modes.map((m, i) => '<button class="btn ' + (i === 0 ? 'btn-primary' : 'btn-outline')
+                + ' btn-sm" data-mode="' + esc(m.id) + '" onclick="pickMode(\'' + esc(m.id) + '\')">' + esc(m.label) + '</button>').join('')
+            + '</div>');
+        h += row('风格化', '<select id="p-style" style="' + SEL_STYLE + '">'
+            + (OPTS.edit.styles || []).map(s => '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('')
+            + '</select>');
+        h += row('要求', '<textarea id="p-text" rows="3" placeholder="例：换成一个温暖的室内书房背景" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;resize:vertical;"></textarea>');
+        h += '<div style="font-size:11.5px;color:#94a3b8;">选 1 张 = 只改这张；选 2-3 张 = 第 1 张为主体、其余作参考（保人物一致用）</div>';
+    } else {
+        h += row('模式', '<select id="p-smode" style="' + SEL_STYLE + '">'
+            + OPTS.stitch.modes.map(m => '<option value="' + esc(m.id) + '">' + esc(m.label) + '</option>').join('') + '</select>');
+        h += row('分辨率', '<select id="p-res" style="' + SEL_STYLE + '">'
+            + OPTS.stitch.resolutions.map(r => '<option value="' + r + '">' + r + ' px</option>').join('') + '</select>');
+        h += row('间距', '<select id="p-pad" style="' + SEL_STYLE + '">'
+            + OPTS.stitch.pads.map(p => '<option value="' + p + '">' + p + ' px</option>').join('') + '</select>');
+        h += '<div style="font-size:11.5px;color:#94a3b8;">九宫格需要正好 9 张；长图竖拼最多 9 张</div>';
+    }
+    document.getElementById('panel-body').innerHTML = h;
+    document.getElementById('panel').style.display = 'flex';
+}
+
+function pickMode(id) {
+    document.querySelectorAll('#p-mode button').forEach(b => {
+        b.className = 'btn ' + (b.dataset.mode === id ? 'btn-primary' : 'btn-outline') + ' btn-sm';
     });
+}
+function closePanel() { document.getElementById('panel').style.display = 'none'; }
+
+async function submitPanel() {
+    const action = PANEL_ACTION, ids = [...SEL], params = {};
+    if (action === 'cutout') {
+        params.model = val('p-model'); params.background = val('p-bg'); params.color = val('p-color');
+    } else if (action === 'edit') {
+        const on = document.querySelector('#p-mode button.btn-primary');
+        params.mode = (on && on.dataset.mode) || 'bg';
+        params.style = val('p-style') || '';
+        params.text = val('p-text');
+    } else {
+        params.mode = val('p-smode'); params.res = parseInt(val('p-res'), 10); params.pad = parseInt(val('p-pad'), 10);
+        if (params.mode === 'grid3' && ids.length !== 9) { toast('九宫格需要正好 9 张素材', 'error'); return; }
+        if (ids.length > 9) { toast('拼版最多 9 张素材', 'error'); return; }
+    }
+    if (action === 'edit' && ids.length > 3) { toast('图生图最多 3 张素材', 'error'); return; }
+    const tab = window.open('/jobs', '_blank');       // 入队前同步开标签页（避免被弹窗拦截）
+    const r = await api('/api/materials/process', {method: 'POST', body: JSON.stringify({action: action, ids: ids, params: params})});
+    if (!r.ok) { if (tab) { tab.close(); } toast(r.error || '入队失败', 'error'); return; }
+    toast(r.reused ? '已有同样的任务在进行，进度见任务看板' : '已入队，进度见任务看板');
+    closePanel(); SEL.clear(); syncSel(); render();
+}
+
+async function del(id) {
+    if (!confirm('删除这张素材？文件会一起删掉。')) { return; }
+    const r = await api('/api/materials/delete', {method: 'POST', body: JSON.stringify({id: id})});
+    if (!r.ok) { toast(r.error || '删除失败', 'error'); return; }
+    toast('已删除'); SEL.delete(id); load();
+}
+
+async function compress(file) {
+    if (!file.type.startsWith('image/') || file.type === 'image/gif') { return file; }
+    try {
+        const bmp = await createImageBitmap(file);
+        const max = 2048, s = Math.min(1, max / Math.max(bmp.width, bmp.height));
+        if (s >= 1 && file.size < 700 * 1024) { return file; }
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+        const png = file.type === 'image/png';
+        const blob = await new Promise(res => c.toBlob(res, png ? 'image/png' : 'image/jpeg', 0.86));
+        if (blob && blob.size < file.size) { return new File([blob], file.name, {type: blob.type}); }
+    } catch (e) { /* 压缩失败就按原图传 */ }
+    return file;
+}
+
+async function upload(input) {
+    const files = [...(input.files || [])];
+    input.value = '';
+    if (!files.length) { return; }
+    toast('处理中…（图片会自动压缩）', 'info');
+    const fd = new FormData();
+    for (const f of files) { fd.append('file', await compress(f)); }
+    let r;
+    try {
+        r = await fetch('/api/materials/upload', {method: 'POST', body: fd, credentials: 'include'}).then(x => x.json());
+    } catch (e) { toast('上传失败：' + e, 'error'); return; }
+    if (r.error) { toast(r.error, 'error'); return; }
+    if (r.errors && r.errors.length) { toast('部分失败：' + r.errors.join('；'), 'error'); }
+    toast('已上传 ' + ((r.items || []).length) + ' 个素材');
     load();
 }
 
-async function load() {
-    const type = document.getElementById('type-filter').value;
-    const rows = await api('/api/library?scope=' + SCOPE + '&type=' + type);
-    const el = document.getElementById('grid');
-    if (!Array.isArray(rows) || !rows.length) {
-        el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
-            + '📭 暂无素材' + (SCOPE === 'shared' ? '（平台共享素材整理中）' : '—— 配图生成的素材会出现在这里') + '</div>';
-        return;
-    }
-    el.innerHTML = rows.map(m => `<div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
-        <div style="height:120px;background:#f8fafc;display:flex;align-items:center;justify-content:center;font-size:28px;color:#cbd5e1;">
-            ${m.type==='image' ? '🖼' : m.type==='audio' ? '🎵' : m.type==='video' ? '🎬' : '📄'}
-        </div>
-        <div style="padding:10px;">
-            <div style="font-size:13px;font-weight:500;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.name || '未命名'}</div>
-            <div style="font-size:11px;color:#94a3b8;">
-                ${CATEGORY_LABEL[m.category] || m.category || ''} · ${m.scope === 'shared' ? '平台' : '我的'}
-            </div>
-        </div>
-    </div>`).join('');
+// ============ 查看层（图片放大 / 视频·音频播放）============
+let VIEW = { list: [], i: 0, zoom: 1 };
+let VDRAG = null;
+
+function viewerVisible() { return document.getElementById('viewer').style.display === 'flex'; }
+
+function viewList(type) {
+    const q = (val('q') || '').trim().toLowerCase();
+    return ITEMS.filter(m => m.type === type && (!q || (m.name || '').toLowerCase().includes(q)));
 }
+
+function openViewer(id) {
+    const m = ITEMS.find(x => x.id === id);
+    if (!m) { return; }
+    VIEW.list = viewList(m.type);                 // 只在同类型素材之间切换
+    VIEW.i = Math.max(0, VIEW.list.findIndex(x => x.id === id));
+    VIEW.zoom = 1;
+    document.getElementById('viewer').style.display = 'flex';
+    renderViewer();
+}
+
+function renderViewer() {
+    const m = VIEW.list[VIEW.i];
+    const stage = document.getElementById('viewer-stage');
+    if (!m) { closeViewer(); return; }
+    const many = VIEW.list.length > 1;
+    document.getElementById('viewer-prev').style.display = many ? 'block' : 'none';
+    document.getElementById('viewer-next').style.display = many ? 'block' : 'none';
+    document.getElementById('viewer-title').textContent = (m.name || '未命名') + '（' + (VIEW.i + 1) + '/' + VIEW.list.length + '）';
+    document.getElementById('viewer-zoom').textContent = m.type === 'image' ? '100%' : '';
+    if (m.type === 'image') {
+        stage.innerHTML = '<img id="viewer-img" src="' + esc(m.file_path) + '" alt="" '
+            + 'style="margin:auto;max-width:100%;max-height:100%;">';
+        const img = document.getElementById('viewer-img');
+        if (img.complete) { fitViewer(); } else { img.onload = fitViewer; }
+    } else if (m.type === 'video') {
+        stage.innerHTML = '<video id="viewer-media" src="' + esc(m.file_path) + '" controls autoplay playsinline '
+            + 'style="margin:auto;max-width:100%;max-height:100%;background:#000;border-radius:8px;"></video>';
+    } else {
+        stage.innerHTML = '<div style="margin:auto;text-align:center;color:#cbd5e1;">'
+            + '<div style="font-size:54px;margin-bottom:16px;">🎵</div>'
+            + '<audio id="viewer-media" src="' + esc(m.file_path) + '" controls autoplay '
+            + 'style="width:min(540px,78vw);"></audio></div>';
+    }
+}
+
+function fitViewer() {
+    const img = document.getElementById('viewer-img');
+    if (!img || !img.naturalWidth) { return; }
+    const stage = document.getElementById('viewer-stage');
+    const fit = Math.min(stage.clientWidth / img.naturalWidth, stage.clientHeight / img.naturalHeight, 1);
+    img.style.maxWidth = 'none';
+    img.style.maxHeight = 'none';
+    img.style.width = Math.round(img.naturalWidth * fit * VIEW.zoom) + 'px';
+    img.style.height = 'auto';
+    document.getElementById('viewer-zoom').textContent = Math.round(VIEW.zoom * 100) + '%';
+}
+
+function viewerZoom(d) {
+    const m = VIEW.list[VIEW.i];
+    if (!m || m.type !== 'image') { return; }
+    VIEW.zoom = Math.min(6, Math.max(0.25, Math.round((VIEW.zoom + d) * 100) / 100));
+    fitViewer();
+}
+
+function viewerStep(d) {
+    if (VIEW.list.length < 2) { return; }
+    VIEW.i = (VIEW.i + d + VIEW.list.length) % VIEW.list.length;
+    VIEW.zoom = 1;
+    renderViewer();
+}
+
+function closeViewer() {
+    const media = document.getElementById('viewer-media');
+    if (media) { try { media.pause(); } catch (e) { /* 忽略 */ } }   // 关掉就停，别后台继续响
+    document.getElementById('viewer-stage').innerHTML = '';
+    document.getElementById('viewer').style.display = 'none';
+}
+
+document.getElementById('viewer').addEventListener('wheel', function (e) {
+    const m = VIEW.list[VIEW.i];
+    if (!viewerVisible() || !m || m.type !== 'image') { return; }
+    e.preventDefault();
+    viewerZoom(e.deltaY < 0 ? 0.2 : -0.2);
+}, { passive: false });
+
+document.getElementById('viewer-stage').addEventListener('dblclick', function () {
+    const m = VIEW.list[VIEW.i];
+    if (m && m.type === 'image') { VIEW.zoom = VIEW.zoom > 1 ? 1 : 2; fitViewer(); }
+});
+
+document.getElementById('viewer-stage').addEventListener('click', function (e) {
+    if (e.target.id === 'viewer-stage') { closeViewer(); }          // 点空白处关闭
+});
+
+document.getElementById('viewer-stage').addEventListener('mousedown', function (e) {
+    if (e.target.id !== 'viewer-img') { return; }
+    VDRAG = { x: e.clientX, y: e.clientY, sl: this.scrollLeft, st: this.scrollTop };
+});
+
+document.addEventListener('mousemove', function (e) {
+    if (!VDRAG) { return; }
+    const stage = document.getElementById('viewer-stage');
+    stage.scrollLeft = VDRAG.sl - (e.clientX - VDRAG.x);
+    stage.scrollTop = VDRAG.st - (e.clientY - VDRAG.y);
+});
+
+document.addEventListener('mouseup', function () { VDRAG = null; });
+
+document.addEventListener('keydown', function (e) {
+    if (!viewerVisible()) { return; }
+    if (e.key === 'Escape') { closeViewer(); }
+    else if (e.key === 'ArrowLeft') { viewerStep(-1); }
+    else if (e.key === 'ArrowRight') { viewerStep(1); }
+    else if (e.key === '+' || e.key === '=') { viewerZoom(0.25); }
+    else if (e.key === '-') { viewerZoom(-0.25); }
+});
+
+window.addEventListener('resize', function () { if (viewerVisible()) { fitViewer(); } });
 
 load();
 </script>

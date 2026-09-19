@@ -142,40 +142,123 @@ def parse_lora(spec):
     return out
 
 # 配图风格（14 选 1）：人工在 ① 区下拉选定；出图时把英文风格词追加到正向提示词
-STYLE_PROMPT = {
-    "realistic": "photorealistic, natural light, shallow depth of field, 50mm lens",
-    "cinematic": "cinematic still, anamorphic lens, moody rim light, film grain",
-    "commercial": "clean studio product photography, softbox lighting, seamless backdrop",
-    "illustration": "flat editorial illustration, soft gradients, clean shapes",
-    "watercolor": "watercolor painting, wet-on-wet washes, soft paper texture",
-    "ink": "Chinese ink wash painting, xuan paper texture, generous negative space",
-    "anime": "anime key visual, cel shading, clean line art",
-    "3d": "3D render, soft studio light, clay material, subsurface scattering",
-    "concept": "concept art, matte painting, dramatic scale, volumetric light",
-    "artistic": "ethereal dreamscape, mist, soft light rays, surreal calm",
-    "mystic": "dark mystic atmosphere, deep shadows, candlelight, quiet symbolism",
-    "minimal": "minimalist composition, vast negative space, muted tones",
-    "editorial": "editorial magazine layout, strong grid, space for bold typography",
-    "collage": "cut-out paper collage, torn paper edges, layered textures",
+# 配图风格（单一事实来源 = configs/styles.json：可编辑、改完刷新页面即生效，不用重启）
+# ⚠️ id 一旦上线不要改 —— 历史配图方案与相册日志都按 id 存；加风格只需在 json 里加一条
+STYLES_FILE = BASE_DIR / "configs" / "styles.json"
+# ⚠️ 这份兜底只在 configs/styles.json 缺失/为空时用于自愈，**不含 guide** → 正常别删那个文件
+STYLES_DEFAULT = {
+    "default": "artistic",
+    "styles": [
+        {"id": "realistic", "name": "写实风", "group": "摄影写实", "prompt": "photorealistic, natural light, shallow depth of field, 50mm lens"},
+        {"id": "cinematic", "name": "电影感", "group": "摄影写实", "prompt": "cinematic still, anamorphic lens, moody rim light, film grain"},
+        {"id": "commercial", "name": "商业质感", "group": "摄影写实", "prompt": "clean studio product photography, softbox lighting, seamless backdrop"},
+        {"id": "illustration", "name": "插画风", "group": "绘画插画", "prompt": "flat editorial illustration, soft gradients, clean shapes"},
+        {"id": "watercolor", "name": "水彩风", "group": "绘画插画", "prompt": "watercolor painting, wet-on-wet washes, soft paper texture"},
+        {"id": "ink", "name": "水墨国风", "group": "绘画插画", "prompt": "Chinese ink wash painting, xuan paper texture, generous negative space"},
+        {"id": "anime", "name": "动漫风", "group": "绘画插画", "prompt": "anime key visual, cel shading, clean line art"},
+        {"id": "3d", "name": "3D风", "group": "数字渲染", "prompt": "3D render, soft studio light, clay material, subsurface scattering"},
+        {"id": "concept", "name": "概念艺术", "group": "数字渲染", "prompt": "concept art, matte painting, dramatic scale, volumetric light"},
+        {"id": "artistic", "name": "意境风", "group": "氛围与设计", "prompt": "ethereal dreamscape, mist, soft light rays, surreal calm"},
+        {"id": "mystic", "name": "暗黑神秘", "group": "氛围与设计", "prompt": "dark mystic atmosphere, deep shadows, candlelight, quiet symbolism"},
+        {"id": "minimal", "name": "极简留白", "group": "氛围与设计", "prompt": "minimalist composition, vast negative space, muted tones"},
+        {"id": "editorial", "name": "杂志排版", "group": "氛围与设计", "prompt": "editorial magazine layout, strong grid, space for bold typography"},
+        {"id": "collage", "name": "拼贴杂志", "group": "氛围与设计", "prompt": "cut-out paper collage, torn paper edges, layered textures"},
+    ],
 }
-STYLE_LABEL = {
-    "realistic": "写实风", "cinematic": "电影感", "commercial": "商业质感",
-    "illustration": "插画风", "watercolor": "水彩风", "ink": "水墨国风", "anime": "动漫风",
-    "3d": "3D风", "concept": "概念艺术",
-    "artistic": "意境风", "mystic": "暗黑神秘", "minimal": "极简留白",
-    "editorial": "杂志排版", "collage": "拼贴杂志",
-}
-STYLE_TYPES = tuple(STYLE_PROMPT)          # 顺序 = ① 区下拉顺序 = 设置页「默认视觉风格」顺序
-DEFAULT_STYLE = "artistic"                 # 未指定 / 不认识的风格回落到它
+def _norm_style(s):
+    """风格条目规范化：id/prompt 必须有；name 缺省用 id、group 缺省归「其它」"""
+    if not (isinstance(s, dict) and s.get("id") and s.get("prompt")):
+        return None
+    sid = str(s["id"]).strip().lower()
+    return {"id": sid, "name": str(s.get("name") or sid).strip(),
+            "group": str(s.get("group") or "其它").strip(), "prompt": str(s["prompt"]).strip(),
+            "guide": str(s.get("guide") or "").strip()}
 
-# 金句没写 bg 时的兜底背景词（不含画风，画风由 STYLE_PROMPT 按当前风格补）
+
+def load_styles():
+    """读 configs/styles.json → {"styles":[{id,name,group,prompt}], "groups":[{name,styles}], "default":id}
+
+    文件不存在/为空 → 用内置默认并补写文件（自愈）；文件坏 → 用内置默认，**不覆盖用户文件**；
+    id 重复保留第一次出现。**每次直读**（4KB 文件、微秒级）：改完 json 刷新页面即生效，不用重启。
+    ⚠️ 别加 mtime 缓存 —— 实测同一秒内的两次写入 mtime 可能不变，会导致「改了不生效」。"""
+    raw = ""
+    try:
+        raw = STYLES_FILE.read_text(encoding="utf-8")
+    except Exception:
+        raw = ""
+    if not raw.strip():
+        try:
+            STYLES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STYLES_FILE.write_text(json.dumps(STYLES_DEFAULT, ensure_ascii=False, indent=2) + "\n",
+                                   encoding="utf-8")
+        except Exception:
+            pass
+        styles, dflt = [dict(s) for s in STYLES_DEFAULT["styles"]], STYLES_DEFAULT["default"]
+    else:
+        styles, dflt = [], ""
+        try:
+            data = json.loads(raw)
+            styles = [x for x in (_norm_style(s) for s in (data.get("styles") or [])) if x]
+            dflt = str(data.get("default") or "").strip().lower()
+        except Exception:
+            styles, dflt = [], ""
+        if not styles:
+            styles, dflt = [dict(s) for s in STYLES_DEFAULT["styles"]], STYLES_DEFAULT["default"]
+    seen, uniq = set(), []
+    for s in styles:
+        if s["id"] in seen:
+            continue
+        seen.add(s["id"])
+        uniq.append(s)
+    groups, names = [], []
+    for s in uniq:
+        if s["group"] not in names:
+            names.append(s["group"])
+            groups.append({"name": s["group"], "styles": []})
+        groups[names.index(s["group"])]["styles"].append({"id": s["id"], "name": s["name"]})
+    if dflt not in seen:
+        dflt = uniq[0]["id"] if uniq else "artistic"
+    return {"styles": uniq, "groups": groups, "default": dflt}
+
+
+def style_types():
+    """全部风格 id（顺序 = ①区下拉顺序）"""
+    return tuple(s["id"] for s in load_styles()["styles"])
+
+
+def style_prompt_map():
+    """id → 追加到正向提示词末尾的英文画风词"""
+    return {s["id"]: s["prompt"] for s in load_styles()["styles"]}
+
+
+def style_label_map():
+    """id → 中文名"""
+    return {s["id"]: s["name"] for s in load_styles()["styles"]}
+
+
+def style_guide_map():
+    """id → 中文「画面要求」（写给 LLM 看：该风格画面该长什么样、bg 里该避免什么词）
+    照片类风格会写明「照常写摄影语言」，换材质类风格写明「不要写摄影媒介词」—— 逐风格写，不能用一句通用提示。"""
+    return {s["id"]: (s.get("guide") or "") for s in load_styles()["styles"]}
+
+
+def style_groups():
+    """①区下拉 / 设置页下拉的分组数据 [{name, styles:[{id,name}]}]"""
+    return load_styles()["groups"]
+
+
+def style_default():
+    """未指定 / 不认识的风格回落到它"""
+    return load_styles()["default"]
+
+# 金句没写 bg 时的兜底背景词（不含画风，画风由 styles.json 的当前风格补）
 FALLBACK_BG = ("Mystical serene minimal full-bleed background, soft light, "
                "no text, no letters, no people")
 
 
 def _with_style(prompt, style):
     """给正向提示词补上风格英文词；没有对应风格就原样返回"""
-    frag = STYLE_PROMPT.get(style or "")
+    frag = style_prompt_map().get(style or "")
     p2 = (prompt or "").strip()
     if not frag:
         return p2
@@ -321,6 +404,7 @@ PLAN_USER_TEMPLATE = (
     "- 平台：{platform}（id: {platform_id}）\n"
     "- 文案类型：{ctype_label}（id: {ctype_id}）\n"
     "- 配图风格：{style_label}（id: {style_id}）\n"
+    "{style_guide_line}"
     "- 文案标题：{title}\n"
     "\n"
     "## 文案正文\n"
@@ -513,7 +597,7 @@ def load_model_groups():
 
 
 def get_default_style():
-    """配图默认风格：settings.default_style（设置页「默认视觉风格」）；空 / 不认识 → DEFAULT_STYLE"""
+    """配图默认风格：settings.default_style（设置页「默认视觉风格」）；空 / 不认识 → styles.json 的 default"""
     v = ""
     try:
         conn = _settings_db()
@@ -523,7 +607,7 @@ def get_default_style():
     except Exception:
         pass
     v = str(v).strip().lower()
-    return v if v in STYLE_TYPES else DEFAULT_STYLE
+    return v if v in style_types() else style_default()
 
 
 # ============================================================
@@ -552,9 +636,38 @@ def adl_status():
     return _adl("GET", "/status", {"instance_uuid": cfg.get("comfy_instance_uuid", "")})
 
 
-def adl_snapshot():
+def adl_snapshot(instance_uuid=""):
     cfg = get_comfy_config()
-    return _adl("GET", "/snapshot", {"instance_uuid": cfg.get("comfy_instance_uuid", "")})
+    return _adl("GET", "/snapshot",
+                {"instance_uuid": instance_uuid or cfg.get("comfy_instance_uuid", "")})
+
+
+def adl_list_instances():
+    """账号下全部应用实例（看板用，只读）"""
+    res = _adl("POST", "/list", {"page_index": 1, "page_size": 50})
+    d = res.get("data") or {}
+    lst = d.get("list") if isinstance(d, dict) else d
+    return lst if isinstance(lst, list) else []
+
+
+def adl_hosts():
+    """主机看板数据：每台实例的状态/规格/单价（只读，不开关机）"""
+    cur = (get_comfy_config().get("comfy_instance_uuid") or "").strip()
+    out = []
+    for it in adl_list_instances():
+        u = it.get("uuid") or ""
+        h = {"uuid": u, "name": it.get("name") or "", "status": it.get("status") or "",
+             "region": it.get("region_name") or "", "spec": it.get("gpu_spec_uuid") or "",
+             "alias": "", "price": None, "current": u == cur}
+        try:
+            snap = (adl_snapshot(u).get("data") or {})
+            h["alias"] = snap.get("snapshot_gpu_alias_name") or ""
+            p = snap.get("payg_price")
+            h["price"] = round(float(p) / 1000.0, 2) if p else None
+        except Exception:
+            pass
+        out.append(h)
+    return out
 
 
 def adl_power_on():
@@ -791,8 +904,7 @@ def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, seed=None):
         if pid in hh:
             entry = hh[pid]
             if (entry.get("status") or {}).get("status_str") == "error":
-                raise RuntimeError("ComfyUI 执行出错: %s" % json.dumps(
-                    (entry.get("status") or {}).get("messages", []), ensure_ascii=False)[:300])
+                raise RuntimeError("ComfyUI 执行出错: %s" % _wf_err_text(entry.get("status")))
             for node in (entry.get("outputs") or {}).values():
                 for im in (node.get("images") or []):
                     return im.get("filename"), im.get("subfolder", ""), meta
@@ -805,6 +917,74 @@ def comfy_download(base, fname, subfolder=""):
                      timeout=120)
     r.raise_for_status()
     return r.content
+
+
+def _wf_err_text(status):
+    """从 ComfyUI history 的 status 里抽出真正有用的报错（节点类型 + 异常信息）"""
+    msgs = (status or {}).get("messages") or []
+    for ev, data in reversed(msgs):
+        if ev in ("execution_error", "execution_interrupted") and isinstance(data, dict):
+            return "%s (node %s): %s" % (data.get("node_type"), data.get("node_id"),
+                                         str(data.get("exception_message") or
+                                             data.get("exception_type") or "")[:200])
+    try:
+        return json.dumps(msgs, ensure_ascii=False)[:240]
+    except Exception:
+        return str(msgs)[:240]
+
+
+def comfy_upload(base, path, name=None, timeout=120):
+    """把本地图上传到 ComfyUI 的 input 目录，返回可直接喂 LoadImage 的文件名"""
+    p = Path(path)
+    nm = name or p.name
+    with open(str(p), "rb") as f:
+        r = requests.post(base + "/upload/image",
+                          files={"image": (nm, f, "application/octet-stream")},
+                          data={"overwrite": "true", "type": "input"}, timeout=timeout)
+    if r.status_code != 200:
+        raise RuntimeError("上传到 ComfyUI 失败 HTTP %s: %s" % (r.status_code, r.text[:200]))
+    try:
+        d = r.json() or {}
+    except Exception:
+        d = {}
+    nm = d.get("name") or nm
+    sub = d.get("subfolder") or ""
+    return (sub + "/" + nm) if sub else nm
+
+
+def comfy_run_wf(base, wf, timeout=900, poll=3):
+    """提交**任意工作流**并等待完成，返回 [(filename, subfolder), ...]"""
+    r = requests.post(base + "/prompt", json={"prompt": wf}, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, r.text[:300]))
+    pid = r.json()["prompt_id"]
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        time.sleep(poll)
+        try:
+            hh = requests.get(base + "/history/" + pid, timeout=30).json()
+        except Exception:
+            continue
+        if pid in hh:
+            entry = hh[pid]
+            st = entry.get("status") or {}
+            if st.get("status_str") == "error":
+                raise RuntimeError("ComfyUI 执行出错: %s" % _wf_err_text(st))
+            out = []
+            for node in (entry.get("outputs") or {}).values():
+                for im in (node.get("images") or []):
+                    out.append((im.get("filename"), im.get("subfolder", "")))
+            if out:
+                return out
+            if st.get("completed"):
+                raise RuntimeError("工作流执行完但没有图片输出")
+    raise RuntimeError("加工超时（%ds）" % timeout)
+
+
+def _run_wf_one(base, wf, timeout=900):
+    """跑一个工作流并取回第一张图的字节"""
+    imgs = comfy_run_wf(base, wf, timeout=timeout)
+    return comfy_download(base, imgs[0][0], imgs[0][1])
 
 
 # ============================================================
@@ -865,7 +1045,7 @@ def _log_gen_meta(log, article_id, name, kind, meta, style):
     log("\u24d8 参数：seed=%s · steps=%s · cfg=%s · %s/%s · %dx%d · 风格 %s · 底模 %s%s"
         % (meta.get("seed"), meta.get("steps"), meta.get("cfg"), meta.get("sampler"),
            meta.get("scheduler"), meta.get("width"), meta.get("height"),
-           STYLE_LABEL.get(style, style) or "-", (meta.get("unet") or "-"), extra))
+           style_label_map().get(style, style) or "-", (meta.get("unet") or "-"), extra))
     log("\u24d8 正向：" + (meta.get("prompt") or ""))
     log("\u24d8 负面：" + (meta.get("neg") or ""))
     err = _save_gen_log(article_id, name, kind, meta, style)
@@ -1218,7 +1398,7 @@ def _plan_out(data, default_style="", art=None):
                     images.append(n)
     quotes, scenes = _legacy_views(images)
     style = str(data.get("style") or "").strip().lower()
-    return {"style": style if style in STYLE_TYPES else default_style,
+    return {"style": style if style in style_types() else default_style,
             "platform": str(data.get("platform") or "").strip(),
             "images": images, "quotes": quotes, "scenes": scenes}
 
@@ -1226,7 +1406,7 @@ def _plan_out(data, default_style="", art=None):
 def read_plan(article_id, default_style=None):
     """读配图方案：统一成 images[]（旧 quotes/scenes 自动映射），并派生 ② 出图用的两组视图
 
-    style 只认 14 个风格之一；旧配色值（purple/dark/gold/maya）一律忽略，回落默认风格。
+    style 只认 configs/styles.json 里的风格之一；旧配色值（purple/dark/gold/maya）一律忽略，回落默认风格。
     """
     conn = _content_db()
     row = conn.execute("SELECT image_script, platform, content_type FROM articles WHERE id=?",
@@ -1274,7 +1454,7 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
 
     # 系统提示词 = prompts/image_agent.md 文件内容（设置页可编辑）
     style = (style or "").strip().lower()
-    style = style if style in STYLE_TYPES else get_default_style()
+    style = style if style in style_types() else get_default_style()
     sys_prompt = load_plan_prompt()
     plat = (art.get("platform") or "").strip()
     ctype = (art.get("content_type") or "").strip()
@@ -1283,8 +1463,11 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
                 .replace("{platform_id}", plat or "未指定")
                 .replace("{ctype_label}", CTYPE_LABEL.get(ctype, ctype or "图文文章"))
                 .replace("{ctype_id}", ctype or "article")
-                .replace("{style_label}", STYLE_LABEL.get(style, style))
+                .replace("{style_label}", style_label_map().get(style, style))
                 .replace("{style_id}", style)
+                .replace("{style_guide_line}",
+                         ("- 该风格的画面要求（按它写画面内容与提示词，不要写与它冲突的媒介/风格词）：%s\n"
+                          % style_guide_map().get(style, "")) if style_guide_map().get(style, "") else "")
                 .replace("{title}", title)
                 .replace("{content}", content))
     with jobstore.LLM_GATE:                 # LLM 域闸门：与队列共用同一并发上限
@@ -1364,9 +1547,9 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
         cur = ("图上文字：%s\n中文画面描述：%s\n当前提示词（英文）：%s\n当前画幅：%s"
                % ("｜".join(item.get("texts") or []) or "（无）", item.get("cn") or "（无）",
                   item.get("bg") or "（空）", item.get("aspect") or "3:4"))
-    _frag = STYLE_PROMPT.get(plan.get("style") or "")
+    _frag = style_prompt_map().get(plan.get("style") or "")
     palette = ("风格：本次整套配图的风格是 %s（%s），画面请按这个风格来（画风英文词由系统追加，不必自己写）。\n"
-               % (STYLE_LABEL.get(plan.get("style"), plan.get("style")), _frag)) if _frag else ""
+               % (style_label_map().get(plan.get("style"), plan.get("style")), _frag)) if _frag else ""
     h = (hint or "").strip()
     prompt = (REWRITE_PROMPT
               .replace("{kind_label}", ITYPE_LABEL.get(itype, itype))
@@ -1415,7 +1598,7 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
 # 统一生成任务（叠字卡 + 画面，一次开机一次关机）
 # ============================================================
 def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
-                   card_want=0, scene_count=0):
+                   card_want=0, scene_count=0, owner="", owner_id=""):
     """任务入队（幂等）：① 生成方案 → kind=plan；② 出图 → kind=images
     返回 {ok, job_id, kind, queue_pos, reused}；llm_cfg 仅为兼容旧调用保留
     （后台任务自己从 settings / .env 取 key，不再经前端传）
@@ -1437,7 +1620,8 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
                "card_want": int(card_want or 0), "scene_count": int(scene_count or 0)}
     total = 0 if plan_only else ((int(card_want or 0) if want_cards else 0)
                                  + (int(scene_count or 0) if want_scenes else 0))
-    jid, reused = jobstore.DISPATCHER.enqueue(kind, article_id, payload, total, priority=10)
+    jid, reused = jobstore.DISPATCHER.enqueue(kind, article_id, payload, total, priority=10,
+                                              owner=owner, owner_id=owner_id)
     return {"ok": True, "job_id": jid, "kind": kind, "reused": reused,
             "queue_pos": jobstore.queue_pos(jid)}
 
@@ -1452,9 +1636,23 @@ def _ensure_instance(job_id, log):
         log("实例已在运行，跳过开机")
         return False
     log("启动实例…（当前状态 %s）" % (st or "未知"))
-    res = adl_power_on()
-    if res.get("code") != "Success":
-        raise RuntimeError("开机失败：%s" % (res.get("msg") or res.get("code")))
+    # ⚠️ 开机常被「当前算力规格暂无库存，请修改配置或稍等再试」拒绝 → 每 30s 重试，最长 5 分钟
+    # （实测重试即可抢到；不是配置错误，所以只有这类文案才重试，其它错误立刻失败）
+    res, t0 = {}, time.time()
+    while time.time() - t0 < 300:
+        if jobstore.canceled(job_id):
+            raise RuntimeError("已取消")
+        res = adl_power_on()
+        if res.get("code") == "Success":
+            break
+        msg = str(res.get("msg") or res.get("code") or "")
+        if ("库存" in msg) or ("稍等" in msg):
+            log("开机被拒：%s —— 30s 后重试" % msg)
+            time.sleep(30)
+            continue
+        raise RuntimeError("开机失败：%s" % msg)
+    else:
+        raise RuntimeError("开机失败：%s" % (res.get("msg") or res.get("code") or "未知"))
     log("开机指令已下发")
     for _ in range(60):
         if jobstore.canceled(job_id):
@@ -1472,9 +1670,13 @@ def _shutdown_if_idle(job_id, log):
         if get_comfy_config().get("comfy_auto_shutdown", "1") != "1":
             log("自动关机已关闭，实例保持运行")
             return
-        n = jobstore.queued_count("images")
-        if n > 0:
-            log("队列还有 %d 个出图任务，实例保持运行" % n)
+        # 注意：必须连「正在跑」的一起数 —— 只数排队时，若同域有两个任务
+        # （比如从脚本入队、域判定不一致），先跑完的那个会把机器关掉，
+        # 正在等开机的另一个就直接失败（实测踩过）。
+        gpu_kinds = ("images", "cutout", "edit", "stitch")
+        n = sum(jobstore.queued_count(k) + jobstore.running_count(k) for k in gpu_kinds)
+        if n > 1:
+            log("还有 %d 个 GPU 任务未完成，实例保持运行" % (n - 1))
             return
         log("队列已空，关闭实例…")
         r = adl_power_off()
@@ -1498,7 +1700,7 @@ def run_plan_job(job):
     save_plan(article_id, newp)
     _log(jid, "方案已生成：%d 张（%s）· 风格 %s"
          % (len(newp["images"]), _type_brief(newp["images"]),
-            STYLE_LABEL.get(newp["style"], newp["style"])))
+            style_label_map().get(newp["style"], newp["style"])))
     _set(jid, total=0, done=0, plan_images=newp["images"], quotes=newp["quotes"],
          scenes=newp["scenes"], style=newp["style"], want_cards=False, want_scenes=False)
 
@@ -1524,6 +1726,23 @@ def _image_numbers(plan, want_cards, want_scenes):
     return (card_nos if want_cards else []), (scene_nos if want_scenes else [])
 
 
+def _sync_materials(article_id, job=None):
+    """配图产物入库（素材库）：只增不删；失败只记日志，绝不影响出图"""
+    try:
+        import materials as mat
+        n = mat.sync_article_images(article_id,
+                                    owner_id=(job or {}).get("owner_id"),
+                                    owner=(job or {}).get("owner") or "")
+        if n and job:
+            _log(job["id"], "素材库已入库 %d 张" % n)
+    except Exception as e:
+        try:
+            if job:
+                _log(job["id"], "素材入库跳过：%s" % str(e)[:120])
+        except Exception:
+            pass
+
+
 def run_images_job(job):
     """② 出图：一次开机 → 出完本任务 → 队列空了才关机"""
     jid, article_id = job["id"], job.get("article_id")
@@ -1544,7 +1763,7 @@ def run_images_job(job):
     # 文件名 = 条目在 ① 区清单里的固定编号 → 同名覆盖原图（URL 恒定、清单不用改）
     card_nos, scene_nos = _image_numbers(plan, want_cards, want_scenes)
     style = plan.get("style") or ""
-    if style not in STYLE_TYPES:
+    if style not in style_types():
         style = get_default_style()
     total = len(quotes) + len(scenes)
     _set(jid, quotes=plan["quotes"], scenes=plan["scenes"], style=style, total=total,
@@ -1553,7 +1772,7 @@ def run_images_job(job):
 
     with RUN_LOCK:                      # 一块 GPU：双保险（调度器侧并发已是 1）
         try:
-            _set(jid, stage="booting")
+            _set(jid, stage="booting", host=cfg.get("comfy_instance_uuid") or "")
             _ensure_instance(jid, lambda m: _log(jid, m))
 
             _set(jid, stage="ready")
@@ -1627,6 +1846,94 @@ def run_images_job(job):
                  % (len(card_urls) + len(scene_urls)))
             raise RuntimeError(str(e)[:300])
         finally:
+            _sync_materials(article_id, job)
+            _shutdown_if_idle(jid, lambda m: _log(jid, m))
+
+
+def run_material_job(job):
+    """素材加工：抠图(cutout) / 图生图(edit) / 拼版(stitch) —— 一次开机 → 做完 → 队列空才关机"""
+    import materials as mat
+    jid = job["id"]
+    kind = job.get("kind") or ""
+    opts = job.get("payload") or {}
+    ids = opts.get("ids") or []
+    params = opts.get("params") or {}
+    title = {"cutout": "抠图", "edit": "图生图", "stitch": "拼版"}.get(kind, kind)
+    rows = [r for r in (mat.get_material(i) for i in ids) if r]
+    err = mat.validate(kind, rows, params)
+    if err:
+        raise RuntimeError(err)
+    cfg = get_comfy_config()
+    if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置应用实例 UUID / Token，请去「设置」页填写")
+    total = 1 if kind == "stitch" else len(rows)
+    _set(jid, total=total, done=0)
+    _log(jid, "%s：%d 张素材" % (title, len(rows)))
+    results, done = [], 0
+    with RUN_LOCK:
+        try:
+            _set(jid, stage="booting", host=cfg.get("comfy_instance_uuid") or "")
+            _ensure_instance(jid, lambda m: _log(jid, m))
+            _set(jid, stage="ready")
+            base = resolve_base_url(logger=lambda m: _log(jid, m))
+            if not base:
+                raise RuntimeError("拿不到 ComfyUI 地址")
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
+                raise RuntimeError("ComfyUI 300s 内未就绪")
+            _set(jid, stage="generating")
+            aid = (rows[0].get("article_id") if rows else None) or 0
+            outdir = mat.out_dir(aid)
+            srcs = [mat.url_to_path(r.get("file_path")) for r in rows]
+
+            if kind == "stitch":
+                _log(jid, "拼版：%d 张 → %s（%s px）"
+                     % (len(rows), params.get("mode") or "grid3", params.get("res") or 1080))
+                imgs = [comfy_upload(base, str(p)) for p in srcs]
+                name = mat.out_name(kind, rows[0].get("file_path"), params,
+                                    "|".join(sorted(r.get("file_path") or "" for r in rows)))
+                wf = mat.build_wf(kind, imgs, params, cfg=cfg)
+                (outdir / name).write_bytes(_run_wf_one(base, wf))
+                url = "%s/materials/%s/%s" % (mat.URL_PREFIX, aid, name)
+                results.append((rows[0], url))
+                done = 1
+                _set(jid, done=done, images=[u for _, u in results])
+                _log(jid, "拼版完成 → " + name)
+            else:
+                for i, (r, p) in enumerate(zip(rows, srcs)):
+                    if jobstore.canceled(jid):
+                        raise RuntimeError("已取消")
+                    _log(jid, "%s %d/%d：%s" % (title, i + 1, len(rows), r.get("name") or ""))
+                    main = comfy_upload(base, str(p))
+                    # 图生图：选多张时第 1 张是主体，其余当参考（保人物一致）
+                    imgs = [main]
+                    if kind == "edit":
+                        for r2, p2 in zip(rows[1:3], srcs[1:3]):
+                            imgs.append(comfy_upload(base, str(p2)))
+                    name = mat.out_name(kind, r.get("file_path"), params)
+                    wf = mat.build_wf(kind, imgs, params, cfg=cfg,
+                                      prompt=mat.make_prompt(kind, params),
+                                      seed=random.randint(1, 2 ** 31 - 1))
+                    (outdir / name).write_bytes(_run_wf_one(base, wf))
+                    url = "%s/materials/%s/%s" % (mat.URL_PREFIX, aid, name)
+                    results.append((r, url))
+                    done += 1
+                    _set(jid, done=done, images=[u for _, u in results])
+                    _log(jid, "%s %d 完成 → %s" % (title, i + 1, name))
+
+            # 入库：同一素材 + 同一参数 = 同名覆盖，不产生重复卡
+            for r, url in results:
+                n = (r.get("name") or "").strip() or url.rsplit("/", 1)[-1]
+                mat.upsert(url, "image", name=("%s · %s" % (n[:40], title)),
+                           category=r.get("category") or "", source=kind,
+                           article_id=r.get("article_id"), owner_id=job.get("owner_id"),
+                           owner=job.get("owner") or "", tags=title)
+            _set(jid, images=[u for _, u in results], done=len(results))
+            _log(jid, "%s全部完成：%d 张" % (title, len(results)))
+        except Exception as e:
+            _log(jid, "❌ %s失败：%s" % (title, str(e)[:220]))
+            raise RuntimeError(str(e)[:300])
+        finally:
             _shutdown_if_idle(jid, lambda m: _log(jid, m))
 
 
@@ -1634,5 +1941,8 @@ def register_jobs():
     """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
     jobstore.DISPATCHER.register("images", run_images_job, domain="gpu")   # 显存域：一块 GPU 串行
     jobstore.DISPATCHER.register("plan", run_plan_job, domain="llm")       # LLM 域：受 llm_parallel 限制
+    # 素材加工：都吃显存 → gpu 域（与出图同域，一块卡串行）
+    for _k in ("cutout", "edit", "stitch"):
+        jobstore.DISPATCHER.register(_k, run_material_job, domain="gpu")
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()

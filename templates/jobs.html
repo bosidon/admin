@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}任务看板 - 仙宝内容平台{% endblock %}
+{% block page_title %}📊 任务看板{% endblock %}
+{% block topbar_right %}
+<span style="font-size:12px;color:var(--text2);">只查看 · 自动刷新</span>
+{% endblock %}
+
+{% block content %}
+<!-- AutoDL 主机（只读） -->
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+        <div style="font-weight:600;font-size:15px;">🖥 AutoDL 主机</div>
+        <div style="font-size:12px;color:var(--text2);" id="host-tip"></div>
+    </div>
+    <div id="hosts"></div>
+</div>
+
+<!-- 统计 -->
+<div class="stats">
+    <div class="stat"><h3 id="s-queued">0</h3><p>排队中</p></div>
+    <div class="stat"><h3 id="s-running">0</h3><p>进行中</p></div>
+    <div class="stat"><h3 id="s-done">0</h3><p>今日完成</p></div>
+    <div class="stat"><h3 id="s-failed">0</h3><p>今日失败/取消</p></div>
+</div>
+
+<!-- 任务列表 -->
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+        <div style="font-weight:600;font-size:15px;">任务列表 <span id="job-count" style="font-size:12px;font-weight:400;color:var(--text2);"></span></div>
+        <div id="filters" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+    </div>
+    <div id="jobs"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const FILTERS = [['', '全部'], ['queued', '排队中'], ['running', '进行中'], ['done', '已完成'], ['failed', '失败']];
+let CUR = '';
+let TIMER = null;
+
+function esc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function shortTitle(t, n) {
+    t = (t || '').trim();
+    return t.length > n ? t.slice(0, n) + '…' : t;
+}
+function fmtDur(s) {
+    if (!s) return '—';
+    if (s < 60) return s + ' 秒';
+    const m = Math.floor(s / 60), r = s % 60;
+    return m + ' 分' + (r ? r + ' 秒' : '');
+}
+const ST_COLOR = {running: 'var(--info)', queued: 'var(--warning)', failed: 'var(--danger)',
+                  canceled: 'var(--text2)', interrupted: 'var(--warning)', done: 'var(--success)'};
+
+/* ---------- 主机 ---------- */
+async function loadHosts() {
+    const el = document.getElementById('hosts');
+    const r = await api('/api/hosts');
+    const hs = (r && r.hosts) || [];
+    if (!r || r.ok === false || !hs.length) {
+        el.innerHTML = '<div style="font-size:13px;color:var(--text2);">' + esc((r && r.error) || '未查到主机') + '</div>';
+        document.getElementById('host-tip').textContent = '';
+        return;
+    }
+    document.getElementById('host-tip').textContent = '共 ' + hs.length + ' 台';
+    el.innerHTML = hs.map(h => {
+        const on = h.status === 'running';
+        const dot = '<span style="color:' + (on ? 'var(--success)' : 'var(--text2)') + ';font-size:15px;">●</span>';
+        const spec = (h.alias || '') + (h.spec ? (h.alias ? ' · ' : '') + h.spec : '');
+        let sub = '';
+        if (h.job) {
+            const t = shortTitle(h.job.article_title, 20);
+            sub = '<div style="font-size:12px;color:var(--primary);margin-top:5px;">▶ 正在跑：'
+                + esc(h.job.kind_label) + (t ? '《' + esc(t) + '》' : '')
+                + ' · ' + esc(h.job.stage_label || h.job.status_label)
+                + ' ' + (h.job.total ? h.job.done + '/' + h.job.total : '') + '</div>';
+        } else if (on) {
+            sub = '<div style="font-size:12px;color:var(--text2);margin-top:5px;">空闲中（开机状态会持续计费）</div>';
+        }
+        return '<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;">'
+            + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+            + dot + '<span style="font-weight:600;font-size:13px;">' + esc(h.uuid || '未知') + '</span>'
+            + (h.current ? '<span class="tag tag-purple">出图机</span>' : '')
+            + '<span class="tag ' + (on ? 'tag-green' : 'tag-gray') + '">'
+            + (on ? '运行中' : (h.status === 'starting' ? '开机中' : (h.status === 'shutting_down' ? '关机中' : '已关机'))) + '</span>'
+            + '<span style="font-size:12px;color:var(--text2);">' + esc(h.region) + '</span>'
+            + '<span style="font-size:12px;color:var(--text2);">' + esc(spec) + '</span>'
+            + (h.price ? '<span style="font-size:12px;color:var(--text2);">¥' + h.price + '/h</span>' : '')
+            + '</div>' + sub + '</div>';
+    }).join('');
+}
+
+/* ---------- 统计 + 任务列表 ---------- */
+function renderFilters() {
+    document.getElementById('filters').innerHTML = FILTERS.map(([k, lbl]) =>
+        '<span onclick="setFilter(\'' + k + '\')" style="cursor:pointer;font-size:12px;padding:4px 10px;border-radius:100px;'
+        + (k === CUR ? 'background:var(--primary);color:#fff;' : 'background:var(--bg);color:var(--text2);border:1px solid var(--border);')
+        + '">' + lbl + '</span>').join('');
+}
+function setFilter(k) { CUR = k; renderFilters(); loadJobs(); }
+
+function jobRow(j) {
+    const col = ST_COLOR[j.status] || 'var(--text2)';
+    const title = shortTitle(j.article_title, 26);
+    const link = j.article_id
+        ? '<a href="/illustrate/' + j.article_id + '">' + esc(title || ('#' + j.article_id)) + '</a>'
+        : '<span style="color:var(--text2);">' + esc(title || '—') + '</span>';
+    const st = esc(j.stage_label || j.status_label || '');
+    const qp = (j.status === 'queued' && j.queue_pos > 1) ? ' · 排队第 ' + j.queue_pos + ' 位' : '';
+    const x = j.can_cancel
+        ? '<span onclick="cancelJob(\'' + j.id + '\')" title="取消任务" style="cursor:pointer;color:var(--danger);padding:0 4px;">✕</span>'
+        : '';
+    return '<tr style="border-top:1px solid var(--border);">'
+        + '<td style="padding:9px 10px;font-size:13px;">' + esc(j.owner || '—') + '</td>'
+        + '<td style="padding:9px 10px;font-size:13px;max-width:320px;">' + link + '</td>'
+        + '<td style="padding:9px 10px;"><span class="tag tag-gray">' + esc(j.kind_label || j.kind) + '</span></td>'
+        + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;">' + (j.total ? j.done + '/' + j.total : '—') + '</td>'
+        + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;color:' + col + ';">' + st + qp + '</td>'
+        + '<td style="padding:9px 10px;font-size:12px;color:var(--text2);white-space:nowrap;">'
+        + esc((j.created_at || '').slice(5, 16)) + ' · ' + fmtDur(j.duration) + '</td>'
+        + '<td style="padding:9px 6px;text-align:right;">' + x + '</td>'
+        + '</tr>';
+}
+
+let SEQ = 0;                       // 过滤/刷新并发保护：旧请求的返回一律丢弃
+async function loadJobs() {
+    const my = ++SEQ;
+    const r = await api('/api/jobs?limit=50' + (CUR ? '&status=' + CUR : ''));
+    if (my !== SEQ) return;
+    if (!r || !r.jobs) return;
+    const s = r.stats || {};
+    document.getElementById('s-queued').textContent = s.queued || 0;
+    document.getElementById('s-running').textContent = s.running || 0;
+    document.getElementById('s-done').textContent = s.done_today || 0;
+    document.getElementById('s-failed').textContent = s.failed_today || 0;
+    document.getElementById('job-count').textContent = '(' + r.jobs.length + ')';
+    const el = document.getElementById('jobs');
+    if (!r.jobs.length) {
+        el.innerHTML = '<div style="font-size:13px;color:var(--text2);padding:10px 2px;">没有任务</div>';
+    } else {
+        el.innerHTML = '<table style="width:100%;border-collapse:collapse;">'
+            + '<thead><tr style="text-align:left;color:var(--text2);font-size:12px;">'
+            + '<th style="padding:0 10px 8px;font-weight:600;">用户</th>'
+            + '<th style="padding:0 10px 8px;font-weight:600;">文案</th>'
+            + '<th style="padding:0 10px 8px;font-weight:600;">类型</th>'
+            + '<th style="padding:0 10px 8px;font-weight:600;">进度</th>'
+            + '<th style="padding:0 10px 8px;font-weight:600;">状态</th>'
+            + '<th style="padding:0 10px 8px;font-weight:600;">时间 · 耗时</th>'
+            + '<th></th></tr></thead><tbody>' + r.jobs.map(jobRow).join('') + '</tbody></table>';
+    }
+    if ((s.queued || 0) + (s.running || 0) > 0) startPoll(); else stopPoll();
+}
+
+async function cancelJob(id) {
+    if (!confirm('取消这个任务？')) return;
+    const r = await api('/api/jobs/' + id + '/cancel', {method: 'POST'});
+    toast(r && r.ok ? '已请求取消' : ('取消失败：' + ((r && r.error) || '未知')), r && r.ok ? 'success' : 'error');
+    loadJobs();
+}
+
+function startPoll() { if (!TIMER) TIMER = setInterval(() => { loadJobs(); loadHosts(); }, 3000); }
+function stopPoll() { if (TIMER) { clearInterval(TIMER); TIMER = null; } }
+
+renderFilters();
+loadJobs();
+loadHosts();
+</script>
+{% endblock %}

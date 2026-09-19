@@ -1,0 +1,181 @@
+{
+  "_说明": "配图风格的单一事实来源：①区下拉、设置页「默认视觉风格」、出图提示词三处都读这一个文件。改完刷新页面即生效（不用重启）。id 一旦上线不要改（历史方案/日志按 id 存）；group 是 ①区下拉的分组名；prompt 是追加到正向提示词末尾的英文画风词（由程序自动追加，LLM 不用写）。",
+  "default": "artistic",
+  "styles": [
+    {
+      "id": "realistic",
+      "name": "写实风",
+      "group": "摄影写实",
+      "prompt": "photorealistic, natural light, shallow depth of field, 50mm lens",
+      "guide": "照片类风格：照常按摄影写（可以有镜头/景深/光线词）。要求自然光、浅景深、50mm 视角的真实感，不要画成插画、渲染图或手绘。"
+    },
+    {
+      "id": "cinematic",
+      "name": "电影感",
+      "group": "摄影写实",
+      "prompt": "cinematic still, anamorphic lens, moody rim light, film grain",
+      "guide": "照片类风格：电影剧照感——戏剧性边缘光、宽画幅构图、胶片颗粒、暗部厚重；可以写镜头与光线词。"
+    },
+    {
+      "id": "commercial",
+      "name": "商业质感",
+      "group": "摄影写实",
+      "prompt": "clean studio product photography, softbox lighting, seamless backdrop",
+      "guide": "照片类风格：影棚商业摄影——柔光箱、无缝背景、主体清晰干净、色彩克制；可以写摄影词，但画面要「产品级干净」，不要生活化杂乱。"
+    },
+    {
+      "id": "film",
+      "name": "胶片感",
+      "group": "摄影写实",
+      "prompt": "analog film photography, Kodak Portra, soft grain, gentle halation, muted warm tones",
+      "guide": "照片类风格：胶片质地（Kodak Portra 调性）——柔和颗粒、轻微光晕、暖调低饱和。bg 照常写摄影场景。"
+    },
+    {
+      "id": "mono",
+      "name": "黑白纪实",
+      "group": "摄影写实",
+      "prompt": "black and white documentary photograph, high contrast, silver gelatin print, deep blacks",
+      "guide": "照片类风格：黑白纪实摄影——高反差、深黑、银盐质感。bg 里不要写颜色词（颜色会被黑白覆盖），重点写光线、构图、情绪。"
+    },
+    {
+      "id": "polaroid",
+      "name": "拍立得",
+      "group": "摄影写实",
+      "prompt": "polaroid instant photo, faded colors, slight softness, gentle vignette",
+      "guide": "照片类风格：拍立得/即时成像——褪色偏色、轻微发白、柔和低对比。画面写日常小场景、随手拍的感觉。"
+    },
+    {
+      "id": "softfocus",
+      "name": "柔焦薄雾",
+      "group": "摄影写实",
+      "prompt": "dreamy soft-focus photograph, heavy bloom, misty haze, pastel palette",
+      "guide": "照片类风格：柔焦梦幻——大光晕、薄雾、粉彩色调。bg 里写柔和光线与朦胧氛围，避免硬边轮廓与高对比。"
+    },
+    {
+      "id": "ccd",
+      "name": "CCD数码",
+      "group": "摄影写实",
+      "prompt": "early-2000s CCD digital camera look, harsh on-camera flash, washed colors, digital noise",
+      "guide": "照片类风格：2000 年代早期数码相机感——直打闪光、偏色发灰、轻微噪点。画面写日常随手拍场景。"
+    },
+    {
+      "id": "illustration",
+      "name": "插画风",
+      "group": "绘画插画",
+      "prompt": "flat editorial illustration, soft gradients, clean shapes",
+      "guide": "整幅画面就是一张插画（不是照片）：扁平编辑插画——简化形体、色块平涂、干净轮廓、柔和渐变。bg 里**不要写摄影媒介词**（photograph / camera / shot on / lens / dslr / 景深 / 写实照片），改用插画语言（flat shapes / solid color / clean line / illustration）。"
+    },
+    {
+      "id": "watercolor",
+      "name": "水彩风",
+      "group": "绘画插画",
+      "prompt": "watercolor painting, wet-on-wet washes, soft paper texture",
+      "guide": "整幅画面就是一张水彩画：湿画法晕染、纸纹明显、色彩通透、留白多。bg 里只写画面内容，**不要写摄影媒介词**（photograph / camera / lens / cinematic / 3d render）。"
+    },
+    {
+      "id": "ink",
+      "name": "水墨国风",
+      "group": "绘画插画",
+      "prompt": "Chinese ink wash painting, xuan paper texture, generous negative space",
+      "guide": "整幅画面就是一幅中国水墨画：宣纸质感、墨色浓淡、飞白、大量留白、东方意境。bg 里不要写摄影媒介词，可用「墨/宣纸/晕染/毛笔」这类语言。"
+    },
+    {
+      "id": "anime",
+      "name": "动漫风",
+      "group": "绘画插画",
+      "prompt": "anime key visual, cel shading, clean line art",
+      "guide": "整幅画面就是日式动画赛璐璐风格：平涂色块、硬边阴影、清晰墨线轮廓、干净上色。bg 里**不要写摄影媒介词**。"
+    },
+    {
+      "id": "oil",
+      "name": "油画",
+      "group": "绘画插画",
+      "prompt": "the entire image is an oil painting: thick visible brush strokes on canvas, impasto texture, fine art, no photographic detail",
+      "guide": "整幅画面就是一幅油画：厚涂笔触、画布肌理、颜料堆叠感、温暖光油。bg 里不要写摄影媒介词。"
+    },
+    {
+      "id": "lineart",
+      "name": "钢笔线稿",
+      "group": "绘画插画",
+      "prompt": "the entire image is a black ink line drawing on white paper: clean thin outlines, no shading, no color, no photo",
+      "guide": "整幅画面就是黑白线稿：细而干净的墨线、无阴影、无色彩、白纸底。bg 里不要写颜色词与摄影媒介词。"
+    },
+    {
+      "id": "picturebook",
+      "name": "绘本治愈",
+      "group": "绘画插画",
+      "prompt": "children's picture book illustration, soft pastel palette, whimsical, cozy",
+      "guide": "整幅画面就是儿童绘本插画：柔和粉彩、温暖童趣、造型简化可爱。bg 里不要写摄影媒介词。"
+    },
+    {
+      "id": "papercut",
+      "name": "立体纸艺",
+      "group": "绘画插画",
+      "prompt": "the entire image is a layered paper cut illustration: every element is cut from colored paper with visible cut edges and soft drop shadows",
+      "guide": "整幅画面就是分层剪纸拼贴：每样东西都由彩纸剪出、有纸边与柔和投影、手工质感。bg 里不要写摄影媒介词。"
+    },
+    {
+      "id": "3d",
+      "name": "3D风",
+      "group": "数字渲染",
+      "prompt": "3D render, soft studio light, clay material, subsurface scattering",
+      "guide": "整幅画面就是三维渲染图：柔和影棚光、黏土或塑料材质、次表面散射的圆润感。bg 里不要写实拍摄影词，用渲染语言（render / material / soft studio light）。"
+    },
+    {
+      "id": "concept",
+      "name": "概念艺术",
+      "group": "数字渲染",
+      "prompt": "concept art, matte painting, dramatic scale, volumetric light",
+      "guide": "整幅画面就是概念设定图/绘景：宏大尺度、体积光、笔绘质感、戏剧性构图。避免写实摄影词。"
+    },
+    {
+      "id": "clay",
+      "name": "奶油黏土",
+      "group": "数字渲染",
+      "prompt": "the entire image is a 3D clay render: every single object is made of soft matte clay, rounded shapes, pastel colors, stop-motion look",
+      "guide": "整幅画面就是黏土定格动画：所有物体都由柔软哑光的黏土做成、造型圆润、马卡龙色。bg 里不要写摄影媒介词。"
+    },
+    {
+      "id": "cyberpunk",
+      "name": "赛博朋克",
+      "group": "数字渲染",
+      "prompt": "cyberpunk scene, neon signs glowing, wet reflective streets, magenta and cyan light",
+      "guide": "赛博朋克场景：霓虹招牌发光、雨夜反光地面、品红与青色的冷暖对撞、未来城市元素。照片感可以接受，但要突出霓虹与未来感。"
+    },
+    {
+      "id": "artistic",
+      "name": "意境风",
+      "group": "氛围与设计",
+      "prompt": "ethereal dreamscape, mist, soft light rays, surreal calm",
+      "guide": "意境氛围画面：雾气、柔和光束、超现实静谧感、大面积留白。照片或绘画感皆可，重点在氛围与情绪。"
+    },
+    {
+      "id": "mystic",
+      "name": "暗黑神秘",
+      "group": "氛围与设计",
+      "prompt": "dark mystic atmosphere, deep shadows, candlelight, quiet symbolism",
+      "guide": "暗调神秘：深阴影、烛光或微光、静谧的象征物、大面积暗部。画面要压暗，不要明亮通透。"
+    },
+    {
+      "id": "minimal",
+      "name": "极简留白",
+      "group": "氛围与设计",
+      "prompt": "minimalist composition, vast negative space, muted tones",
+      "guide": "极简构图：主体小、留白多、元素极少、色调克制。bg 里明确写「大量留白、元素极少、极简构图」。"
+    },
+    {
+      "id": "collage",
+      "name": "拼贴杂志",
+      "group": "氛围与设计",
+      "prompt": "cut-out paper collage, torn paper edges, layered textures",
+      "guide": "整幅画面就是拼贴艺术：剪贴的纸块、撕纸边缘、层叠纹理、杂志剪切感。bg 里不要写摄影媒介词。"
+    },
+    {
+      "id": "newsprint",
+      "name": "报纸黑白",
+      "group": "氛围与设计",
+      "prompt": "the entire image is printed in black and white halftone on old newsprint: coarse halftone dots, ink smudges, yellowed paper, no color photo",
+      "guide": "整幅画面就是旧报纸印刷：黑白网点、油墨、泛黄纸张、栏线排版。bg 里不要写颜色词与摄影媒介词。"
+    }
+  ]
+}

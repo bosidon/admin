@@ -13,7 +13,7 @@ import shutil
 import requests
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request, g, redirect
+from flask import Flask, render_template, jsonify, request, g, redirect, send_file
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -44,8 +44,11 @@ from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
                      load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok,
                      get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config,
-                     load_model_groups, load_model_config)
+                     load_model_groups, load_model_config, adl_hosts,
+                     style_groups, style_label_map)
 import jobs as jobstore
+import lines as contentlines
+import materials as materialstore
 
 # ============================================================
 # 工具函数
@@ -131,6 +134,7 @@ def init_db():
 if not os.environ.get('TEST_DATABASE'):
     init_db()
     jobstore.init()                       # 任务表（持久化，重启不丢）
+    materialstore.init()                  # 素材表：建表 + 补 owner_id/owner 列（可空，不动旧数据）
     _orphans = jobstore.recover_orphans()  # 上次残留的排队/运行中任务 → 被中断
     register_jobs()                        # 注册各任务执行体 + 启动调度器
     if _orphans:
@@ -161,6 +165,59 @@ def close_content_db(exception):
     db = g.pop('cdb', None)
     if db:
         db.close()
+
+# ============================================================
+# 当前登录用户（读统一认证 cookie → auth 服务；失败静默返回空）
+# ============================================================
+AUTH_API = (load_env().get("AUTH_API") or "http://localhost:3050").rstrip("/")
+
+
+def current_user():
+    """{id,email,nickname,role,plan} 或 {}（未登录/认证服务不可用）"""
+    if 'cur_user' in g:
+        return g.cur_user
+    g.cur_user = {}
+    tok = request.cookies.get("xianbao_token") or ""
+    if not tok:
+        return g.cur_user
+    try:
+        r = requests.post(AUTH_API + "/api/auth/verify", json={"token": tok}, timeout=5)
+        d = r.json()
+        if d.get("success") and d.get("user"):
+            g.cur_user = d["user"]
+    except Exception:
+        pass
+    return g.cur_user
+
+
+def user_label(u=None):
+    """展示用用户名：昵称 → 邮箱 → 空"""
+    u = u if u is not None else current_user()
+    return (u.get("nickname") or u.get("email") or "").strip()
+
+
+def _can_cancel(j, me_id, me_name):
+    """只有任务发起人本人能取消（无 owner 记录的老任务一律不給取消）"""
+    if j.get("status") not in ("queued", "running"):
+        return False
+    oid = str(j.get("owner_id") or "")
+    if oid:
+        return bool(me_id) and oid == str(me_id)
+    return bool(me_name) and (j.get("owner") or "") == me_name
+
+
+def _job_duration(j):
+    """耗时（秒）：started_at → finished_at（未完则算到现在）"""
+    def _p(s):
+        try:
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+    a = _p(j.get("started_at") or "")
+    if not a:
+        return 0
+    b = _p(j.get("finished_at") or "") or datetime.now()
+    return max(0, int((b - a).total_seconds()))
 
 def init_content_db():
     """确保 content.db 的 articles 表存在"""
@@ -231,6 +288,8 @@ def init_content_db():
         conn.execute("ALTER TABLE articles ADD COLUMN stage VARCHAR(20) DEFAULT 'done'")
     if 'img_requirements' not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN img_requirements TEXT")
+    if 'service_line' not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN service_line VARCHAR(20) DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -276,7 +335,7 @@ def library():
 
 @app.route('/settings')
 def settings_page():
-    return render_template("settings.html")
+    return render_template("settings.html", style_groups=style_groups())
 
 # ============================================================
 # 页面 - 公众号文章
@@ -294,15 +353,19 @@ def article_detail_page(article_id):
 # ============================================================
 @app.route('/api/articles')
 def api_list_articles():
-    """文章列表"""
+    """文章列表（可按状态 status=、业务线 line= 过滤）"""
     db = get_content_db()
+    where, args = [], []
     status = request.args.get('status')
+    line = request.args.get('line')
     if status:
-        rows = db.execute(
-            'SELECT * FROM articles WHERE status=? ORDER BY created_at DESC', (status,)
-        ).fetchall()
-    else:
-        rows = db.execute('SELECT * FROM articles ORDER BY created_at DESC').fetchall()
+        where.append('status=?'); args.append(status)
+    if line:
+        where.append("IFNULL(NULLIF(service_line,''),'lingxiu')=?"); args.append(line)  # 老数据无 service_line → 视为灵性书籍
+    sql = 'SELECT * FROM articles'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    rows = db.execute(sql + ' ORDER BY created_at DESC', args).fetchall()
     return jsonify([dict(r) for r in rows])
 
 @app.route('/api/articles/<int:article_id>')
@@ -489,6 +552,129 @@ def api_options():
         'structures': structures, 'hooks': hooks, 'tones': tones,
     })
 
+@app.route('/api/lines')
+def api_lines():
+    """业务线清单（含各自的选题类型与条数）"""
+    out = []
+    for l in contentlines.LINES:
+        d = {"id": l["id"], "name": l["name"], "icon": l["icon"], "home": l["home"]}
+        d["kinds"] = [{"id": k["id"], "name": k["name"],
+                       "count": len(contentlines.topics(l["id"], k["id"]))}
+                      for k in (l.get("kinds") or [])]
+        out.append(d)
+    return jsonify({"ok": True, "lines": out})
+
+
+@app.route('/api/line-topics')
+def api_line_topics():
+    """某业务线某选题类型的对象清单（读各子站现成资产）"""
+    line = request.args.get('line') or ''
+    kind = request.args.get('kind') or ''
+    if not contentlines.line_of(line):
+        return jsonify({"ok": False, "error": "未知业务线", "items": []}), 400
+    items = contentlines.topics(line, kind)
+    return jsonify({"ok": True, "line": line, "kind": kind, "count": len(items), "items": items})
+
+
+def _line_prompt(L, line, kind_id, topic_obj, material, plat_name, label, word_spec, fmt, tone):
+    """业务线选题 prompt：素材是唯一事实来源，术语必须与素材一致"""
+    kn = contentlines.kind_name(line, kind_id)
+    return f"""你是「仙宝心灵成长」的内容创作Agent，本次写「{L['name']}」业务线的引流内容。
+
+## 任务
+平台：{plat_name}　形态：{label}　字数：{word_spec}
+选题：{kn} —— {topic_obj or '自动选择'}
+语气：{tone or '温暖、真诚、有洞察'}
+输出格式：{fmt}
+
+## 选题素材（**唯一事实来源**）
+{material[:4500]}
+
+## 写作要求
+1. 只用素材里的术语与说法（如「印记/图腾/音阶/波符」这类原体系词汇），**不要换成星座、占星等其他体系的说法**；不要编造素材里没有的数据、年份、比例或案例
+2. 从读者真实困惑切入（"我为什么总是…"这类），不要写成百科词条
+3. 结尾给一个可执行的小练习或自我提问
+4. 不要输出任何网址或链接（系统会自动在文末追加推广链接）
+5. 标签 5-8 个
+6. 输出 JSON：{{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}}
+"""
+
+
+PLAT_LABEL = {'wechat': '公众号', 'xiaohongshu': '小红书', 'video_account': '视频号',
+              'douyin': '抖音', 'bilibili': 'B站', 'kuaishou': '快手',
+              'podcast': '播客', 'zhihu': '知乎', 'toutiao': '头条', 'moments': '朋友圈'}
+REWRITE_SPEC = {
+    'article': '1000-2000字，Markdown 结构，开头3句抓住读者',
+    'short_video': '300-500字，分镜格式，每段标注【画面】【台词】【时长】',
+    'long_video': '1500-2500字，分镜格式，每段标注【画面】【台词】【时长】【转场】',
+    'speech': '800-1200字，口语化，标注语气停顿和重音',
+}
+
+
+@app.route('/api/articles/<int:article_id>/rewrite', methods=['POST'])
+def api_rewrite_article(article_id):
+    """把已有文章改写为另一个平台/形态（生成新篇，保留原篇；沿用同一业务线与推广落点）"""
+    data = request.json or {}
+    platform = data.get('platform') or 'wechat'
+    content_type = data.get('content_type') or 'article'
+    db = get_content_db()
+    row = db.execute('SELECT * FROM articles WHERE id=?', (article_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    src = dict(row)
+    line = src.get('service_line') or 'lingxiu'
+    plat_name = PLAT_LABEL.get(platform, platform)
+    spec = REWRITE_SPEC.get(content_type, REWRITE_SPEC['article'])
+    body = (src.get('content_md') or '')[:6000]
+    prompt = f"""你是「仙宝心灵成长」的内容改写Agent。
+
+## 任务
+把下面这篇原文改写成「{plat_name}」平台的{content_type}：{spec}
+- 保留原文的核心观点、术语与事实，**不要新增原文没有的数据或案例**
+- 保留选题方向：{src.get('topic') or src.get('book') or '（原文自定）'}
+- 重新组织结构与节奏以适配目标平台，标题也要重写
+- 不要输出任何网址或链接（系统会自动在文末追加推广链接）
+- 输出 JSON：{{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}}
+
+## 原文
+{body}
+"""
+    llm = get_llm_config()
+    api_key = llm.get('llm_api_key')
+    if not api_key:
+        return jsonify({"error": "未配置 LLM API Key"}), 400
+    try:
+        with jobstore.LLM_GATE:
+            resp = requests.post(llm['llm_base_url'],
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=dict({"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
+                          **({"user_id": uid_ok("p" + str(src.get('promo_uid')))} if src.get('promo_uid') else {})),
+                timeout=180)
+        raw = resp.json()['choices'][0]['message']['content']
+        import re
+        m = re.search(r'\{[\s\S]*\}', raw)
+        art = json.loads(m.group()) if m else {'title': src.get('title') or '未命名', 'content': raw}
+    except Exception as e:
+        return jsonify({"error": "生成失败：%s" % e}), 500
+
+    content_md = art.get('content', '')
+    promo_link = contentlines.promo_link(line, src.get('promo_uid'), src.get('promo_src'))
+    if promo_link:
+        content_md = content_md.rstrip() + '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
+    wc = len(content_md.replace(' ', '').replace('\n', ''))
+    cur = db.execute("INSERT INTO articles (title, platform, content_type, book, topic, angle,"
+                     " structure, hook, tone, content_md, summary, tags, word_count,"
+                     " status, source, promo_uid, promo_src, promo_link, service_line)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?)",
+                     (art.get('title', '未命名'), platform, content_type, src.get('book'), src.get('topic'),
+                      src.get('angle'), src.get('structure'), src.get('hook'), src.get('tone'),
+                      content_md, art.get('summary', ''), art.get('tags', ''), wc,
+                      src.get('promo_uid'), src.get('promo_src'), promo_link or None, line))
+    db.commit()
+    return jsonify({"ok": True, "id": cur.lastrowid, "title": art.get('title', '未命名'),
+                    "word_count": wc, "from": article_id})
+
+
 @app.route('/api/articles/generate', methods=['POST'])
 def api_generate_article():
     """AI生成文章"""
@@ -503,6 +689,9 @@ def api_generate_article():
     tone = data.get('tone', '')
     promo_uid = data.get('promo_uid') or ''          # 推广人 uid
     promo_src = data.get('promo_src') or ('c' + str(int(time.time()))[-6:])   # 内容来源码
+    line = data.get('line') or 'lingxiu'             # 业务线（lingxiu/maya/tarot/psych）
+    topic_kind = data.get('topic_kind') or ''        # 选题类型（如 challenge/seal/daily/kin）
+    topic_obj = data.get('topic_obj') or ''          # 选题对象（如「红龙 · 源动力」）
 
     PLAT_NAME = {'wechat': '公众号', 'xiaohongshu': '小红书', 'video_account': '视频号',
                  'douyin': '抖音', 'bilibili': 'B站', 'kuaishou': '快手',
@@ -598,6 +787,13 @@ def api_generate_article():
 7. 输出JSON格式：{{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}}
 """
 
+    # 业务线（玛雅/塔罗/心理咨询）：用该选题的原始素材重写 prompt
+    # （灵性书籍仍走上面的原有 prompt，一字不改）
+    if line != 'lingxiu' and contentlines.line_of(line):
+        prompt = _line_prompt(contentlines.line_of(line), line, topic_kind, topic_obj,
+                              contentlines.material(line, topic_kind, topic_obj),
+                              plat_name, label, word_spec, fmt, tone)
+
     llm = get_llm_config()
     api_key = llm['llm_api_key']
     if not api_key:
@@ -624,13 +820,15 @@ def api_generate_article():
 
         content_md = article_data.get('content', raw)
 
-        # ===== 自动嵌入推广链接 =====
-        promo_link = ''
-        if promo_uid:
-            promo_link = 'https://xianbao.love/?ref=%s&src=%s' % (promo_uid, promo_src)
-            guide_line = '\n\n---\n\n🌙 想了解更多心灵成长内容？\n👉 ' + promo_link
+        # ===== 自动嵌入推广链接（按业务线落点：子站首页 + 归因参数）=====
+        promo_link = contentlines.promo_link(line, promo_uid, promo_src)
+        if promo_link:
+            guide_line = '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
             if promo_link not in content_md:
                 content_md = content_md.rstrip() + guide_line
+
+        if line != 'lingxiu':          # 业务线文章：话题列存选题对象
+            book, topic = '', (topic_obj or topic)
 
         word_count = len(content_md.replace(' ', '').replace('\n', ''))
 
@@ -638,8 +836,9 @@ def api_generate_article():
         cursor = db.execute('''
             INSERT INTO articles (title, platform, content_type, book, topic, angle,
                                   structure, hook, tone, content_md, summary, tags,
-                                  word_count, status, source, promo_uid, promo_src, promo_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?)
+                                  word_count, status, source, promo_uid, promo_src, promo_link,
+                                  service_line)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?)
         ''', (
             article_data.get('title', '未命名'),
             platform, content_type,
@@ -649,6 +848,7 @@ def api_generate_article():
             article_data.get('tags', ''),
             word_count,
             promo_uid or None, promo_src, promo_link or None,
+            line,
         ))
         db.commit()
 
@@ -809,7 +1009,9 @@ def api_illustration_logs(article_id):
 @app.route('/illustrate/<int:article_id>')
 def illustrate_page(article_id):
     """配图编辑页"""
-    return render_template('illustrate.html', article_id=article_id)
+    return render_template('illustrate.html', article_id=article_id,
+                           style_groups=style_groups(),
+                           style_label_map=style_label_map())
 
 # ============================================================
 # API - 一键配图（AI 分析文案 → 自动生成配图方案）
@@ -860,8 +1062,10 @@ def api_illustrate_generate():
             "scenes": bool(data.get('scenes')),
             "replan": bool(data.get('replan')),
             "plan_only": bool(data.get('plan_only'))}
+    u = current_user()
     return jsonify(start_generate(int(article_id), opts, get_llm_config(),
-                                  card_size, card_want, int(data.get('count') or 3)))
+                                  card_size, card_want, int(data.get('count') or 3),
+                                  owner=user_label(u), owner_id=str(u.get("id") or "")))
 
 
 @app.route('/api/illustrate/job/<job_id>')
@@ -874,6 +1078,42 @@ def api_illustrate_job(job_id):
     return jsonify(dict(ok=True, **j))
 
 
+@app.route('/jobs')
+def jobs_page():
+    """任务看板（只查看）"""
+    return render_template("jobs.html")
+
+
+@app.route('/api/hosts')
+def api_hosts():
+    """AutoDL 主机（只读）：账号下每台实例的状态/规格/单价 + 正在跑的任务"""
+    try:
+        hosts = adl_hosts()
+    except Exception as e:
+        return jsonify({"ok": False, "error": "查询主机失败：%s" % e, "hosts": []})
+    runs = {}
+    for j in jobstore.list_jobs(active=True, limit=50):
+        if j.get("status") == "running" and j.get("host"):
+            runs.setdefault(j["host"], j)
+    for h in hosts:
+        r = runs.get(h["uuid"])
+        if not r:
+            continue
+        title = ""
+        try:
+            row = get_content_db().execute('SELECT title FROM articles WHERE id=?',
+                                           (r.get("article_id"),)).fetchone()
+            if row:
+                title = row[0] or ""
+        except Exception:
+            pass
+        h["job"] = {"kind_label": r.get("kind_label") or "", "article_title": title,
+                    "done": r.get("done") or 0, "total": r.get("total") or 0,
+                    "status_label": r.get("status_label") or "",
+                    "stage_label": r.get("stage_label") or ""}
+    return jsonify({"ok": True, "hosts": hosts})
+
+
 @app.route('/api/jobs')
 def api_jobs():
     """任务列表：active=1 只看排队/进行中；article_id 过滤；默认最近 20 条"""
@@ -884,15 +1124,43 @@ def api_jobs():
     except Exception:
         limit = 20
     out = []
-    for j in jobstore.list_jobs(active=active, article_id=int(aid) if aid else None, limit=limit):
+    st = request.args.get('status') or None
+    if st not in ('queued', 'running', 'done', 'failed', 'canceled', 'interrupted'):
+        st = None
+    me = current_user()
+    me_id, me_name = str(me.get("id") or ""), user_label(me)
+    for j in jobstore.list_jobs(active=active, article_id=int(aid) if aid else None,
+                                limit=limit, status=st):
         j["log"] = j.get("log_lines") or []
         out.append(j)
-    return jsonify({"ok": True, "jobs": out, "summary": jobstore.active_summary()})
+    # 补文案名称（任务行显示《标题》；取不到留空，前端回落 #id）
+    ids = sorted({j.get("article_id") for j in out if j.get("article_id")})
+    titles = {}
+    if ids:
+        try:
+            cdb = get_content_db()
+            q = ",".join("?" * len(ids))
+            for r in cdb.execute("SELECT id, title FROM articles WHERE id IN (%s)" % q, ids).fetchall():
+                titles[r["id"]] = (r["title"] or "").strip()
+        except Exception:
+            titles = {}
+    for j in out:
+        j["article_title"] = titles.get(j.get("article_id"), "")
+        j["can_cancel"] = _can_cancel(j, me_id, me_name)
+        j["duration"] = _job_duration(j)
+    return jsonify({"ok": True, "jobs": out, "summary": jobstore.active_summary(),
+                    "stats": jobstore.stats_today()})
 
 
 @app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
 def api_job_cancel(job_id):
-    """取消任务：排队中直接撤销；进行中的出图任务会中断"""
+    """取消任务（只能取消自己发起的）：排队中直接撤销；进行中的出图任务会中断"""
+    j = get_job(job_id)
+    if not j:
+        return jsonify({"ok": False, "error": "任务不存在或已结束"}), 404
+    me = current_user()
+    if not _can_cancel(j, str(me.get("id") or ""), user_label(me)):
+        return jsonify({"ok": False, "error": "只能取消自己发起的任务"}), 403
     job_ok = jobstore.cancel(job_id)
     return jsonify({"ok": job_ok, "error": "" if job_ok else "任务不存在或已结束"})
 
@@ -1078,23 +1346,101 @@ def api_delete_image():
 # ============================================================
 @app.route('/api/library')
 def api_get_library():
-    """素材库（materials 表：私有 + 平台共享）"""
-    library_type = request.args.get('type', 'all')     # all / image / audio / video / template
-    scope = request.args.get('scope', 'all')           # all / private / shared
-    db = get_db()
-    where = ["status = 'approved'"]
-    params = []
-    if library_type != 'all':
-        where.append('type = ?')
-        params.append(library_type)
-    if scope != 'all':
-        where.append('scope = ?')
-        params.append(scope)
-    rows = db.execute(
-        'SELECT * FROM materials WHERE ' + ' AND '.join(where) + ' ORDER BY created_at DESC LIMIT 200',
-        params
-    ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    """素材库：我的素材（含历史未归属的老素材）/ 平台共享（暂未启用）"""
+    library_type = request.args.get('type', 'all')     # all / image / audio / video
+    scope = request.args.get('scope', 'mine')          # mine / shared
+    uid = (current_user() or {}).get('id')
+    return jsonify(materialstore.list_for(uid=uid, mtype=library_type, scope=scope))
+
+
+@app.route('/api/materials/options')
+def api_materials_options():
+    """加工面板选项（抠图模型/背景、编辑模式、拼版分辨率…）—— 服务端下发，前端不硬编码"""
+    return jsonify(materialstore.options())
+
+
+@app.route('/api/materials/thumb')
+def api_materials_thumb():
+    """素材缩略图（网格用，360px）：避免列表页直接加载几 MB 原图"""
+    p = materialstore.url_to_path(request.args.get('u') or '')
+    if not p or not p.is_file():
+        return '', 404
+    t = materialstore.ensure_thumb(p)
+    if not t:
+        t = p
+    resp = send_file(str(t), mimetype='image/jpeg', conditional=True)
+    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    return resp
+
+
+@app.route('/api/materials/upload', methods=['POST'])
+def api_materials_upload():
+    """上传素材：图片（压缩后存）、音频、视频"""
+    u = current_user() or {}
+    if not u.get('id'):
+        return jsonify({"error": "请先登录后再上传"}), 401
+    files = request.files.getlist('file')
+    if not files:
+        return jsonify({"error": "没有收到文件"}), 400
+    items, errors = [], []
+    for fs in files:
+        try:
+            row = materialstore.save_upload(fs, owner_id=u.get('id'), owner=user_label(u))
+            if row:
+                items.append(row)
+        except ValueError as e:
+            errors.append("%s：%s" % (fs.filename or '?', e))
+        except Exception as e:
+            errors.append("%s：上传失败(%s)" % (fs.filename or '?', str(e)[:80]))
+    return jsonify({"ok": True, "items": items, "errors": errors})
+
+
+@app.route('/api/materials/delete', methods=['POST'])
+def api_materials_delete():
+    """删除素材：只能删自己的（含历史未归属的）"""
+    u = current_user() or {}
+    body = request.get_json(silent=True) or {}
+    mid = body.get('id')
+    if not mid:
+        return jsonify({"error": "缺少 id"}), 400
+    r = materialstore.delete_material(mid, uid=u.get('id'))
+    if not r.get('ok'):
+        return jsonify(r), (r.get('code') or 400)
+    return jsonify(r)
+
+
+@app.route('/api/materials/process', methods=['POST'])
+def api_materials_process():
+    """素材加工入队：抠图(cutout) / 图生图(edit) / 拼版(stitch) —— GPU 队列，看板可见"""
+    u = current_user() or {}
+    body = request.get_json(silent=True) or {}
+    action = (body.get('action') or '').strip()
+    ids = body.get('ids') or []
+    params = body.get('params') or {}
+    if action not in ('cutout', 'edit', 'stitch'):
+        return jsonify({"error": "未知的加工类型"}), 400
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "请先选择素材"}), 400
+    rows = [r for r in (materialstore.get_material(i) for i in ids) if r]
+    if len(rows) != len(ids):
+        return jsonify({"error": "部分素材不存在或已删除，请刷新"}), 400
+    uid = u.get('id')
+    for r in rows:                       # 越权保护：只能加工自己的（或历史未归属的）
+        own = r.get('owner_id')
+        if own is not None and (not uid or int(own) != int(uid)):
+            return jsonify({"error": "只能加工自己的素材"}), 403
+    err = materialstore.validate(action, rows, params)
+    if err:
+        return jsonify({"error": err}), 400
+    cfg = get_comfy_config()
+    if not cfg.get('comfy_instance_uuid') or not cfg.get('comfy_api_token'):
+        return jsonify({"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}), 400
+    payload = {"ids": [int(r['id']) for r in rows], "params": params}
+    total = 1 if action == 'stitch' else len(rows)
+    jid, reused = jobstore.DISPATCHER.enqueue(action, None, payload, total, priority=10,
+                                             owner=user_label(u), owner_id=uid)
+    return jsonify({"ok": True, "job_id": jid, "reused": reused,
+                    "queue_pos": jobstore.queue_pos(jid)})
 
 # ============================================================
 # 启动

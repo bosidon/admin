@@ -26,7 +26,15 @@ JSON_COLS = ("images", "plan_images", "quotes", "scenes", "result")
 
 _KINDS_DEFAULT_LIMIT = {"images": 1, "plan": 2, "rewrite": 2, "text": 2}
 
-KIND_LABEL = {"images": "生成配图", "plan": "生成方案", "rewrite": "重写条目", "text": "生成文案"}
+# kind → 资源域兜底表。⚠️ 必须有：register() 只在 app 进程里跑过，
+# 若从别的进程（脚本/定时任务）入队，self.domains 是空的 → 会错判成 llm 域，
+# 导致「一块 GPU 串行」失效（实测出过：抠图和拼版同时在 GPU 上跑）。
+# 注意 dict 在模块级、位于 DISPATCHER 定义之前，所以用函数内合并而不是直接引用。
+_KIND_DOMAIN = {"images": "gpu", "cutout": "gpu", "edit": "gpu", "stitch": "gpu",
+                "plan": "llm", "rewrite": "llm", "text": "llm"}
+
+KIND_LABEL = {"images": "生成配图", "plan": "生成方案", "rewrite": "重写条目", "text": "生成文案",
+              "cutout": "素材抠图", "edit": "素材编辑", "stitch": "素材拼版"}
 STATUS_LABEL = {"queued": "排队中", "running": "进行中", "done": "已完成",
                 "failed": "失败", "canceled": "已取消", "interrupted": "被中断"}
 STAGE_LABEL = {"planning": "分析文案", "booting": "开机中", "ready": "等 ComfyUI",
@@ -86,7 +94,8 @@ def init():
                      ("result", "TEXT DEFAULT ''"), ("owner", "TEXT DEFAULT ''"),
                      ("want_cards", "INTEGER DEFAULT 0"), ("want_scenes", "INTEGER DEFAULT 0"),
                      ("started_at", "TEXT"), ("domain", "TEXT DEFAULT 'llm'"),
-                     ("priority", "INTEGER DEFAULT 0")):
+                     ("priority", "INTEGER DEFAULT 0"),
+                     ("host", "TEXT DEFAULT ''"), ("owner_id", "TEXT DEFAULT ''")):
         if col not in cols:
             c.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (col, ddl))
     c.commit()
@@ -116,16 +125,17 @@ def _row(r):
 
 
 # ---------------- 基础 CRUD ----------------
-def create(kind, article_id=None, payload=None, total=0, owner="", domain="llm", priority=0):
+def create(kind, article_id=None, payload=None, total=0, owner="", domain="llm", priority=0,
+           owner_id=""):
     jid = uuid.uuid4().hex[:12]
     c = _conn()
     c.execute("INSERT INTO jobs (id,kind,article_id,status,stage,payload,total,done,images,plan_images,"
               "quotes,scenes,style,log,result,error,owner,want_cards,want_scenes,created_at,"
-              "started_at,finished_at,domain,priority) "
-              "VALUES (?,?,?,'queued','',?,?,0,'[]','[]','[]','[]','','','','',?,0,0,?,NULL,NULL,?,?)",
+              "started_at,finished_at,domain,priority,owner_id) "
+              "VALUES (?,?,?,'queued','',?,?,0,'[]','[]','[]','[]','','','','',?,0,0,?,NULL,NULL,?,?,?)",
               (jid, kind, int(article_id) if article_id else None,
                json.dumps(payload or {}, ensure_ascii=False), int(total or 0), owner or "", _now(),
-               domain or "llm", int(priority or 0)))
+               domain or "llm", int(priority or 0), owner_id or ""))
     c.commit()
     c.close()
     return jid
@@ -151,7 +161,7 @@ def find_active(kind, article_id, payload=None):
     return None
 
 
-def list_jobs(active=False, article_id=None, limit=20):
+def list_jobs(active=False, article_id=None, limit=20, status=None):
     c = _conn()
     sql = "SELECT * FROM jobs WHERE 1=1"
     args = []
@@ -160,6 +170,9 @@ def list_jobs(active=False, article_id=None, limit=20):
     if article_id:
         sql += " AND article_id=?"
         args.append(int(article_id))
+    if status:
+        sql += " AND status=?"
+        args.append(status)
     sql += (" ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,"
             " created_at DESC LIMIT ?")
     args.append(int(limit))
@@ -405,16 +418,36 @@ class Dispatcher:
                 update(jid, status="canceled" if "已取消" in msg else "failed",
                        error=msg, finished_at=_now(), stage="")
 
-    def enqueue(self, kind, article_id=None, payload=None, total=0, owner="", priority=0):
+    def enqueue(self, kind, article_id=None, payload=None, total=0, owner="", priority=0,
+                owner_id=""):
         """入队（幂等）：同 kind + 文章 + 参数已在队列 → 复用。domain 取注册时声明的域"""
         old = find_active(kind, article_id, payload)
         if old:
             return old["id"], True
         return create(kind, article_id, payload, total, owner,
-                      domain=self.domains.get(kind, "llm"), priority=priority), False
+                      domain=self.domains.get(kind) or _KIND_DOMAIN.get(kind, "llm"),
+                      priority=priority,
+                      owner_id=owner_id), False
 
 
 DISPATCHER = Dispatcher()
+
+
+def stats_today():
+    """看板统计：排队 / 进行中 / 今日完成 / 今日失败或取消"""
+    c = _conn()
+    day = time.strftime("%Y-%m-%d")
+    def n(sql, a=()):
+        return c.execute(sql, a).fetchone()[0]
+    out = {"queued": n("SELECT COUNT(*) FROM jobs WHERE status='queued'"),
+           "running": n("SELECT COUNT(*) FROM jobs WHERE status='running'"),
+           "done_today": n("SELECT COUNT(*) FROM jobs WHERE status='done' AND finished_at LIKE ?",
+                           (day + "%",)),
+           "failed_today": n("SELECT COUNT(*) FROM jobs WHERE status IN "
+                             "('failed','canceled','interrupted') AND finished_at LIKE ?",
+                             (day + "%",))}
+    c.close()
+    return out
 
 
 def active_summary():

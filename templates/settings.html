@@ -149,28 +149,11 @@
     <div class="form-group">
         <label class="form-label">默认视觉风格</label>
         <select class="form-select" id="default-style">
-            <optgroup label="摄影写实">
-                <option value="realistic">写实风</option>
-                <option value="cinematic">电影感</option>
-                <option value="commercial">商业质感</option>
+            {% for g in style_groups %}
+            <optgroup label="{{ g.name }}">
+                {% for s in g.styles %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
             </optgroup>
-            <optgroup label="绘画插画">
-                <option value="illustration">插画风</option>
-                <option value="watercolor">水彩风</option>
-                <option value="ink">水墨国风</option>
-                <option value="anime">动漫风</option>
-            </optgroup>
-            <optgroup label="数字渲染">
-                <option value="3d">3D风</option>
-                <option value="concept">概念艺术</option>
-            </optgroup>
-            <optgroup label="氛围与设计">
-                <option value="artistic">意境风</option>
-                <option value="mystic">暗黑神秘</option>
-                <option value="minimal">极简留白</option>
-                <option value="editorial">杂志排版</option>
-                <option value="collage">拼贴杂志</option>
-            </optgroup>
+            {% endfor %}
         </select>
     </div>
     

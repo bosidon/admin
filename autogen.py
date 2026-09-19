@@ -147,7 +147,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
   - `points` 要点卡：标题 + 3-5 条编号要点
   - `photo` 纯画面：以画面为主，可以不含文字，也可以让 AI 直接画出少量文字
 - **图上文字两条路都可用**：写进 `texts`（程序精确叠加，**要求中文准确时优先**），或直接在 `bg` 里描述让 AI 画出来（适合装饰性文字、字母/英文、艺术字形）。**同一段文字不要既写 `texts` 又写进 `bg`**（会叠两遍）
-- **文字上限**：cover 主标题 ≤ 12 字 + 副标题 ≤ 18 字；quote ≤ 28 字；points 标题 ≤ 14 字、每条要点 ≤ 16 字；整张不超过 5 行
+- **文字上限**：cover 主标题 ≤ 12 字 + 副标题 ≤ 18 字；quote ≤ 28 字；points 标题 ≤ 14 字、每条要点 ≤ 16 字；整张不超过 5 行；图上文字不要用广告法绝对化用词（最 / 第一 / 100% / 包治 等）
 - **`texts` 里只写正文，不要写序号或项目符号**（「1.」「一、」「·」一律不要，编号由程序自动加）
 - **配图风格由用户在 ① 区选定（14 选 1，系统会在输入参数里告诉你本次用哪一个）**：写实风 `realistic` · 电影感 `cinematic` · 商业质感 `commercial` · 插画风 `illustration` · 水彩风 `watercolor` · 水墨国风 `ink` · 动漫风 `anime` · 3D风 `3d` · 概念艺术 `concept` · 意境风 `artistic` · 暗黑神秘 `mystic` · 极简留白 `minimal` · 杂志排版 `editorial` · 拼贴杂志 `collage`
   - 该风格的**画风英文词由系统自动追加**到每条 `bg` 后面 —— 你不用写画风词，**也不要输出 `style` 字段**；但画面内容、光线、构图、主体规模要跟它匹配（例：`minimal` 极简留白 → 主体小、留白多、色调克制；`mystic` 暗黑神秘 → 深阴影、烛光、静谧符号感；`watercolor` 水彩风 → 柔和晕染、纸质质感）
@@ -160,8 +160,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
 3. 定视觉主线：按下方「生图提示词公式」的要素定主体、场景、构图、光线、情绪
 4. 按「文案类型档位」出清单：几张、什么图型、各用什么画幅
 5. 逐条给：中文画面描述 + 图上文字 + 英文提示词
-6. 合规自检：广告法（不用「最 / 第一 / 100% / 包治」等绝对化）、版权、隐私、敏感内容、平台规范
-7. 信息不足就**自行合理假设**并写进 `note.assumptions`，不要反问用户
+6. 信息不足就**自行合理假设**，不要反问用户
 
 # 平台适配（内容调性 · 图文文章画幅）
 
@@ -182,7 +181,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
 | Instagram | 1:1 或 3:4 | 生活感、画面优先 |
 
 - **画幅优先级**：以「文案类型档位」为准；只有**图文文章**（article）按本表选画幅
-- 表里没有的平台：按调性最接近的一档处理，并在 `note.assumptions` 里说明
+- 表里没有的平台：按调性最接近的一档处理
 - 题材（种草 / 测评 / 教程 / 观点 / 故事 / 情感 / 职场 / 节日…）只影响画面内容，不改变画幅与图型档位
 
 # 文案类型档位（按输入参数里的「文案类型」选一档）
@@ -196,7 +195,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 - 表里的数量是常规档位；内容不适合配图时可以是 0 张，但不要凑数
 - 图文文章发**小红书**时按笔记体处理：3:4 竖图为主、首图即封面、文字更短更口语、6-9 张
-- 类型不在上表时：按最接近的一档处理，并在 `note.assumptions` 里说明
+- 类型不在上表时：按最接近的一档处理
 - 长视频 / 口播：先给 1-2 张**角色卡或主场景卡**作为全片视觉锚点，后续镜头沿用同一主体描述与色调
 
 # 生图提示词公式
@@ -209,7 +208,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 只输出**一个严格 JSON 对象**：不要 Markdown、不要解释、不要代码块围栏、不要多余字段。
 
-顶层固定 4 个字段，缺一不可：`platform` · `images` · `note` · `reason`。
+顶层固定 2 个字段，缺一不可：`platform` · `images`。
 
 {
   "platform": "xiaohongshu",
@@ -223,15 +222,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
      "cn": "中文画面描述", "texts": ["标题", "要点一", "要点二", "要点三"], "bg": "english background prompt"},
     {"type": "photo", "aspect": "3:4", "section": "", "at": "",
      "cn": "中文画面描述", "texts": [], "bg": "english image prompt"}
-  ],
-  "note": {
-    "diagnosis": "平台 / 类型 / 受众 / 情绪 / 配图目标",
-    "strategy": "视觉主线 / 风格 / 色彩 / 构图 / 文字策略 / 比例 / 数量",
-    "compliance": "合规风险提示（广告法 / 版权 / 隐私 / 平台规范）",
-    "platform_variants": "同篇发多平台时的比例与改版建议",
-    "assumptions": "信息不足时你做的假设"
-  },
-  "reason": "一句话说明为什么这么配图"
+  ]
 }
 
 字段规则：
@@ -247,20 +238,12 @@ PLAN_PROMPT_DEFAULT = """# 角色
 | `images[].at` | 字符串 | 是 | 短视频脚本/长视频脚本/口播稿：填时间点（如 `"00:45"`）；图文文章：填 `""` |
 | `images[].cn` | 字符串 | 是 | 中文画面描述 10-40 字，给人看 |
 | `images[].bg` | 字符串 | 是 | 英文生图提示词；要让 AI 画进画面的文字可用自然语言描述（中英文均可）。中文文字**建议同时写进 `texts`**（AI 画中文容易出错，程序叠字更稳） |
-| `note` | 对象 | 是 | 给人看的诊断，5 个键都要有（见下） |
-| `note.diagnosis` | 字符串 | 是 | 平台 / 类型 / 受众 / 情绪 / 配图目标 |
-| `note.strategy` | 字符串 | 是 | 视觉主线 / 风格 / 色彩 / 构图 / 文字策略 / 比例 / 数量 |
-| `note.compliance` | 字符串 | 是 | 合规风险提示（广告法 / 版权 / 隐私 / 平台规范） |
-| `note.platform_variants` | 字符串 | 是 | 同篇发多平台时的比例与改版建议 |
-| `note.assumptions` | 字符串 | 是 | 信息不足时你做的假设 |
-| `reason` | 字符串 | 是 | 一句话说明为什么这么配图 |
 
 - 短视频脚本 / 长视频脚本 / 口播稿：**每一条**都要填 `section` 与 `at`（封面卡填 `"开头"` 与 `"00:00"`）；图文文章一律填 `""`
 
 # 负面提示词（提交给 ComfyUI · 系统读取，不发给 LLM）
 
-模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 引号, 双引号
-"""
+模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 引号, 双引号"""
 
 # 用户消息模板：本次任务参数（System Prompt 里不出现占位符）
 PLAN_USER_TEMPLATE = (
@@ -280,7 +263,7 @@ PLAN_USER_TEMPLATE = (
     "\n"
     "## 输出要求\n"
     "- 只输出一个 JSON 对象（不要 Markdown、不要解释、不要代码块围栏）\n"
-    "- 顶层字段：platform / images / note / reason（不要输出 style，配图风格已由系统指定）\n"
+    "- 顶层字段只有两个：platform / images（不要输出 style / note / reason，配图风格已由系统指定）\n"
     "- images[].type ∈ {itypes}\n"
     "- images[].aspect ∈ {aspects}\n"
     "- images[].texts 为字符串数组；photo 类型的 texts 必须为空数组\n"
@@ -825,11 +808,9 @@ def _plan_out(data, default_style=""):
                     images.append(n)
     quotes, scenes = _legacy_views(images)
     style = str(data.get("style") or "").strip().lower()
-    note = data.get("note")
     return {"style": style if style in STYLE_TYPES else default_style,
             "platform": str(data.get("platform") or "").strip(),
-            "images": images, "quotes": quotes, "scenes": scenes,
-            "note": note if isinstance(note, dict) else {}}
+            "images": images, "quotes": quotes, "scenes": scenes}
 
 
 def read_plan(article_id, default_style=None):
@@ -849,9 +830,9 @@ def read_plan(article_id, default_style=None):
 
 
 def save_plan(article_id, plan):
-    """写库：只存 {style, platform, images, note}；quotes/scenes 是派生视图，不入库"""
+    """写库：只存 {style, platform, images}；quotes/scenes 是派生视图，不入库"""
     if isinstance(plan, dict) and plan.get("images") is not None:
-        p = {k: plan.get(k) for k in ("style", "platform", "images", "note")}
+        p = {k: plan.get(k) for k in ("style", "platform", "images")}
     else:                                              # 极旧调用方（纯 quotes/scenes）
         p = plan
     conn = _content_db()
@@ -863,7 +844,7 @@ def save_plan(article_id, plan):
 
 
 def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
-    """一次 LLM 调用产出整份方案（契约 images[]）；返回 (plan|None, reason)
+    """一次 LLM 调用产出整份方案（契约 images[]）；返回 (plan|None, err)
 
     card_want / scene_count 保留仅为兼容旧调用方，数量与配比由 LLM 按平台+类型决定。
     style：人工在 ① 区选定的配图风格（空 / 不认识 → 用设置页默认风格），LLM 输出不作数。
@@ -909,7 +890,7 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
     plan["quotes"], plan["scenes"] = _legacy_views(plan["images"])
     if not plan["images"]:
         return None, "LLM 返回的方案是空的"
-    return plan, j.get("reason", "")
+    return plan, ""
 
 
 

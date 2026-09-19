@@ -131,7 +131,7 @@ const STYLE_LABEL = {realistic:'写实风', cinematic:'电影感', commercial:'�
     minimal:'极简留白', editorial:'杂志排版', collage:'拼贴杂志'};
 const ASPECTS = ['3:4','1:1','9:16','16:9','2.35:1'];
 const ITYPE_LABEL = {cover:'封面卡', quote:'金句卡', points:'要点卡', photo:'画面'};
-let PLAN = {style:'', platform:'', images:[], quotes:[], scenes:[], note:{}};
+let PLAN = {style:'', platform:'', images:[], quotes:[], scenes:[]};
 let IMAGES = [];
 const SEL = new Set();
 let LB_LIST = [], LB_IDX = 0;
@@ -231,7 +231,7 @@ async function loadPlan() {
     const r = await api('/api/articles/' + ARTICLE_ID + '/image-script', {method: 'GET'});
     if (r && r.plan) PLAN = {style: r.plan.style || '', platform: r.plan.platform || '',
                              images: r.plan.images || [], quotes: r.plan.quotes || [],
-                             scenes: r.plan.scenes || [], note: r.plan.note || {}};
+                             scenes: r.plan.scenes || []};
     document.getElementById('plan-style').value = PLAN.style || 'artistic';
     renderPlan();
 }
@@ -240,7 +240,7 @@ async function savePlan(silent) {
     PLAN.style = document.getElementById('plan-style').value;
     const r = await api('/api/articles/' + ARTICLE_ID + '/image-script',
                         {method: 'POST', body: JSON.stringify({plan: {style: PLAN.style,
-                            platform: PLAN.platform, images: PLAN.images, note: PLAN.note}})});
+                            platform: PLAN.platform, images: PLAN.images}})});
     const ok = !!(r && r.ok);
     if (silent !== true) toast(ok ? '✅ 方案已保存' : '❌ 保存失败', ok ? 'success' : 'error');
     return ok;

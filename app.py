@@ -42,7 +42,7 @@ LLM_DEFAULTS = {
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
-                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs)
+                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok)
 import jobs as jobstore
 
 # ============================================================
@@ -597,7 +597,8 @@ def api_generate_article():
         with jobstore.LLM_GATE:            # 同步文案也占 LLM 域名额（防绕过限流打爆 key）
             resp = requests.post(llm['llm_base_url'],
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
+                json=dict({"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
+                          **({"user_id": uid_ok("p" + str(promo_uid))} if promo_uid else {})),
                 timeout=120
             )
         result = resp.json()

@@ -78,6 +78,17 @@ def init():
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_article ON jobs(article_id, created_at);
     """)
+    # 轻量列迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，新增字段要显式 ALTER
+    cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+    for col, ddl in (("stage", "TEXT DEFAULT ''"), ("images", "TEXT DEFAULT '[]'"),
+                     ("plan_images", "TEXT DEFAULT '[]'"), ("quotes", "TEXT DEFAULT '[]'"),
+                     ("scenes", "TEXT DEFAULT '[]'"), ("style", "TEXT DEFAULT ''"),
+                     ("result", "TEXT DEFAULT ''"), ("owner", "TEXT DEFAULT ''"),
+                     ("want_cards", "INTEGER DEFAULT 0"), ("want_scenes", "INTEGER DEFAULT 0"),
+                     ("started_at", "TEXT"), ("domain", "TEXT DEFAULT 'llm'"),
+                     ("priority", "INTEGER DEFAULT 0")):
+        if col not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (col, ddl))
     c.commit()
     c.close()
 
@@ -220,7 +231,10 @@ def domain_limit(domain):
         c = _conn()
         r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         c.close()
-        return max(1, min(8, int((r["value"] if r else "") or dft)))
+        raw = str((r["value"] if r else "") or "").strip()
+        if domain == "llm" and raw in ("0", "-1", "unlimited", "不限"):
+            return 32                       # 填 0/不限 = 放开（32 并发已远超实际需要）
+        return max(1, min(32, int(raw or dft)))
     except Exception:
         return dft
 

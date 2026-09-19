@@ -759,22 +759,55 @@ def _pick_json(raw):
     return None
 
 
-def _llm_json(url, key, model, messages, tries=2):
-    """调 LLM 并取出 JSON 对象；解析不出来再试一次。返回 (json|None, 错误文案)"""
+def uid_ok(v):
+    """DeepSeek user_id 规范：只允许 [a-zA-Z0-9-_]，≤512 字符，其余替换为 _"""
+    return re.sub(r"[^A-Za-z0-9\-_]", "_", str(v or ""))[:512]
+
+
+def _llm_json(url, key, model, messages, tries=3, user_id=""):
+    """调 LLM 并取出 JSON 对象 → (json|None, 错误文案)
+
+    - 退避重试：429（并发限流）/ 5xx / 超时 / 空响应 → 等 1s、2s、4s 再试（默认 3 次）
+    - user_id：DeepSeek 用它做内容安全、KVCache、调度隔离；格式不合法会先规范化
+    - 注意：DeepSeek 排队期间非流式请求会持续返回空行，requests+json() 能正常处理
+    """
     err = "LLM 未返回 JSON"
-    for _ in range(max(1, tries)):
+    body = {"model": model, "messages": messages}
+    _uid = uid_ok(user_id)
+    if _uid:
+        body["user_id"] = _uid
+    delay = 1
+    for i in range(max(1, tries)):
         try:
             r = requests.post(url, headers={"Authorization": "Bearer " + key,
                                             "Content-Type": "application/json"},
-                              json={"model": model, "messages": messages}, timeout=180)
+                              json=body, timeout=180)
+            if r.status_code == 429:
+                err = "LLM 限流 429（第 %d 次）" % (i + 1)
+                time.sleep(delay)
+                delay *= 2
+                continue
+            if r.status_code >= 500:
+                err = "LLM 服务端 %s（第 %d 次）" % (r.status_code, i + 1)
+                time.sleep(delay)
+                delay *= 2
+                continue
             raw = r.json()["choices"][0]["message"]["content"]
+            if not (raw or "").strip():
+                err = "LLM 返回空内容（第 %d 次）" % (i + 1)
+                time.sleep(delay)
+                delay *= 2
+                continue
         except Exception as e:
             err = "LLM 调用失败（%s）" % str(e)[:60]
+            time.sleep(delay)
+            delay *= 2
             continue
         j = _pick_json(raw)
         if j is not None:
             return j, None
         err = "LLM 返回的 JSON 解析失败"
+        time.sleep(0.5)
     return None, err
 
 
@@ -954,7 +987,8 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
     with jobstore.LLM_GATE:                 # LLM 域闸门：与队列共用同一并发上限
         j, err = _llm_json(url, key, model,
                            [{"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": user_msg}])
+                            {"role": "user", "content": user_msg}],
+                           user_id=("p%s" % (art.get("promo_uid") or "") if art.get("promo_uid") else ""))
     if j is None:
         return None, err
 
@@ -1044,8 +1078,10 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
                        else REWRITE_SHAPE.get(itype, REWRITE_SHAPE["quote"])))
     if others:
         prompt += "\n其它条目（不要与它们重复）：" + others
+    _art = _read_article_full(article_id) or {}
+    _uid = ("p%s" % _art.get("promo_uid")) if _art.get("promo_uid") else ""
     with jobstore.LLM_GATE:                 # 同上：重写是同步接口，也要占 LLM 域名额
-        j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}])
+        j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}], user_id=_uid)
     if j is None:
         return None, err
     bg = str(j.get("bg") or "").strip()

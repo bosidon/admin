@@ -18,7 +18,7 @@
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
         <div>
             <div style="font-weight:600;font-size:15px;">① 配图方案（AI 生成 · 可编辑 · 勾选出图条目）</div>
-            <div style="font-size:12px;color:#64748b;margin-top:3px;">AI 按平台 + 文案类型出清单（封面卡 / 金句卡 / 要点卡 / 画面）· 不开机不花钱 · 勾选要出的条目后再生成</div>
+            <div style="font-size:12px;color:#64748b;margin-top:3px;">AI 出配图清单 · 不开机不花钱 · 勾选后再生成</div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;">
             <label style="font-size:12px;color:#64748b;">风格</label>
@@ -163,13 +163,13 @@ function renderPlan() {
                     <button class="btn btn-danger btn-sm" onclick="delPlanItem(${i})">✕</button>
                 </div>
             </div>
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">用途（这张图是干什么的 · 如 封面卡 / 第2段 00:45 · 画面）</div>
-            <input type="text" data-i="${i}" data-f="title" value="${(it.title||'').replace(/"/g,'&quot;')}" placeholder="用途"
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">用途</div>
+            <input type="text" data-i="${i}" data-f="title" value="${(it.title||'').replace(/"/g,'&quot;')}" placeholder="如 封面卡 / 第2段 00:45 · 画面"
                 style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">中文提词（给你看 · 画面画的是什么）</div>
-            <textarea rows="2" data-i="${i}" data-f="cn" placeholder="中文提词"
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">中文提词</div>
+            <textarea rows="2" data-i="${i}" data-f="cn" placeholder="画面画的是什么"
                 style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;resize:vertical;">${it.cn||''}</textarea>
-            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">英文提词（提交给 ComfyUI · 画面文字直接写进来）</div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">英文提词</div>
             <textarea rows="3" data-i="${i}" data-f="bg" placeholder="english image prompt"
                 style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${it.bg||''}</textarea>
         </div>`;

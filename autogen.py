@@ -264,9 +264,7 @@ PLAN_USER_TEMPLATE = (
     "## 输出要求\n"
     "- 只输出一个 JSON 对象（不要 Markdown、不要解释、不要代码块围栏）\n"
     "- 顶层字段只有两个：platform / images（不要输出 style / note / reason，配图风格已由系统指定）\n"
-    "- images[].type ∈ {itypes}\n"
-    "- images[].aspect ∈ {aspects}\n"
-    "- images[].texts 为字符串数组；photo 类型的 texts 必须为空数组\n"
+    "- `images[]` 里写哪些字段、取什么值，**以系统提示词为准**\n"
     "- 数量与图型配比按系统提示词的「文案类型档位」自行决定（可以是 0 张）\n"
     "- platform 填平台 id（如 xiaohongshu）"
 )
@@ -732,8 +730,12 @@ def _llm_json(url, key, model, messages, tries=2):
     return None, err
 
 
-def _norm_image(d):
-    """规范化清单里的一条；无法成图（既没 bg 也没文字）返回 None"""
+def _norm_image(d, default_aspect="3:4"):
+    """规范化清单里的一条；无法成图（既没 bg 也没文字）返回 None
+
+    新契约（只有 title/cn/bg）→ type 记为 photo（直出，不叠字）；
+    default_aspect：本条没写 aspect 时用的画幅（按「文案类型档位 + 平台」推导）
+    """
     if not isinstance(d, dict):
         return None
     t = str(d.get("type") or "").strip().lower()
@@ -748,9 +750,12 @@ def _norm_image(d):
     bg = str(d.get("bg") or d.get("prompt") or "").strip()
     if not bg and not texts:
         return None
-    asp = str(d.get("aspect") or "3:4").strip()
+    asp = str(d.get("aspect") or default_aspect or "3:4").strip()
+    if asp not in ASPECTS:
+        asp = default_aspect if default_aspect in ASPECTS else "3:4"
     return {"type": t,
-            "aspect": asp if asp in ASPECTS else "3:4",
+            "title": str(d.get("title") or "").strip(),
+            "aspect": asp,
             "section": str(d.get("section") or "").strip(),
             "at": str(d.get("at") or "").strip(),
             "cn": str(d.get("cn") or d.get("scene") or "").strip(),
@@ -780,15 +785,35 @@ def _type_brief(images):
                       for t in IMAGE_TYPES if any(x.get("type") == t for x in images)) or "-"
 
 
-def _plan_out(data, default_style=""):
+# 新契约没写画幅时，按「文案类型档位 + 平台」推导（title 里含「头图」→ 公众号 2.35:1）
+_PLAT_ASPECT = {"xiaohongshu": "3:4", "moments": "1:1", "wechat": "16:9", "video_account": "9:16",
+                "douyin": "9:16", "kuaishou": "9:16", "bilibili": "16:9", "zhihu": "16:9",
+                "weibo": "1:1", "toutiao": "16:9", "baijiahao": "16:9", "linkedin": "1:1",
+                "youtube": "16:9", "twitter": "16:9", "instagram": "1:1", "podcast": "1:1"}
+
+
+def _default_aspect(art, title=""):
+    if "头图" in (title or ""):
+        return "2.35:1"
+    ct = str((art or {}).get("content_type") or "").strip()
+    if ct in ("short_video", "speech"):
+        return "9:16"
+    if ct == "long_video":
+        return "16:9"
+    return _PLAT_ASPECT.get(str((art or {}).get("platform") or "").strip(), "3:4")
+
+
+def _plan_out(data, default_style="", art=None):
     """把库里的 image_script / LLM 返回的 JSON 统一成一个方案对象（images[] 为唯一来源）"""
     if isinstance(data, list):
         data = {"scenes": data}
     if not isinstance(data, dict):
         data = {}
+    art = art or {}
     images = []
     for it in (data.get("images") or []):
-        n = _norm_image(it)
+        asp0 = _default_aspect(art, it.get("title") if isinstance(it, dict) else "")
+        n = _norm_image(it, asp0)
         if n:
             images.append(n)
     if not images:                                     # 兼容旧格式：quotes / scenes
@@ -796,14 +821,15 @@ def _plan_out(data, default_style=""):
             if isinstance(q, str):
                 q = {"text": q}
             if isinstance(q, dict):
-                n = _norm_image(dict(q, type=q.get("type") or "quote"))
+                n = _norm_image(dict(q, type=q.get("type") or "quote"),
+                                _default_aspect(art))
                 if n:
                     images.append(n)
         for s in (data.get("scenes") or []):
             if isinstance(s, dict):
                 n = _norm_image({"type": "photo", "aspect": s.get("aspect"),
                                  "cn": s.get("scene"), "bg": s.get("prompt"),
-                                 "on": s.get("on", True)})
+                                 "on": s.get("on", True)}, _default_aspect(art))
                 if n:
                     images.append(n)
     quotes, scenes = _legacy_views(images)
@@ -819,14 +845,17 @@ def read_plan(article_id, default_style=None):
     style 只认 14 个风格之一；旧配色值（purple/dark/gold/maya）一律忽略，回落默认风格。
     """
     conn = _content_db()
-    row = conn.execute("SELECT image_script FROM articles WHERE id=?", (article_id,)).fetchone()
+    row = conn.execute("SELECT image_script, platform, content_type FROM articles WHERE id=?",
+                       (article_id,)).fetchone()
     conn.close()
     raw = (row["image_script"] if row else None) or ""
     try:
         data = json.loads(raw or "{}")
     except Exception:
         data = {}
-    return _plan_out(data, default_style=default_style or get_default_style())
+    art = {"platform": (row["platform"] if row else "") or "",
+           "content_type": (row["content_type"] if row else "") or ""}
+    return _plan_out(data, default_style=default_style or get_default_style(), art=art)
 
 
 def save_plan(article_id, plan):
@@ -872,8 +901,6 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
                 .replace("{ctype_id}", ctype or "article")
                 .replace("{style_label}", STYLE_LABEL.get(style, style))
                 .replace("{style_id}", style)
-                .replace("{itypes}", " | ".join(IMAGE_TYPES))
-                .replace("{aspects}", " | ".join(ASPECTS))
                 .replace("{title}", title)
                 .replace("{content}", content))
     j, err = _llm_json(url, key, model,
@@ -884,7 +911,7 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
 
     if not j.get("platform"):
         j["platform"] = plat
-    plan = _plan_out(j, default_style=style)
+    plan = _plan_out(j, default_style=style, art=art)
     plan["style"] = style                              # 风格由人工选定，LLM 输出不作数
     plan["images"] = plan["images"][:12]               # 数量由 LLM 定，这里只兜底防爆
     plan["quotes"], plan["scenes"] = _legacy_views(plan["images"])
@@ -910,6 +937,8 @@ REWRITE_PROMPT = (
 )
 
 # 各图型的输出形状（texts 的条数即结构，程序按它解析）
+# 新契约（title/cn/bg 三条）的重写输出形状
+REWRITE_SHAPE_T3 = '{"title":"用途（如 封面卡 / 第2段 00:45 · 画面）","cn":"中文提词","bg":"english image prompt"}'
 REWRITE_SHAPE = {
     "cover": '{"cn":"中文画面描述","texts":["主标题","副标题"],"bg":"english background prompt"}',
     "quote": '{"cn":"中文画面描述","texts":["金句"],"bg":"english background prompt"}',
@@ -943,9 +972,14 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
     content = (art.get("content_md") or "")[:2000]
     others = "；".join([("|".join(x.get("texts") or []) or x.get("cn") or "")
                         for k, x in enumerate(items) if k != index][:8])
-    cur = ("图上文字：%s\n中文画面描述：%s\n当前提示词（英文）：%s\n当前画幅：%s"
-           % ("｜".join(item.get("texts") or []) or "（无）", item.get("cn") or "（无）",
-              item.get("bg") or "（空）", item.get("aspect") or "3:4"))
+    new_shape = bool(str(item.get("title") or "").strip())
+    if new_shape:
+        cur = ("用途：%s\n中文提词：%s\n英文提词：%s"
+               % (item.get("title") or "（无）", item.get("cn") or "（无）", item.get("bg") or "（空）"))
+    else:
+        cur = ("图上文字：%s\n中文画面描述：%s\n当前提示词（英文）：%s\n当前画幅：%s"
+               % ("｜".join(item.get("texts") or []) or "（无）", item.get("cn") or "（无）",
+                  item.get("bg") or "（空）", item.get("aspect") or "3:4"))
     _frag = STYLE_PROMPT.get(plan.get("style") or "")
     palette = ("风格：本次整套配图的风格是 %s（%s），画面请按这个风格来（画风英文词由系统追加，不必自己写）。\n"
                % (STYLE_LABEL.get(plan.get("style"), plan.get("style")), _frag)) if _frag else ""
@@ -959,7 +993,8 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
               .replace("{hint}", ("额外要求（优先满足）：%s\n" % h) if h else "")
               .replace("{title}", title)
               .replace("{content}", content)
-              .replace("{shape}", REWRITE_SHAPE.get(itype, REWRITE_SHAPE["quote"])))
+              .replace("{shape}", REWRITE_SHAPE_T3 if new_shape
+                       else REWRITE_SHAPE.get(itype, REWRITE_SHAPE["quote"])))
     if others:
         prompt += "\n其它条目（不要与它们重复）：" + others
     j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}])
@@ -977,6 +1012,8 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
     elif not texts:
         texts = item.get("texts") or []
     new_item = dict(item)
+    if new_shape and str(j.get("title") or "").strip():
+        new_item["title"] = str(j.get("title")).strip()
     new_item["cn"] = str(j.get("cn") or item.get("cn") or "").strip()
     new_item["texts"] = texts
     new_item["bg"] = bg

@@ -149,7 +149,31 @@ function renderPlan() {
     }
     empty.style.display = 'none'; wrap.style.display = 'block';
     updatePickCount();
-    document.getElementById('plan-list').innerHTML = list.map((it, i) => `
+    document.getElementById('plan-list').innerHTML = list.map((it, i) => {
+        // 新契约（用途 / 中文提词 / 英文提词）：文字由 AI 直接画进画面，不叠字
+        if ((it.title || '').trim()) return `
+        <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+                <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" data-i="${i}" data-f="on" ${it.on !== false ? 'checked' : ''} style="width:auto;">
+                    ${i+1}. 用途
+                </label>
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-outline btn-sm" id="rw-${i}" onclick="rewriteItem(${i})">🔄 重写</button>
+                    <button class="btn btn-danger btn-sm" onclick="delPlanItem(${i})">✕</button>
+                </div>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">用途（这张图是干什么的 · 如 封面卡 / 第2段 00:45 · 画面）</div>
+            <input type="text" data-i="${i}" data-f="title" value="${(it.title||'').replace(/"/g,'&quot;')}" placeholder="用途"
+                style="width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;">
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">中文提词（给你看 · 画面画的是什么）</div>
+            <textarea rows="2" data-i="${i}" data-f="cn" placeholder="中文提词"
+                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;margin-bottom:8px;resize:vertical;">${it.cn||''}</textarea>
+            <div style="font-size:12px;color:#64748b;margin-bottom:5px;">英文提词（提交给 ComfyUI · 画面文字直接写进来）</div>
+            <textarea rows="3" data-i="${i}" data-f="bg" placeholder="english image prompt"
+                style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${it.bg||''}</textarea>
+        </div>`;
+        return `
         <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:10px;">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
                 <label style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
@@ -179,7 +203,8 @@ function renderPlan() {
             <div style="font-size:12px;color:#64748b;margin-bottom:5px;">${it.type === 'photo' ? '绘图提示词' : '背景提示词'}（英文 · 提交给 ComfyUI · 画面不出现文字）</div>
             <textarea rows="3" data-i="${i}" data-f="bg"
                 style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace;resize:vertical;">${it.bg||''}</textarea>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 
     document.querySelectorAll('#plan-list input, #plan-list textarea, #plan-list select').forEach(el => {
         el.onchange = function() {

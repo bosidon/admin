@@ -1053,4 +1053,5 @@ if __name__ == '__main__':
     print("🚀 自媒体视频创作平台启动")
     print(f"   地址: http://localhost:3010")
     print(f"   按 Ctrl+C 停止")
-    app.run(host='0.0.0.0', port=3010, debug=True)
+    app.config['TEMPLATES_AUTO_RELOAD'] = True      # 只改模板时不用重启（减少打断任务）
+    app.run(host='0.0.0.0', port=3010, debug=False, threaded=True)   # 生产环境：关掉 debug/热重载

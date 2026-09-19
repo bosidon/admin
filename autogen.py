@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import random
+import contextlib
 import sqlite3
 import threading
 import time
@@ -978,8 +979,6 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
 
     返回 (新条目|None, 错误文案|None)；任何解析/校验失败都保持原值不动。"""
     import re as _re
-    if RUN_LOCK.locked():
-        return None, "有生成任务正在跑，稍后再试"
     llm_cfg = llm_cfg or {}
     key = llm_cfg.get("llm_api_key", "")
     url = llm_cfg.get("llm_base_url") or ""
@@ -1066,7 +1065,8 @@ def start_generate(article_id, opts, llm_cfg, card_size, card_want, scene_count)
         cfg = get_comfy_config()
         if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
             return {"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}
-    if RUN_LOCK.locked():
+    # 只有真出图才拦锁：① 生成方案 / 🔄 重写是纯 LLM 调用，不占显存，可与出图并行
+    if not plan_only and RUN_LOCK.locked():
         return {"error": "已有生成任务在跑，请等它结束"}
 
     job_id = uuid.uuid4().hex[:12]
@@ -1093,7 +1093,9 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
     def log(m):
         _log(job_id, m)
 
-    with RUN_LOCK:
+    # ① 生成方案不占锁（不碰显存），出图任务仍独占 RUN_LOCK
+    _lock_ctx = contextlib.nullcontext() if opts.get("plan_only") else RUN_LOCK
+    with _lock_ctx:
         cfg = get_comfy_config()
         art = _read_article_full(article_id) or {}
         link = _link_of(art, article_id)

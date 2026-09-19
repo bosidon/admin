@@ -432,6 +432,86 @@ def get_comfy_config():
     return cfg
 
 
+# ---------------- 模型组 / 生成档位（configs/models.json，设置页两个下拉的数据源） ----------------
+MODELS_FILE = BASE_DIR / "configs" / "models.json"
+MODEL_PRESETS_DEFAULT = [
+    {"id": "std20", "name": "标准（20 步）", "lora": "", "steps": "20", "cfg": "2.5"},
+    {"id": "fast4", "name": "极速（4 步 · Lightning）",
+     "lora": "Qwen-Image-Lightning-4steps-V1.0.safetensors", "steps": "4", "cfg": "1.0"},
+    {"id": "fast8", "name": "快速（8 步 · Lightning）",
+     "lora": "Qwen-Image-Lightning-8steps-V1.0.safetensors", "steps": "8", "cfg": "1.0"},
+]
+MODEL_GROUPS_DEFAULT = {
+    "groups": [
+        {"id": "qwen_image", "name": "Qwen-Image（标准）",
+         "unet": "qwen_image_fp8_e4m3fn.safetensors",
+         "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+         "vae": "qwen_image_vae.safetensors",
+         "presets": MODEL_PRESETS_DEFAULT},
+        {"id": "qwen_image_2512", "name": "Qwen-Image 2512",
+         "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+         "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+         "vae": "qwen_image_vae.safetensors",
+         "presets": [
+             {"id": "std20", "name": "标准（20 步）", "lora": "", "steps": "20", "cfg": "2.5"},
+             {"id": "turbo4", "name": "极速（4 步 · Turbo）",
+              "lora": "Wuli-Qwen-Image-2512-Turbo-LoRA-4steps-V1.0-bf16_ComfyUi.safetensors",
+              "steps": "4", "cfg": "1.0"},
+         ]},
+    ],
+    "presets_default": MODEL_PRESETS_DEFAULT,
+}
+
+
+def _norm_preset(p):
+    """档位规范化：id/name 必须有；lora 可为空（= 不加 LoRA）"""
+    if not isinstance(p, dict) or not p.get("id") or not p.get("name"):
+        return None
+    return {"id": str(p["id"]), "name": str(p["name"]), "lora": str(p.get("lora") or ""),
+            "steps": str(p.get("steps") or "20"), "cfg": str(p.get("cfg") or "2.5")}
+
+
+def load_model_config():
+    """读 configs/models.json → {"groups": [组(每组带 presets)], "presets_default": [档位]}
+
+    文件不存在/为空 → 用内置默认并补写文件（自愈）；
+    文件存在但格式坏 → 用内置默认，**不覆盖用户文件**（保住他的编辑）"""
+    raw = ""
+    try:
+        raw = MODELS_FILE.read_text(encoding="utf-8")
+    except Exception:
+        raw = ""
+    if not raw.strip():
+        try:
+            MODELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MODELS_FILE.write_text(
+                json.dumps(MODEL_GROUPS_DEFAULT, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        return json.loads(json.dumps(MODEL_GROUPS_DEFAULT))
+    out, presets = [], []
+    try:
+        data = json.loads(raw)
+        for g in (data.get("groups") or []):
+            if not (isinstance(g, dict) and g.get("unet") and g.get("clip") and g.get("vae")):
+                continue
+            out.append({"id": str(g.get("id") or ""), "name": str(g.get("name") or g.get("id") or ""),
+                        "unet": str(g["unet"]), "clip": str(g["clip"]), "vae": str(g["vae"]),
+                        "presets": [x for x in (_norm_preset(p) for p in (g.get("presets") or [])) if x]})
+        presets = [x for x in (_norm_preset(p) for p in (data.get("presets_default") or [])) if x]
+    except Exception:
+        out, presets = [], []
+    if not out:
+        return json.loads(json.dumps(MODEL_GROUPS_DEFAULT))
+    return {"groups": out,
+            "presets_default": presets or [dict(p) for p in MODEL_PRESETS_DEFAULT]}
+
+
+def load_model_groups():
+    """只要模型组（向后兼容壳）"""
+    return load_model_config()["groups"]
+
+
 def get_default_style():
     """配图默认风格：settings.default_style（设置页「默认视觉风格」）；空 / 不认识 → DEFAULT_STYLE"""
     v = ""
@@ -674,7 +754,7 @@ def build_workflow(prompt, w, h, seed, cfg, prefix, neg):
         wf[nid] = {"class_type": "LoraLoader",
                    "inputs": {"lora_name": nm, "strength_model": sw_m,
                               "strength_clip": sw_c, "model": model_ref, "clip": clip_ref}}
-        model_ref, clip_ref = [nid, 0], [nid, 0]
+        model_ref, clip_ref = [nid, 0], [nid, 1]
     wf["7"]["inputs"]["model"] = model_ref
     wf["4"]["inputs"]["clip"] = clip_ref
     wf["5"]["inputs"]["clip"] = clip_ref
@@ -858,7 +938,7 @@ def shutdown_instance():
             "raw": res}
 
 # ============================================================
-# 金句卡任务（AI 背景 + PIL 叠字）
+# 叠字卡任务（AI 背景 + PIL 叠字）
 # ============================================================
 def _read_article_full(article_id):
     conn = _content_db()
@@ -1332,7 +1412,7 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
 
 
 # ============================================================
-# 统一生成任务（金句卡 + 场景配图，一次开机一次关机）
+# 统一生成任务（叠字卡 + 画面，一次开机一次关机）
 # ============================================================
 def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
                    card_want=0, scene_count=0):
@@ -1346,7 +1426,7 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
     want_cards = bool(opts.get("cards"))
     want_scenes = bool(opts.get("scenes"))
     if not (want_cards or want_scenes) and not plan_only:
-        return {"error": "请至少勾选一组（金句卡 / 场景配图）"}
+        return {"error": "请至少勾选一组要出图的条目"}
     if not plan_only:
         cfg = get_comfy_config()
         if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
@@ -1423,6 +1503,27 @@ def run_plan_job(job):
          scenes=newp["scenes"], style=newp["style"], want_cards=False, want_scenes=False)
 
 
+def _image_numbers(plan, want_cards, want_scenes):
+    """出图文件名用的编号：= 该条目在 ① 区清单（plan["images"]）里的位置，1 起。
+
+    ⚠️ 绝不能用「本次生成的第几张」—— 只勾一条重出时，那会算出 1，
+    直接覆盖掉第 1 条的文件（数据丢失）。编号必须与清单位置绑定。
+    返回 (card_nos, scene_nos)，与 plan["quotes"]/["scenes"] 顺序一一对应。"""
+    plan = plan or {}
+    items = plan.get("images") or []
+    n_card = len([q for q in (plan.get("quotes") or []) if q.get("on", True)])
+    n_scene = len([s for s in (plan.get("scenes") or []) if s.get("on", True)])
+    card_nos = [n for n, it in enumerate(items, 1)
+                if it.get("type") != "photo" and it.get("on", True)]
+    scene_nos = [n for n, it in enumerate(items, 1)
+                 if it.get("type") == "photo" and it.get("on", True)]
+    if len(card_nos) != n_card:          # 兜底：方案没有 images[] 时退化为顺序号
+        card_nos = list(range(1, n_card + 1))
+    if len(scene_nos) != n_scene:
+        scene_nos = list(range(1, n_scene + 1))
+    return (card_nos if want_cards else []), (scene_nos if want_scenes else [])
+
+
 def run_images_job(job):
     """② 出图：一次开机 → 出完本任务 → 队列空了才关机"""
     jid, article_id = job["id"], job.get("article_id")
@@ -1437,9 +1538,11 @@ def run_images_job(job):
     quotes = [q for q in plan["quotes"] if q.get("on", True)] if want_cards else []
     scenes = [s for s in plan["scenes"] if s.get("on", True)] if want_scenes else []
     if want_cards and not quotes:
-        raise RuntimeError("方案里没有勾选的金句 —— 请先在「① 生成方案」里勾选要出的条目")
+        raise RuntimeError("方案里没有勾选的条目 —— 请先在「① 生成方案」里勾选要出的条目")
     if want_scenes and not scenes:
         raise RuntimeError("方案里没有勾选的场景 —— 请先在「① 生成方案」里勾选要出的条目")
+    # 文件名 = 条目在 ① 区清单里的固定编号 → 同名覆盖原图（URL 恒定、清单不用改）
+    card_nos, scene_nos = _image_numbers(plan, want_cards, want_scenes)
     style = plan.get("style") or ""
     if style not in STYLE_TYPES:
         style = get_default_style()
@@ -1466,24 +1569,24 @@ def run_images_job(job):
             out_dir = GEN_DIR / str(article_id)
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # ④ 金句卡：AI 满版背景 + PIL 叠字
+            # ④ 叠字卡路径（旧契约方案）：AI 满版背景 + PIL 叠字
             if quotes:
                 cw, ch = SIZES.get(card_size, SIZES["xiaohongshu"])
                 for i, q in enumerate(quotes):
                     if jobstore.canceled(jid):
                         raise RuntimeError("已取消")
                     bgp = _with_style(_clean_aspect_words(q.get("bg") or FALLBACK_BG), style)
-                    _log(jid, "金句卡 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
+                    _log(jid, "配图 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
                     fn, sub, meta = comfy_generate(base, bgp, cw, ch,
                                                    "qcbg_%d_%d" % (article_id, i), cfg)
                     bg = comfy_download(base, fn, sub)
                     card = compose_card_over_bg(bg, q["text"], size=card_size, qr_link=None)
-                    name = "qa_%02d_%s.png" % (i + 1, hashlib.md5(card.tobytes()).hexdigest()[:6])
+                    name = "ai_%02d.png" % card_nos[i]
                     card.save(str(out_dir / name), "PNG", optimize=True)
                     card_urls.append("/static/generated/%d/%s" % (article_id, name))
                     done += 1
                     _set(jid, done=done, images=list(card_urls + scene_urls))
-                    _log(jid, "金句卡 %d 完成 → %s" % (i + 1, name))
+                    _log(jid, "配图 %d 完成 → %s" % (i + 1, name))
                     _log_gen_meta(lambda m: _log(jid, m), article_id, name, "card", meta, style)
 
             # ⑤ 场景/画面：纯出图
@@ -1496,7 +1599,7 @@ def run_images_job(job):
                      % (i + 1, len(scenes), s["aspect"], w, h))
                 fn, sub, meta = comfy_generate(base, sp, w, h, "zl_%d_%d" % (article_id, i), cfg)
                 data = comfy_download(base, fn, sub)
-                name = "ai_%02d_%s.png" % (i, hashlib.md5(data).hexdigest()[:6])
+                name = "ai_%02d.png" % scene_nos[i]
                 (out_dir / name).write_bytes(data)
                 scene_urls.append("/static/generated/%d/%s" % (article_id, name))
                 done += 1
@@ -1504,34 +1607,24 @@ def run_images_job(job):
                 _log(jid, "画面 %d 完成 → %s" % (i + 1, name))
                 _log_gen_meta(lambda m: _log(jid, m), article_id, name, "scene", meta, style)
 
-            # ⑥ 二维码图（跟金句卡同组）
+            # ⑥ 二维码图
             if card_urls and link:
                 qimg = make_qrcode(link, box=400)
-                qname = "qr_%s.png" % hashlib.md5(link.encode("utf-8")).hexdigest()[:6]
+                qname = "qr.png"
                 qimg.save(str(out_dir / qname), "PNG", optimize=True)
                 card_urls.append("/static/generated/%d/%s" % (article_id, qname))
 
-            # ⑦ 入库：只替换本次生成的组
-            if card_urls:
-                _merge_images(article_id, card_urls, drop_prefix=["qa_", "qr_", "auto_"])
-            if scene_urls:
-                _merge_images(article_id, scene_urls, drop_prefix=["ai_"])
+            # ⑦ 入库：只增不删 —— 同名覆盖下同条目的 URL 恒定；旧引用/孤儿一律保留，绝不清组
+            if card_urls or scene_urls:
+                _merge_images(article_id, list(card_urls) + list(scene_urls))
             _set(jid, images=list(card_urls + scene_urls), done=total)
-            _log(jid, "全部完成：金句卡 %d 张 · 画面 %d 张" % (len(quotes), len(scenes)))
+            _log(jid, "全部完成：配图 %d 张" % (len(quotes) + len(scenes)))
         except Exception as e:
             _log(jid, "❌ 生成失败：%s" % str(e)[:220])
-            removed = 0
-            for u in list(card_urls) + list(scene_urls):
-                try:
-                    p = GEN_DIR / str(article_id) / Path(u).name
-                    if p.is_file():
-                        p.unlink()
-                        removed += 1
-                except Exception:
-                    pass
-            if removed:
-                _log(jid, "已清理本次未入库的残留图 %d 张" % removed)
-            _log(jid, "已有配图未做任何改动。")
+            # ⚠️ 固定文件名（同名覆盖）下**不许清理**：本次写出的文件就是该条目的正式文件，
+            # 删掉等于把用户唯一的图删了。失败只报错：文件保留、清单不动，重跑即覆盖。
+            _log(jid, "本次已出图 %d 张（同名覆盖，保留不动）；配图清单未做任何改动。"
+                 % (len(card_urls) + len(scene_urls)))
             raise RuntimeError(str(e)[:300])
         finally:
             _shutdown_if_idle(jid, lambda m: _log(jid, m))

@@ -1,0 +1,33 @@
+{
+  "_说明": "配图用的「模型组」与「生成档位」。一组 = 底模 + 编码器 + VAE 三件套；组内 presets = 该底模可用的档位（LoRA + 步数 + CFG）。档位按组区分：加速 LoRA 只对训练它的底模有效，跨组混用会出坏图。只放当前出图链路（clip 类型固定 qwen_image）真跑得通的组合；Flux / Z-Image / Edit / Wan 需要不同节点或需要输入图，加进来会出图失败。改完刷新设置页即生效（不用重启）；presets_default 是模型组为「自定义」时的兜底档位。",
+  "groups": [
+    {
+      "id": "qwen_image",
+      "name": "Qwen-Image（标准）",
+      "unet": "qwen_image_fp8_e4m3fn.safetensors",
+      "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "presets": [
+        {"id": "std20", "name": "标准（20 步）", "lora": "", "steps": "20", "cfg": "2.5"},
+        {"id": "fast4", "name": "极速（4 步 · Lightning）", "lora": "Qwen-Image-Lightning-4steps-V1.0.safetensors", "steps": "4", "cfg": "1.0"},
+        {"id": "fast8", "name": "快速（8 步 · Lightning）", "lora": "Qwen-Image-Lightning-8steps-V1.0.safetensors", "steps": "8", "cfg": "1.0"}
+      ]
+    },
+    {
+      "id": "qwen_image_2512",
+      "name": "Qwen-Image 2512",
+      "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+      "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "presets": [
+        {"id": "std20", "name": "标准（20 步）", "lora": "", "steps": "20", "cfg": "2.5"},
+        {"id": "turbo4", "name": "极速（4 步 · Turbo）", "lora": "Wuli-Qwen-Image-2512-Turbo-LoRA-4steps-V1.0-bf16_ComfyUi.safetensors", "steps": "4", "cfg": "1.0"}
+      ]
+    }
+  ],
+  "presets_default": [
+    {"id": "std20", "name": "标准（20 步）", "lora": "", "steps": "20", "cfg": "2.5"},
+    {"id": "fast4", "name": "极速（4 步 · Lightning）", "lora": "Qwen-Image-Lightning-4steps-V1.0.safetensors", "steps": "4", "cfg": "1.0"},
+    {"id": "fast8", "name": "快速（8 步 · Lightning）", "lora": "Qwen-Image-Lightning-8steps-V1.0.safetensors", "steps": "8", "cfg": "1.0"}
+  ]
+}

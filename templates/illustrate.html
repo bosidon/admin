@@ -402,16 +402,14 @@ async function shutdownComfy() {
 
 /* ============ ③ 已配图 ============ */
 function groupOf(u) {
-    if (/\/qa_|\/auto_/.test(u)) return 'card';
-    if (/\/qr_/.test(u)) return 'qr';
-    if (/\/ai_/.test(u)) return 'scene';
+    if (/\/qr_|\/qr\./.test(u)) return 'qr';
+    if (/\/(ai_|qa_|auto_)/.test(u)) return 'scene';   // qa_/auto_ 是旧命名，仍归「配图」
     return 'other';
 }
 function isStamped(u) { return /_q\.png$/.test(u); }
 function isSelectable(u) { return groupOf(u) !== 'qr' && !isStamped(u); }
 const GROUPS = [
-    ['card',  '🎴 金句卡'],
-    ['scene', '🖼 场景图'],
+    ['scene', '🖼 配图'],
     ['qr',    '🔗 二维码'],
     ['other', '📦 其他'],
 ];

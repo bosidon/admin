@@ -43,7 +43,8 @@ from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
                      load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok,
-                     get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config)
+                     get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config,
+                     load_model_groups, load_model_config)
 import jobs as jobstore
 
 # ============================================================
@@ -956,6 +957,17 @@ def api_comfy_check():
     r["ok"] = True
     r["base"] = base
     return jsonify(r)
+
+
+@app.route('/api/models/groups')
+def api_model_groups():
+    """配图「模型组」+「生成档位」配置（数据源 configs/models.json）+ 当前生效的三件套"""
+    cfg = get_comfy_config()
+    mc = load_model_config()
+    return jsonify({"groups": mc["groups"], "presets_default": mc["presets_default"],
+                    "current": {"unet": cfg.get("comfy_unet") or "",
+                                "clip": cfg.get("comfy_clip") or "",
+                                "vae": cfg.get("comfy_vae") or ""}})
 
 
 @app.route('/api/illustrate/overlay-qr', methods=['POST'])

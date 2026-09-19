@@ -58,30 +58,45 @@
     </div>
 
     <div class="form-group">
+        <label class="form-label">模型组</label>
+        <select class="form-select" id="comfy-model-group" onchange="applyModelGroup()"></select>
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">生成档位</label>
+        <select class="form-select" id="comfy-preset" onchange="applyPreset()">
+            <option value="standard">标准（20 步 · 无 LoRA）</option>
+            <option value="fast4">极速（4 步 · Lightning）</option>
+            <option value="fast8">快速（8 步 · Lightning）</option>
+            <option value="custom">自定义</option>
+        </select>
+    </div>
+
+    <div class="form-group">
         <label class="form-label">底模（unet）</label>
-        <input type="text" class="form-input" id="comfy-unet" placeholder="qwen_image_fp8_e4m3fn.safetensors">
+        <input type="text" class="form-input" id="comfy-unet" oninput="syncModelGroup()" placeholder="qwen_image_fp8_e4m3fn.safetensors">
     </div>
 
     <div class="form-group">
         <label class="form-label">文本编码器</label>
-        <input type="text" class="form-input" id="comfy-clip" placeholder="qwen_2.5_vl_7b_fp8_scaled.safetensors">
+        <input type="text" class="form-input" id="comfy-clip" oninput="syncModelGroup()" placeholder="qwen_2.5_vl_7b_fp8_scaled.safetensors">
     </div>
 
     <div class="form-group">
         <label class="form-label">VAE</label>
-        <input type="text" class="form-input" id="comfy-vae" placeholder="qwen_image_vae.safetensors">
+        <input type="text" class="form-input" id="comfy-vae" oninput="syncModelGroup()" placeholder="qwen_image_vae.safetensors">
     </div>
 
     <div class="form-group">
         <label class="form-label">LoRA（逗号分隔，可写 名称:权重）</label>
-        <input type="text" class="form-input" id="comfy-lora" placeholder="Qwen-Image-Lightning-4steps.safetensors:1.0，另一个.safetensors:0.8">
+        <input type="text" class="form-input" id="comfy-lora" oninput="syncPreset()" placeholder="Qwen-Image-Lightning-4steps.safetensors:1.0，另一个.safetensors:0.8">
     </div>
 
     <div class="form-group">
         <label class="form-label">采样参数（步数 / CFG / 采样器 / 调度器 / 降噪）</label>
         <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;">
-            <input type="text" class="form-input" id="comfy-steps" placeholder="20">
-            <input type="text" class="form-input" id="comfy-cfg" placeholder="2.5">
+            <input type="text" class="form-input" id="comfy-steps" oninput="syncPreset()" placeholder="20">
+            <input type="text" class="form-input" id="comfy-cfg" oninput="syncPreset()" placeholder="2.5">
             <input type="text" class="form-input" id="comfy-sampler" placeholder="euler">
             <input type="text" class="form-input" id="comfy-scheduler" placeholder="simple">
             <input type="text" class="form-input" id="comfy-denoise" placeholder="1.0">
@@ -175,7 +190,7 @@
 
 {% block scripts %}
 <script>
-async function saveComfy() {
+async function saveComfy(msg) {
     const data = {
         comfy_instance_uuid: document.getElementById('comfy-instance-uuid').value.trim(),
         comfy_api_token: document.getElementById('comfy-api-token').value.trim(),
@@ -192,7 +207,76 @@ async function saveComfy() {
         comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0'
     };
     await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
-    toast('生图配置已保存');
+    toast(msg || '生图配置已保存');
+}
+
+let MODEL_GROUPS = [];
+let PRESETS_DEFAULT = [];
+
+function currentPresets() {
+    const sel = document.getElementById('comfy-model-group');
+    const g = MODEL_GROUPS.filter(function(m) { return m.id === (sel ? sel.value : ''); })[0];
+    return (g && g.presets && g.presets.length) ? g.presets : PRESETS_DEFAULT;
+}
+
+function buildPresetOptions() {
+    const sel = document.getElementById('comfy-preset');
+    if (!sel) return;
+    sel.innerHTML = '';
+    currentPresets().forEach(function(p) {
+        const o = document.createElement('option');
+        o.value = p.id; o.textContent = p.name;
+        sel.appendChild(o);
+    });
+    const oc = document.createElement('option');
+    oc.value = 'custom'; oc.textContent = '自定义';
+    sel.appendChild(oc);
+}
+
+function syncModelGroup() {
+    const sel = document.getElementById('comfy-model-group');
+    if (!sel || !MODEL_GROUPS.length) return;
+    const v = function(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; };
+    const u = v('comfy-unet'), c = v('comfy-clip'), x = v('comfy-vae');
+    let hit = 'custom';
+    MODEL_GROUPS.forEach(function(m) {
+        if (m.unet === u && m.clip === c && m.vae === x) hit = m.id;
+    });
+    sel.value = hit;
+}
+
+async function applyModelGroup() {
+    const sel = document.getElementById('comfy-model-group');
+    const m = MODEL_GROUPS.filter(function(x) { return x.id === sel.value; })[0];
+    if (!m) return;
+    document.getElementById('comfy-unet').value = m.unet;
+    document.getElementById('comfy-clip').value = m.clip;
+    document.getElementById('comfy-vae').value = m.vae;
+    buildPresetOptions();
+    syncPreset();
+    await saveComfy('已切换为「' + m.name + '」');
+}
+
+function syncPreset() {
+    const sel = document.getElementById('comfy-preset');
+    if (!sel) return;
+    const v = function(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; };
+    const lora = v('comfy-lora'), steps = v('comfy-steps'), cfg = v('comfy-cfg');
+    let hit = 'custom';
+    currentPresets().forEach(function(p) {
+        if (String(p.lora || '') === lora && String(p.steps) === steps && String(p.cfg) === cfg) hit = p.id;
+    });
+    sel.value = hit;
+}
+
+async function applyPreset() {
+    const sel = document.getElementById('comfy-preset');
+    const p = currentPresets().filter(function(x) { return x.id === sel.value; })[0];
+    if (!p) return;
+    document.getElementById('comfy-lora').value = p.lora || '';
+    document.getElementById('comfy-steps').value = p.steps;
+    document.getElementById('comfy-cfg').value = p.cfg;
+    await saveComfy('已切换为「' + sel.options[sel.selectedIndex].text + '」');
 }
 
 function comfyForm() {
@@ -262,6 +346,27 @@ async function loadSettings() {
     document.getElementById('comfy-scheduler').value = settings['comfy_scheduler'] || 'simple';
     document.getElementById('comfy-denoise').value = settings['comfy_denoise'] || '1.0';
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
+    try {
+        const mc = await api('/api/models/groups');
+        MODEL_GROUPS = (mc && mc.groups) || [];
+        PRESETS_DEFAULT = (mc && mc.presets_default) || [];
+    } catch (e) {
+        MODEL_GROUPS = [];
+        PRESETS_DEFAULT = [];
+    }
+    const mgSel = document.getElementById('comfy-model-group');
+    mgSel.innerHTML = '';
+    MODEL_GROUPS.forEach(function(m) {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.name;
+        mgSel.appendChild(o);
+    });
+    const mgC = document.createElement('option');
+    mgC.value = 'custom'; mgC.textContent = '自定义';
+    mgSel.appendChild(mgC);
+    syncModelGroup();
+    buildPresetOptions();
+    syncPreset();
     const pr = await api('/api/prompts/plan');
     document.getElementById('plan-system-prompt').value = (pr && pr.content) || '';
     if (settings['image_key']) document.getElementById('image-key').value = settings['image_key'];

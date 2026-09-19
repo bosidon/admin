@@ -15,6 +15,11 @@
         <label class="form-label">模型名</label>
         <input type="text" class="form-input" id="llm-model" placeholder="deepseek-chat">
     </div>
+
+    <div class="form-group">
+        <label class="form-label">并行度（同时进行的 AI 任务数）</label>
+        <input type="number" min="1" max="8" class="form-input" id="llm-parallel" placeholder="2">
+    </div>
     
     <div class="form-group">
         <label class="form-label">LLM API Key</label>
@@ -164,6 +169,7 @@ async function loadSettings() {
     const settings = await api('/api/settings');
     document.getElementById('llm-base-url').value = settings['llm_base_url'] || 'https://api.deepseek.com/v1/chat/completions';
     document.getElementById('llm-model').value = settings['llm_model'] || 'deepseek-chat';
+    document.getElementById('llm-parallel').value = settings['llm_parallel'] || '2';
     if (settings['llm_api_key']) document.getElementById('llm-api-key').value = settings['llm_api_key'];
     document.getElementById('comfy-instance-uuid').value = settings['comfy_instance_uuid'] || '';
     document.getElementById('comfy-api-token').value = settings['comfy_api_token'] || '';
@@ -186,6 +192,7 @@ async function saveSettings() {
         llm_base_url: document.getElementById('llm-base-url').value,
         llm_model: document.getElementById('llm-model').value,
         llm_api_key: document.getElementById('llm-api-key').value,
+        llm_parallel: document.getElementById('llm-parallel').value || '2',
         image_key: document.getElementById('image-key').value,
         tts_key: document.getElementById('tts-key').value
     };

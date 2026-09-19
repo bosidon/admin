@@ -594,11 +594,12 @@ def api_generate_article():
         return jsonify({"error": "未配置 LLM API Key"}), 400
 
     try:
-        resp = requests.post(llm['llm_base_url'],
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
-            timeout=120
-        )
+        with jobstore.LLM_GATE:            # 同步文案也占 LLM 域名额（防绕过限流打爆 key）
+            resp = requests.post(llm['llm_base_url'],
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
+                timeout=120
+            )
         result = resp.json()
         raw = result['choices'][0]['message']['content']
 

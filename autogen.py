@@ -656,20 +656,6 @@ def get_llm_config():
     return cfg
 
 
-def get_job_parallel():
-    """纯 LLM 任务（生成方案 / 重写 / 文案）的并发度，设置页可改，默认 2"""
-    try:
-        conn = _settings_db()
-        r = conn.execute("SELECT value FROM settings WHERE key='job_llm_parallel'").fetchone()
-        conn.close()
-        return max(1, min(6, int((r["value"] if r else "") or 2)))
-    except Exception:
-        return 2
-
-
-# ============================================================
-# 任务（状态持久化在 jobs 表；函数名保持，调用点不变）
-# ============================================================
 def _set(job_id, **kw):
     jobstore.update(job_id, **kw)
 
@@ -965,9 +951,10 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
                 .replace("{style_id}", style)
                 .replace("{title}", title)
                 .replace("{content}", content))
-    j, err = _llm_json(url, key, model,
-                       [{"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": user_msg}])
+    with jobstore.LLM_GATE:                 # LLM 域闸门：与队列共用同一并发上限
+        j, err = _llm_json(url, key, model,
+                           [{"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": user_msg}])
     if j is None:
         return None, err
 
@@ -1057,7 +1044,8 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
                        else REWRITE_SHAPE.get(itype, REWRITE_SHAPE["quote"])))
     if others:
         prompt += "\n其它条目（不要与它们重复）：" + others
-    j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}])
+    with jobstore.LLM_GATE:                 # 同上：重写是同步接口，也要占 LLM 域名额
+        j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}])
     if j is None:
         return None, err
     bg = str(j.get("bg") or "").strip()
@@ -1110,7 +1098,7 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
                "card_want": int(card_want or 0), "scene_count": int(scene_count or 0)}
     total = 0 if plan_only else ((int(card_want or 0) if want_cards else 0)
                                  + (int(scene_count or 0) if want_scenes else 0))
-    jid, reused = jobstore.DISPATCHER.enqueue(kind, article_id, payload, total)
+    jid, reused = jobstore.DISPATCHER.enqueue(kind, article_id, payload, total, priority=10)
     return {"ok": True, "job_id": jid, "kind": kind, "reused": reused,
             "queue_pos": jobstore.queue_pos(jid)}
 
@@ -1292,6 +1280,7 @@ def run_images_job(job):
 
 def register_jobs():
     """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
-    jobstore.DISPATCHER.register("images", run_images_job, 1)           # 一块 GPU：串行
-    jobstore.DISPATCHER.register("plan", run_plan_job, get_job_parallel)
+    jobstore.DISPATCHER.register("images", run_images_job, domain="gpu")   # 显存域：一块 GPU 串行
+    jobstore.DISPATCHER.register("plan", run_plan_job, domain="llm")       # LLM 域：受 llm_parallel 限制
+    # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()

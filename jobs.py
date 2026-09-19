@@ -33,6 +33,9 @@ STAGE_LABEL = {"planning": "分析文案", "booting": "开机中", "ready": "等
                "generating": "出图中", "": ""}
 
 
+_LOCK = threading.Lock()          # 原子领取任务用
+
+
 def _conn():
     c = sqlite3.connect(DB_PATH, timeout=15)
     c.row_factory = sqlite3.Row
@@ -66,7 +69,9 @@ def init():
         owner TEXT DEFAULT '',
         want_cards INTEGER DEFAULT 0,
         want_scenes INTEGER DEFAULT 0,
-        created_at TEXT, started_at TEXT, finished_at TEXT
+        created_at TEXT, started_at TEXT, finished_at TEXT,
+        domain TEXT DEFAULT 'llm',
+        priority INTEGER DEFAULT 0
     );
     CREATE UNIQUE INDEX IF NOT EXISTS uniq_running_images
         ON jobs(kind) WHERE status = 'running' AND kind = 'images';
@@ -100,14 +105,16 @@ def _row(r):
 
 
 # ---------------- 基础 CRUD ----------------
-def create(kind, article_id=None, payload=None, total=0, owner=""):
+def create(kind, article_id=None, payload=None, total=0, owner="", domain="llm", priority=0):
     jid = uuid.uuid4().hex[:12]
     c = _conn()
     c.execute("INSERT INTO jobs (id,kind,article_id,status,stage,payload,total,done,images,plan_images,"
               "quotes,scenes,style,log,result,error,owner,want_cards,want_scenes,created_at,"
-              "started_at,finished_at) VALUES (?,?,?,'queued','',?,?,0,'[]','[]','[]','[]','','','','',?,0,0,?,NULL,NULL)",
+              "started_at,finished_at,domain,priority) "
+              "VALUES (?,?,?,'queued','',?,?,0,'[]','[]','[]','[]','','','','',?,0,0,?,NULL,NULL,?,?)",
               (jid, kind, int(article_id) if article_id else None,
-               json.dumps(payload or {}, ensure_ascii=False), int(total or 0), owner or "", _now()))
+               json.dumps(payload or {}, ensure_ascii=False), int(total or 0), owner or "", _now(),
+               domain or "llm", int(priority or 0)))
     c.commit()
     c.close()
     return jid
@@ -187,31 +194,6 @@ def log(job_id, msg):
 
 
 # ---------------- 队列操作 ----------------
-def claim_next(kind):
-    """原子领取：最早的一条 queued → running（并发安全）"""
-    c = _conn()
-    try:
-        c.execute("BEGIN IMMEDIATE")
-        r = c.execute("SELECT id FROM jobs WHERE kind=? AND status='queued'"
-                      " ORDER BY created_at LIMIT 1", (kind,)).fetchone()
-        if not r:
-            c.rollback()
-            c.close()
-            return None
-        c.execute("UPDATE jobs SET status='running', started_at=? WHERE id=?", (_now(), r["id"]))
-        c.commit()
-        jid = r["id"]
-    except Exception:
-        try:
-            c.rollback()
-        except Exception:
-            pass
-        c.close()
-        return None
-    c.close()
-    return get(jid)
-
-
 def running_count(kind):
     c = _conn()
     n = c.execute("SELECT COUNT(*) FROM jobs WHERE kind=? AND status='running'", (kind,)).fetchone()[0]
@@ -224,6 +206,84 @@ def queued_count(kind):
     n = c.execute("SELECT COUNT(*) FROM jobs WHERE kind=? AND status='queued'", (kind,)).fetchone()[0]
     c.close()
     return int(n)
+
+
+def domain_limit(domain):
+    """域的并发上限：llm → settings.llm_parallel（默认 2）；gpu → gpu_parallel（默认 1）；none → 不限"""
+    if domain == "none":
+        return 999
+    key = {"llm": "llm_parallel", "gpu": "gpu_parallel"}.get(domain, "")
+    dft = 2 if domain == "llm" else 1
+    if not key:
+        return 1
+    try:
+        c = _conn()
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        c.close()
+        return max(1, min(8, int((r["value"] if r else "") or dft)))
+    except Exception:
+        return dft
+
+
+def running_domain(domain):
+    c = _conn()
+    n = c.execute("SELECT COUNT(*) FROM jobs WHERE status='running' AND domain=?", (domain,)).fetchone()[0]
+    c.close()
+    return n
+
+
+def next_in_domain(domain):
+    """同域内挑下一个该跑的：优先级高的先跑，同级按入队时间（交互式可插队）"""
+    c = _conn()
+    r = c.execute("SELECT * FROM jobs WHERE status='queued' AND domain=? "
+                  "ORDER BY priority DESC, created_at ASC LIMIT 1", (domain,)).fetchone()
+    c.close()
+    return _row(r) if r else None
+
+
+def claim_job(job_id):
+    """原子领取指定任务（queued → running）"""
+    c = _conn()
+    with _LOCK:
+        cur = c.execute("UPDATE jobs SET status='running', started_at=? WHERE id=? AND status='queued'",
+                        (_now(), job_id))
+        c.commit()
+        n = cur.rowcount
+    c.close()
+    return bool(n)
+
+
+class Gate:
+    """同步 LLM 调用也要过的闸门（与队列共用同一并发上限）"""
+
+    def __init__(self, limit_fn, name="llm", wait_max=180):
+        self.limit_fn = limit_fn
+        self.name = name
+        self.wait_max = wait_max
+        self._n = 0
+        self._cv = threading.Condition()
+
+    def __enter__(self):
+        t0 = time.time()
+        with self._cv:
+            while self._n >= self.limit_fn():
+                if time.time() - t0 > self.wait_max:      # 超时放行，避免卡死
+                    break
+                self._cv.wait(1)
+            self._n += 1
+        return self
+
+    def __exit__(self, *a):
+        with self._cv:
+            self._n = max(0, self._n - 1)
+            self._cv.notify()
+        return False
+
+    def busy(self):
+        return self._n >= self.limit_fn()
+
+
+LLM_GATE = Gate(lambda: domain_limit("llm"), "llm")
 
 
 def queue_pos(job_id):
@@ -276,19 +336,15 @@ class Dispatcher:
     """按 kind 起并发的调度线程；并发上限可动态读（改设置立即生效）"""
 
     def __init__(self):
-        self.runners = {}
-        self.limit_fn = {}
+        self.runners = {}          # kind → 执行体
+        self.domains = {}          # kind → 资源域（llm / gpu / none）
         self._thread = None
         self._stop = False
 
-    def register(self, kind, fn, limit=None):
+    def register(self, kind, fn, domain="llm"):
+        """注册任务类型：kind 只是标签，限流按 domain 走（域上限用 settings 实时读）"""
         self.runners[kind] = fn
-        if limit is None:
-            self.limit_fn[kind] = lambda k=kind: _KINDS_DEFAULT_LIMIT.get(k, 2)
-        elif callable(limit):
-            self.limit_fn[kind] = limit
-        else:
-            self.limit_fn[kind] = lambda l=limit: int(l)
+        self.domains[kind] = domain or "llm"
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -297,22 +353,25 @@ class Dispatcher:
         self._thread = threading.Thread(target=self._loop, daemon=True, name="job-dispatcher")
         self._thread.start()
 
-    def _limit(self, kind):
-        try:
-            return max(1, min(6, int(self.limit_fn[kind]())))
-        except Exception:
-            return _KINDS_DEFAULT_LIMIT.get(kind, 2)
-
     def _loop(self):
+        """按域调度：域内并发不超上限；域内挑「优先级高 + 入队早」的任务（交互式可插队）"""
         while not self._stop:
             try:
-                for kind, fn in list(self.runners.items()):
-                    while running_count(kind) < self._limit(kind):
-                        job = claim_next(kind)
-                        if not job:
+                for domain in sorted(set(self.domains.values())):
+                    while running_domain(domain) < domain_limit(domain):
+                        cand = next_in_domain(domain)
+                        if not cand:
                             break
-                        threading.Thread(target=self._run, args=(kind, fn, job), daemon=True,
-                                         name="job-%s-%s" % (kind, job["id"][:6])).start()
+                        if not claim_job(cand["id"]):
+                            continue
+                        fn = self.runners.get(cand["kind"])
+                        if not fn:
+                            update(cand["id"], status="failed", error="未注册的任务类型 %s" % cand["kind"],
+                                   finished_at=_now())
+                            continue
+                        threading.Thread(target=self._run, args=(cand["kind"], fn, cand),
+                                         daemon=True,
+                                         name="job-%s-%s" % (cand["kind"], cand["id"][:6])).start()
             except Exception:
                 pass
             time.sleep(1.0)
@@ -332,11 +391,13 @@ class Dispatcher:
                 update(jid, status="canceled" if "已取消" in msg else "failed",
                        error=msg, finished_at=_now(), stage="")
 
-    def enqueue(self, kind, article_id=None, payload=None, total=0, owner=""):
+    def enqueue(self, kind, article_id=None, payload=None, total=0, owner="", priority=0):
+        """入队（幂等）：同 kind + 文章 + 参数已在队列 → 复用。domain 取注册时声明的域"""
         old = find_active(kind, article_id, payload)
         if old:
             return old["id"], True
-        return create(kind, article_id, payload, total, owner), False
+        return create(kind, article_id, payload, total, owner,
+                      domain=self.domains.get(kind, "llm"), priority=priority), False
 
 
 DISPATCHER = Dispatcher()

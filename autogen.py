@@ -866,11 +866,7 @@ def _type_brief(images):
                       for t in IMAGE_TYPES if any(x.get("type") == t for x in images)) or "-"
 
 
-# 新契约没写画幅时，按「文案类型档位 + 平台」推导（title 里含「头图」→ 公众号 2.35:1）
-_PLAT_ASPECT = {"xiaohongshu": "3:4", "moments": "1:1", "wechat": "16:9", "video_account": "9:16",
-                "douyin": "9:16", "kuaishou": "9:16", "bilibili": "16:9", "zhihu": "16:9",
-                "weibo": "1:1", "toutiao": "16:9", "baijiahao": "16:9", "linkedin": "1:1",
-                "youtube": "16:9", "twitter": "16:9", "instagram": "1:1", "podcast": "1:1"}
+# 画幅两级：条目文本里写的比例优先；没有就按文案类型档位兜底（平台不参与）
 
 
 _ASPECT_PAT = [
@@ -880,13 +876,6 @@ _ASPECT_PAT = [
     ("1:1", ("1:1",)),
     ("3:4", ("3:4",)),
 ]
-# 平台关键词 → 画幅（识别不到明确比例时的兜底）
-_ASPECT_KEYWORD = {
-    "wechat": (("头图", "封面", "banner", "横幅", "宽幅"), "2.35:1"),
-    "xiaohongshu": (("封面",), "3:4"),
-}
-
-
 def _norm_txt(s):
     """统一全角冒号/斜杠、压掉冒号两侧空格，便于匹配「2.35 : 1」这类写法"""
     t = str(s or "").replace("：", ":").replace("／", "/")
@@ -915,31 +904,30 @@ def _clean_aspect_words(txt):
 
 
 def _aspect_of(art, item=None):
-    """三级优先：① 条目文本（title → cn → bg）里明确的画幅 ② 平台关键词 ③ 类型档位 + 平台"""
+    """画幅两级：① 条目文本（title → cn → bg）里明确的画幅 ② 文案类型档位
+
+    平台不参与画幅决策（平台的画幅偏好写在提示词里，由 AI 把比例写进文本，程序只认文本）
+    """
     item = item or {}
     for k in ("title", "cn", "bg"):
         asp = _aspect_from_text(item.get(k))
         if asp:
             return asp, k
-    plat = str((art or {}).get("platform") or "").strip()
-    kw = _ASPECT_KEYWORD.get(plat)
-    if kw:
-        words, asp = kw
-        blob = str(item.get("title") or "") + str(item.get("cn") or "")
-        if any(w in blob for w in words):
-            return asp, "关键词"
     return _default_aspect(art), "档位"
 
 
 def _default_aspect(art, title=""):
-    if "头图" in (title or ""):
-        return "2.35:1"
+    """画幅兜底：只看文案类型（不看平台）
+
+    article → 3:4 · short_video / speech → 9:16 · long_video → 16:9
+    要别的比例：在提示词/条目文本里写明（如「9:16」），由 _aspect_from_text 识别
+    """
     ct = str((art or {}).get("content_type") or "").strip()
     if ct in ("short_video", "speech"):
         return "9:16"
     if ct == "long_video":
         return "16:9"
-    return _PLAT_ASPECT.get(str((art or {}).get("platform") or "").strip(), "3:4")
+    return "3:4"
 
 
 def _plan_out(data, default_style="", art=None):

@@ -100,11 +100,28 @@
     <div class="form-group">
         <label class="form-label">默认视觉风格</label>
         <select class="form-select" id="default-style">
-            <option value="realistic">写实风</option>
-            <option value="illustration">插画风</option>
-            <option value="anime">动漫风</option>
-            <option value="3d">3D风</option>
-            <option value="artistic">意境风</option>
+            <optgroup label="摄影写实">
+                <option value="realistic">写实风</option>
+                <option value="cinematic">电影感</option>
+                <option value="commercial">商业质感</option>
+            </optgroup>
+            <optgroup label="绘画插画">
+                <option value="illustration">插画风</option>
+                <option value="watercolor">水彩风</option>
+                <option value="ink">水墨国风</option>
+                <option value="anime">动漫风</option>
+            </optgroup>
+            <optgroup label="数字渲染">
+                <option value="3d">3D风</option>
+                <option value="concept">概念艺术</option>
+            </optgroup>
+            <optgroup label="氛围与设计">
+                <option value="artistic">意境风</option>
+                <option value="mystic">暗黑神秘</option>
+                <option value="minimal">极简留白</option>
+                <option value="editorial">杂志排版</option>
+                <option value="collage">拼贴杂志</option>
+            </optgroup>
         </select>
     </div>
     
@@ -158,7 +175,9 @@ async function loadSettings() {
     if (settings['image_key']) document.getElementById('image-key').value = settings['image_key'];
     if (settings['tts_key']) document.getElementById('tts-key').value = settings['tts_key'];
     if (settings['default_type']) document.getElementById('default-type').value = settings['default_type'];
-    if (settings['default_style']) document.getElementById('default-style').value = settings['default_style'];
+    const ds = document.getElementById('default-style');
+    ds.value = settings['default_style'] || 'artistic';
+    if (!ds.value) ds.value = 'artistic';
     if (settings['default_platform']) document.getElementById('default-platform').value = settings['default_platform'];
 }
 
@@ -177,7 +196,7 @@ async function saveSettings() {
 async function savePrompts() {
     const sys = document.getElementById('plan-system-prompt').value.trim();
     if (!sys) { alert('System Prompt 不能为空（点「恢复内置默认」可找回）'); return; }
-    const miss = ['quotes', 'scenes', 'bg', 'aspect', 'style'].filter(k => sys.indexOf(k) < 0);
+    const miss = ['images', 'bg', 'aspect'].filter(k => sys.indexOf(k) < 0);
     if (miss.length && !confirm('没检测到字段名：' + miss.join('、') +
         '\n缺了这些，方案可能解析失败。仍要保存吗？')) return;
     const r = await api('/api/prompts/plan', {method: 'POST', body: JSON.stringify({content: sys})});

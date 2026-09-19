@@ -20,7 +20,7 @@ from pathlib import Path
 
 import requests
 
-from illustrate import SIZES, STYLES, make_qrcode, compose_card_over_bg
+from illustrate import SIZES, make_qrcode, compose_card_over_bg
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -63,24 +63,10 @@ CTYPE_LABEL = {
 }
 
 NEG_QUALITY = ("模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, "
-               "人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框")
-
-# 画面安全词：由系统强制附加，用户从文件里删掉也会被自动补回（删不掉）
-# 英文部分必要——正向提示词是英文，中文负面词跨语言压制弱，双语更稳
-NEG_SAFETY = ["裸露", "裸体", "绳索", "束缚", "捆绑", "蒙眼", "武器", "刀", "剑", "血腥", "恐怖",
-              "nude", "nudity", "naked", "rope", "bonding", "bondage", "tied up", "blindfold",
-              "weapon", "knife", "sword", "blood", "gore", "horror", "mutilation"]
+               "引号, 双引号")
 
 # 内置默认整条（文件里那段被整段删掉时回落到它）
-NEG = NEG_QUALITY + ", " + ", ".join(NEG_SAFETY)
-
-# 画面安全底线：无论模板怎么改，都由 gen_plan 固定前置到提示词里（不可关闭）
-SAFETY_RULE = (
-    "【硬性安全要求 · 最高优先级 · 不得省略】本次所有配图："
-    "不得出现裸露或性暗示；不得出现人物被束缚、捆绑、蒙眼、镣铐控制等画面；"
-    "不得出现武器、刀剑、血腥、伤害、恐怖自伤；不得出现真实人物正脸（背影/侧影/剪影可以）；"
-    "不要使用绳索、链条、镣铐等束缚意象。若文案本身涉及此类内容，请改用隐喻表达（如光影、门、路、水、天空）。\n\n"
-)
+NEG = NEG_QUALITY
 
 # 采样参数（build_workflow 出图与「参数透明化」日志共用，避免两处漂移）
 SAMPLER_CFG = 2.5
@@ -88,21 +74,40 @@ SAMPLER_NAME = "euler"
 SCHEDULER = "simple"
 DENOISE = 1.0
 
-# 配色的英文色卡：出图时追加到正向提示词，让 AI 背景与卡片配色成套
+# 配图风格（14 选 1）：人工在 ① 区下拉选定；出图时把英文风格词追加到正向提示词
 STYLE_PROMPT = {
-    "purple": "deep indigo and violet color palette, muted gold accents",
-    "dark": "near-black charcoal color palette, low-key quiet lighting",
-    "gold": "warm cream and soft beige color palette, gentle golden light",
-    "maya": "deep teal and jade green color palette, turquoise tones",
+    "realistic": "photorealistic, natural light, shallow depth of field, 50mm lens",
+    "cinematic": "cinematic still, anamorphic lens, moody rim light, film grain",
+    "commercial": "clean studio product photography, softbox lighting, seamless backdrop",
+    "illustration": "flat editorial illustration, soft gradients, clean shapes",
+    "watercolor": "watercolor painting, wet-on-wet washes, soft paper texture",
+    "ink": "Chinese ink wash painting, xuan paper texture, generous negative space",
+    "anime": "anime key visual, cel shading, clean line art",
+    "3d": "3D render, soft studio light, clay material, subsurface scattering",
+    "concept": "concept art, matte painting, dramatic scale, volumetric light",
+    "artistic": "ethereal dreamscape, mist, soft light rays, surreal calm",
+    "mystic": "dark mystic atmosphere, deep shadows, candlelight, quiet symbolism",
+    "minimal": "minimalist composition, vast negative space, muted tones",
+    "editorial": "editorial magazine layout, strong grid, space for bold typography",
+    "collage": "cut-out paper collage, torn paper edges, layered textures",
 }
+STYLE_LABEL = {
+    "realistic": "写实风", "cinematic": "电影感", "commercial": "商业质感",
+    "illustration": "插画风", "watercolor": "水彩风", "ink": "水墨国风", "anime": "动漫风",
+    "3d": "3D风", "concept": "概念艺术",
+    "artistic": "意境风", "mystic": "暗黑神秘", "minimal": "极简留白",
+    "editorial": "杂志排版", "collage": "拼贴杂志",
+}
+STYLE_TYPES = tuple(STYLE_PROMPT)          # 顺序 = ① 区下拉顺序 = 设置页「默认视觉风格」顺序
+DEFAULT_STYLE = "artistic"                 # 未指定 / 不认识的风格回落到它
 
-# 金句没写 bg 时的兜底背景词（不含颜色，颜色由 STYLE_PROMPT 按当前配色补）
+# 金句没写 bg 时的兜底背景词（不含画风，画风由 STYLE_PROMPT 按当前风格补）
 FALLBACK_BG = ("Mystical serene minimal full-bleed background, soft light, "
                "no text, no letters, no people")
 
 
 def _with_style(prompt, style):
-    """给正向提示词补上配色色卡；没有对应配色就原样返回"""
+    """给正向提示词补上风格英文词；没有对应风格就原样返回"""
     frag = STYLE_PROMPT.get(style or "")
     p2 = (prompt or "").strip()
     if not frag:
@@ -115,15 +120,14 @@ PROMPT_DIR = BASE_DIR / "prompts"
 PLAN_PROMPT_FILE = PROMPT_DIR / "image_agent.md"
 PLAN_PROMPT_DEFAULT = """# 角色
 
-你是「自媒体文案配图 Agent」——资深自媒体视觉策划 + AI 绘画提示词工程师。任务：读用户给的文案，结合系统给出的**平台**与**文案类型**，判断受众、情绪与配图目标，直接输出一份可执行的配图方案与生图提示词。
+你是「自媒体文案配图 Agent」——资深自媒体视觉策划 + AI 绘画提示词工程师。任务：读用户给的文案，结合系统给出的**平台**、**文案类型**与**配图风格**，判断受众、情绪与配图目标，直接输出一份可执行的配图方案与生图提示词。
 
-# 运行口径（硬约束 · 必须遵守）
+# 运行口径
 
 出图后端是 AutoDL ComfyUI（Qwen-Image），据此：
 
 - **提示词英文优先**：`bg` 以英文为主（本套模型的文本编码器 Qwen2.5-VL 双语可读，英文是为了命中率与风格稳定）；要让 AI 直接画中文文字时，在 `bg` 里原样写出那段中文。中文画面描述写 `cn`，图上文字写 `texts`
 - **画幅 5 选 1**：`3:4`（小红书/封面）· `1:1`（朋友圈/知乎/微博）· `9:16`（抖音/快手/视频号/直播）· `16:9`（长视频/B站/公众号内页）· `2.35:1`（公众号头图）
-- **配色 4 选 1**（写进 `style`）：`purple` 深紫·灵性塔罗 · `dark` 玄黑·心理哲思 · `gold` 米金·疗愈温柔 · `maya` 青绿·玛雅图腾
 - **4 种图型**（每张图必须标 `type`）：
   - `cover` 封面卡：主标题 + 副标题（可加时间/地点），AI 出满版背景，文字由程序叠加（也可让 AI 直接画在画面里）
   - `quote` 金句卡：一句金句，居中大字
@@ -134,29 +138,30 @@ PLAN_PROMPT_DEFAULT = """# 角色
 - **`texts` 里只写正文，不要写序号或项目符号**（「1.」「一、」「·」一律不要，编号由程序自动加）
 - **数量与配比由你定**：按平台 + 文案类型给合理张数与图型配比，可以是 0 张，不要凑数
 - 视频类（短视频 / 长视频 / 口播）每条必须带 `section`（段落或镜号）与 `at`（时间点），图文类填 `""`
-- 画面安全底线由系统自动附加，不必在此重复
-- 同一篇文案的所有图保持同一视觉主线与色调（配色色卡由系统按 `style` 自动追加，不必重复写颜色）
+- **配图风格由用户选定（14 选 1，系统会在用户消息里告诉你本次用哪一个）**：写实风 `realistic` · 电影感 `cinematic` · 商业质感 `commercial` · 插画风 `illustration` · 水彩风 `watercolor` · 水墨国风 `ink` · 动漫风 `anime` · 3D风 `3d` · 概念艺术 `concept` · 意境风 `artistic` · 暗黑神秘 `mystic` · 极简留白 `minimal` · 杂志排版 `editorial` · 拼贴杂志 `collage`
+  - 该风格的**画风英文词由系统自动追加**到每条 `bg` 后面 —— 你不用自己写画风词，**也不要输出 `style` 字段**；但画面内容、光线、构图、主体规模要跟这个风格匹配（例：`minimal` 极简留白 → 主体小、留白多、色调克制；`mystic` 暗黑神秘 → 深阴影、烛光、静谧符号感；`watercolor` 水彩风 → 柔和晕染、纸质质感）
+- 同一篇文案的所有图保持同一视觉主线与情绪（画风由系统统一追加，不必重复写）
 
 # 工作流程
 
 1. 读文案 → 主题、核心观点/卖点、受众、情绪、关键词、行动号召
 2. 判断配图目标：点击率 / 信息传达 / 情绪共鸣 / 转化 / 品牌记忆
-3. 定视觉主线：主体、场景、构图、镜头、光线、色彩、风格、材质、情绪
+3. 定视觉主线：主体、场景、构图、镜头、光线、色彩、材质、情绪
 4. 按「文案类型档位」出清单：几张、什么图型、各用什么画幅
 5. 逐条给：中文画面描述 + 图上文字 + 英文提示词
 6. 合规自检：广告法（不用「最 / 第一 / 100% / 包治」等绝对化）、版权、隐私、敏感内容、平台规范
 7. 信息不足就**自行合理假设**并写进 `note.assumptions`，不要反问用户
 
-# 平台适配（画幅 / 风格基调）
+# 平台适配（画幅 / 内容调性）
 
-| 平台 | 画幅 | 风格基调 |
+| 平台 | 画幅 | 内容调性 |
 |---|---|---|
-| 小红书 | 3:4 为主，1:1 备用 | 生活感、奶油风、杂志风、高饱和 |
+| 小红书 | 3:4 为主，1:1 备用 | 生活感、真实、口语化、强标题 |
 | 公众号 | 2.35:1 头图 + 16:9 内页 | 简洁、品牌感 |
 | 抖音/快手/视频号 | 9:16 | 强冲击、大字、动态感 |
-| B站 | 16:9 | 科技、极简、梗图 |
+| B站 | 16:9 | 科技、极简、有趣 |
 | 知乎 | 1:1 或 16:9 | 理性、低饱和、数据感 |
-| 微博 | 1:1 或 9:16 | 热点海报、话题感 |
+| 微博 | 1:1 或 9:16 | 热点感、话题感 |
 | 头条/百家号 | 2.35:1 或 16:9 | 新闻感、真实感 |
 | 播客 | 1:1 封面 + 16:9 章节 | 沉静、声音感、抽象 |
 | LinkedIn | 1:1 或 16:9 | 商务、专业、干净 |
@@ -173,11 +178,11 @@ PLAN_PROMPT_DEFAULT = """# 角色
 - 图文文章发**小红书**时按笔记体处理：3:4 竖图为主、首图即封面、文字更短更口语、6-9 张
 - 系统给出的类型不在上表时，按最接近的一档处理，并在 `note.assumptions` 里说明
 - 长视频 / 口播：先给 1-2 张**角色卡或主场景卡**作为全片视觉锚点，后续镜头沿用同一主体描述与色调
-- 题材（种草 / 测评 / 教程 / 观点 / 故事 / 情感 / 职场 / 节日…）只影响**内容与画面风格**，不改变画幅与图型档位
+- 题材（种草 / 测评 / 教程 / 观点 / 故事 / 情感 / 职场 / 节日…）只影响**内容与画面内容**，不改变画幅与图型档位
 
 # 生图提示词公式
 
-英文：主体 + 动作/状态 + 场景 + 构图 + 镜头 + 光线 + 色彩 + 风格 + 材质 + 情绪 + 画质（画幅由系统按 `aspect` 设定，不用写 `--ar` 之类的工具参数）；**画面不需要任何文字时**，再追加 `no text, no letters, no watermark`
+英文：主体 + 动作/状态 + 场景 + 构图 + 镜头 + 光线 + 色彩 + 材质 + 情绪 + 画质（**画风不用写，系统会按所选风格自动追加**；画幅由系统按 `aspect` 设定，不用写 `--ar` 之类的工具参数）；**画面不需要任何文字时**，再追加 `no text, no letters, no watermark`
 
 中文：一句话说清画面（10-40 字），要具体、可画、能一眼判断画面对不对
 
@@ -186,7 +191,6 @@ PLAN_PROMPT_DEFAULT = """# 角色
 只输出**一个严格 JSON 对象**：不要 Markdown、不要解释、不要代码块围栏。
 
 {
-  "style": "dark",
   "platform": "xiaohongshu",
   "images": [
     {"type": "cover", "aspect": "3:4", "section": "", "at": "",
@@ -217,19 +221,11 @@ PLAN_PROMPT_DEFAULT = """# 角色
 - `section` / `at`：视频类填段落（镜号）与时间点，如 `"第2段"`、`"00:45"`；图文类填 `""`
 - `cn`：中文画面描述，10-40 字，给人看
 - `bg`：英文提示词；要让 AI 画进画面的文字可用自然语言描述（中英文都可）。**中文文字建议同时写进 `texts`**（AI 画中文容易出错，程序叠字更稳）
-- `style`：只能 4 选 1
 - `note`：全部中文、简洁；`note` 不参与出图，只给人看
-
-# 硬性约束
-
-- 不生成侵权名人、血腥暴力、色情、违法、虚假医疗/金融承诺、绝对化广告词
-- 不编造事实（不虚构数据、案例、资质、用户评价）
-- 品牌色、Logo、真人肖像未经用户确认不要画
-- 图中文字要短、可读、不堆砌
 
 # 负面提示词（提交给 ComfyUI · 系统读取，不发给 LLM）
 
-模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 人物正脸, 引号, 双引号, 书名号, 立体书本, 相框, 边框, 裸露, 裸体, 绳索, 束缚, 捆绑, 蒙眼, 武器, 刀, 剑, 血腥, 恐怖, nude, nudity, naked, rope, bonding, bondage, tied up, blindfold, weapon, knife, sword, blood, gore, horror, mutilation
+模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 引号, 双引号
 """
 
 # 用户消息模板：本次任务参数（System Prompt 里不出现占位符）
@@ -240,6 +236,7 @@ PLAN_USER_TEMPLATE = (
     "## 输入参数\n"
     "- 平台：{platform}（id: {platform_id}）\n"
     "- 文案类型：{ctype}\n"
+    "- 配图风格：{style_label}（id: {style_id}）\n"
     "- 文案标题：{title}\n"
     "\n"
     "## 文案正文\n"
@@ -249,8 +246,7 @@ PLAN_USER_TEMPLATE = (
     "\n"
     "## 输出要求\n"
     "- 只输出一个 JSON 对象（不要 Markdown、不要解释、不要代码块围栏）\n"
-    "- 顶层字段：style / platform / images / note / reason\n"
-    "- style ∈ {styles}\n"
+    "- 顶层字段：platform / images / note / reason（不要输出 style，配图风格已由系统指定）\n"
     "- images[].type ∈ {itypes}\n"
     "- images[].aspect ∈ {aspects}\n"
     "- images[].texts 为字符串数组；photo 类型的 texts 必须为空数组\n"
@@ -304,15 +300,11 @@ def load_plan_prompt():
 
 
 def load_negative_prompt():
-    """提交给 ComfyUI 的负面提示词：文件里的段 + 缺失的安全词自动补回（删不掉）"""
+    """提交给 ComfyUI 的负面提示词：文件里「负面提示词」段的内容；该段缺失时回落到内置默认"""
     words = _split_neg_section(load_plan_prompt_raw())[1]
     words = ", ".join(ln.strip() for ln in words.splitlines()
                       if ln.strip() and not ln.strip().startswith("#"))
-    if not words:
-        return NEG
-    low = words.lower()
-    missing = [w for w in NEG_SAFETY if w.lower() not in low]
-    return (words + ", " + ", ".join(missing)) if missing else words
+    return words or NEG
 
 
 def save_plan_prompt(text):
@@ -358,6 +350,20 @@ def get_comfy_config():
     except Exception:
         pass
     return cfg
+
+
+def get_default_style():
+    """配图默认风格：settings.default_style（设置页「默认视觉风格」）；空 / 不认识 → DEFAULT_STYLE"""
+    v = ""
+    try:
+        conn = _settings_db()
+        r = conn.execute("SELECT value FROM settings WHERE key='default_style'").fetchone()
+        conn.close()
+        v = (r["value"] if r else "") or ""
+    except Exception:
+        pass
+    v = str(v).strip().lower()
+    return v if v in STYLE_TYPES else DEFAULT_STYLE
 
 
 # ============================================================
@@ -559,9 +565,10 @@ def _save_gen_log(article_id, name, kind, meta, style=""):
 
 def _log_gen_meta(log, article_id, name, kind, meta, style):
     """任务日志打印 + 落库：这张图最终提交的提示词与参数"""
-    log("\u24d8 参数：seed=%s · steps=%s · cfg=%s · %s/%s · %dx%d · 配色 %s"
+    log("\u24d8 参数：seed=%s · steps=%s · cfg=%s · %s/%s · %dx%d · 风格 %s"
         % (meta.get("seed"), meta.get("steps"), meta.get("cfg"), meta.get("sampler"),
-           meta.get("scheduler"), meta.get("width"), meta.get("height"), style or "-"))
+           meta.get("scheduler"), meta.get("width"), meta.get("height"),
+           STYLE_LABEL.get(style, style) or "-"))
     log("\u24d8 正向：" + (meta.get("prompt") or ""))
     log("\u24d8 负面：" + (meta.get("neg") or ""))
     err = _save_gen_log(article_id, name, kind, meta, style)
@@ -613,20 +620,6 @@ def shutdown_instance():
 # ============================================================
 # 金句卡任务（AI 背景 + PIL 叠字）
 # ============================================================
-STYLE_ALIAS = {
-    '深紫': 'purple', '紫': 'purple', '灵性': 'purple', '塔罗': 'purple',
-    '玄黑': 'dark', '黑': 'dark', '心理': 'dark', '哲思': 'dark',
-    '米金': 'gold', '金': 'gold', '疗愈': 'gold', '温柔': 'gold',
-    '玛雅': 'maya', '青绿': 'maya', '图腾': 'maya',
-}
-STYLE_HINT = {
-    'tarot': 'purple', '塔罗': 'purple', '灵性': 'purple', '能量': 'purple',
-    '心理': 'dark', '哲思': 'dark', '情绪': 'dark',
-    '玛雅': 'maya', '图腾': 'maya',
-    '疗愈': 'gold', '温柔': 'gold', '阅读': 'gold',
-}
-
-
 def _read_article_full(article_id):
     conn = _content_db()
     row = conn.execute(
@@ -798,16 +791,18 @@ def _plan_out(data, default_style=""):
                     images.append(n)
     quotes, scenes = _legacy_views(images)
     style = str(data.get("style") or "").strip().lower()
-    style = STYLE_ALIAS.get(style, style)
     note = data.get("note")
-    return {"style": style if style in STYLES else default_style,
+    return {"style": style if style in STYLE_TYPES else default_style,
             "platform": str(data.get("platform") or "").strip(),
             "images": images, "quotes": quotes, "scenes": scenes,
             "note": note if isinstance(note, dict) else {}}
 
 
-def read_plan(article_id):
-    """读配图方案：统一成 images[]（旧 quotes/scenes 自动映射），并派生 ② 出图用的两组视图"""
+def read_plan(article_id, default_style=None):
+    """读配图方案：统一成 images[]（旧 quotes/scenes 自动映射），并派生 ② 出图用的两组视图
+
+    style 只认 14 个风格之一；旧配色值（purple/dark/gold/maya）一律忽略，回落默认风格。
+    """
     conn = _content_db()
     row = conn.execute("SELECT image_script FROM articles WHERE id=?", (article_id,)).fetchone()
     conn.close()
@@ -816,7 +811,7 @@ def read_plan(article_id):
         data = json.loads(raw or "{}")
     except Exception:
         data = {}
-    return _plan_out(data)
+    return _plan_out(data, default_style=default_style or get_default_style())
 
 
 def save_plan(article_id, plan):
@@ -833,10 +828,11 @@ def save_plan(article_id, plan):
     return plan
 
 
-def gen_plan(art, llm_cfg, card_want=0, scene_count=0):
+def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
     """一次 LLM 调用产出整份方案（契约 images[]）；返回 (plan|None, reason)
 
     card_want / scene_count 保留仅为兼容旧调用方，数量与配比由 LLM 按平台+类型决定。
+    style：人工在 ① 区选定的配图风格（空 / 不认识 → 用设置页默认风格），LLM 输出不作数。
     """
     import re as _re
     llm_cfg = llm_cfg or {}
@@ -848,15 +844,18 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0):
     if not (key and url and content):
         return None, "未配置 LLM 或文案无正文"
 
-    # 系统提示词 = 安全底线（代码固定，改不掉）+ prompts/image_agent.md 文件内容
-    sys_prompt = SAFETY_RULE + load_plan_prompt()
+    # 系统提示词 = prompts/image_agent.md 文件内容（设置页可编辑）
+    style = (style or "").strip().lower()
+    style = style if style in STYLE_TYPES else get_default_style()
+    sys_prompt = load_plan_prompt()
     plat = (art.get("platform") or "").strip()
     ctype = (art.get("content_type") or "").strip()
     user_msg = (PLAN_USER_TEMPLATE
                 .replace("{platform}", PLATFORM_LABEL.get(plat, plat or "未指定"))
                 .replace("{platform_id}", plat or "未指定")
                 .replace("{ctype}", CTYPE_LABEL.get(ctype, ctype or "article 图文文章"))
-                .replace("{styles}", " | ".join(STYLE_PROMPT))
+                .replace("{style_label}", STYLE_LABEL.get(style, style))
+                .replace("{style_id}", style)
                 .replace("{itypes}", " | ".join(IMAGE_TYPES))
                 .replace("{aspects}", " | ".join(ASPECTS))
                 .replace("{title}", title)
@@ -869,7 +868,8 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0):
 
     if not j.get("platform"):
         j["platform"] = plat
-    plan = _plan_out(j, default_style="purple")
+    plan = _plan_out(j, default_style=style)
+    plan["style"] = style                              # 风格由人工选定，LLM 输出不作数
     plan["images"] = plan["images"][:12]               # 数量由 LLM 定，这里只兜底防爆
     plan["quotes"], plan["scenes"] = _legacy_views(plan["images"])
     if not plan["images"]:
@@ -940,10 +940,10 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
            % ("｜".join(item.get("texts") or []) or "（无）", item.get("cn") or "（无）",
               item.get("bg") or "（空）", item.get("aspect") or "3:4"))
     _frag = STYLE_PROMPT.get(plan.get("style") or "")
-    palette = ("配色：本次整套配图的配色是 %s，画面色调请围绕「%s」。\n"
-               % (plan.get("style"), _frag)) if _frag else ""
+    palette = ("风格：本次整套配图的风格是 %s（%s），画面请按这个风格来（画风英文词由系统追加，不必自己写）。\n"
+               % (STYLE_LABEL.get(plan.get("style"), plan.get("style")), _frag)) if _frag else ""
     h = (hint or "").strip()
-    prompt = (SAFETY_RULE + REWRITE_PROMPT
+    prompt = (REWRITE_PROMPT
               .replace("{kind_label}", ITYPE_LABEL.get(itype, itype))
               .replace("{itype}", itype)
               .replace("{aspect}", item.get("aspect") or "3:4")
@@ -1040,20 +1040,22 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
             if need:
                 _set(job_id, status="planning")
                 log("AI 正在分析文案、设计配图方案…")
-                newp, reason = gen_plan(art, llm_cfg, card_want, scene_count)
+                newp, reason = gen_plan(art, llm_cfg, card_want, scene_count,
+                                        style=plan.get("style") or "")
                 if newp:
                     plan = newp
                     save_plan(article_id, plan)
-                    log("方案已生成：%d 张（%s）· 配色 %s"
-                        % (len(plan["images"]), _type_brief(plan["images"]), plan["style"]))
+                    log("方案已生成：%d 张（%s）· 风格 %s"
+                        % (len(plan["images"]), _type_brief(plan["images"]),
+                           STYLE_LABEL.get(plan["style"], plan["style"])))
                 else:
                     log("方案生成失败：%s" % reason)
                     if want_cards and not plan["quotes"]:
                         fb = _extract_quotes_fallback(art.get("content_md"),
                                                       art.get("title"), card_want)
                         plan["quotes"] = [{"text": q, "bg": ""} for q in fb]
-                        if not plan["style"]:
-                            plan["style"] = STYLE_HINT.get(art.get("platform") or "", "purple")
+                        if plan["style"] not in STYLE_TYPES:
+                            plan["style"] = get_default_style()
                         save_plan(article_id, plan)
                         log("改用正文抽句作为金句（%d 句）" % len(plan["quotes"]))
 
@@ -1070,9 +1072,9 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
                 raise RuntimeError("方案里没有勾选的金句 —— 请先在「① 生成方案」里勾选要出的条目")
             if want_scenes and not scenes:
                 raise RuntimeError("方案里没有勾选的场景 —— 请先在「① 生成方案」里勾选要出的条目")
-            style = plan.get("style") or "purple"
-            if style not in STYLES:
-                style = "purple"
+            style = plan.get("style") or ""
+            if style not in STYLE_TYPES:
+                style = get_default_style()
             total = len(quotes) + len(scenes)
             _set(job_id, quotes=plan["quotes"], scenes=plan["scenes"],
                  style=style, total=total)
@@ -1120,7 +1122,7 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
                     fn, sub, meta = comfy_generate(base, bgp, cw, ch,
                                                    "qcbg_%d_%d" % (article_id, i), cfg)
                     bg = comfy_download(base, fn, sub)
-                    card = compose_card_over_bg(bg, q["text"], style=style,
+                    card = compose_card_over_bg(bg, q["text"],
                                                 size=card_size, qr_link=None)
                     name = "qa_%02d_%s.png" % (i + 1,
                                                hashlib.md5(card.tobytes()).hexdigest()[:6])

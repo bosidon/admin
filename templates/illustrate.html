@@ -21,12 +21,31 @@
             <div style="font-size:12px;color:#64748b;margin-top:3px;">AI 按平台 + 文案类型出清单（封面卡 / 金句卡 / 要点卡 / 画面）· 不开机不花钱 · 勾选要出的条目后再生成</div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;">
-            <label style="font-size:12px;color:#64748b;">配色</label>
-            <select id="plan-style" class="form-select" style="width:auto;padding:5px 10px;font-size:13px;">
-                <option value="purple">深紫 · 灵性塔罗</option>
-                <option value="dark">玄黑 · 心理哲思</option>
-                <option value="gold">米金 · 疗愈温柔</option>
-                <option value="maya">青绿 · 玛雅图腾</option>
+            <label style="font-size:12px;color:#64748b;">风格</label>
+            <select id="plan-style" class="form-select" onchange="savePlan(true)"
+                style="width:auto;padding:5px 10px;font-size:13px;">
+                <optgroup label="摄影写实">
+                    <option value="realistic">写实风</option>
+                    <option value="cinematic">电影感</option>
+                    <option value="commercial">商业质感</option>
+                </optgroup>
+                <optgroup label="绘画插画">
+                    <option value="illustration">插画风</option>
+                    <option value="watercolor">水彩风</option>
+                    <option value="ink">水墨国风</option>
+                    <option value="anime">动漫风</option>
+                </optgroup>
+                <optgroup label="数字渲染">
+                    <option value="3d">3D风</option>
+                    <option value="concept">概念艺术</option>
+                </optgroup>
+                <optgroup label="氛围与设计">
+                    <option value="artistic">意境风</option>
+                    <option value="mystic">暗黑神秘</option>
+                    <option value="minimal">极简留白</option>
+                    <option value="editorial">杂志排版</option>
+                    <option value="collage">拼贴杂志</option>
+                </optgroup>
             </select>
             <button class="btn btn-primary btn-sm" onclick="genPlanNow()">① 生成方案</button>
         </div>
@@ -106,7 +125,10 @@
 {% block scripts %}
 <script>
 const ARTICLE_ID = {{ article_id }};
-const STYLE_LABEL = {purple:'深紫', dark:'玄黑', gold:'米金', maya:'青绿'};
+const STYLE_LABEL = {realistic:'写实风', cinematic:'电影感', commercial:'商业质感',
+    illustration:'插画风', watercolor:'水彩风', ink:'水墨国风', anime:'动漫风',
+    '3d':'3D风', concept:'概念艺术', artistic:'意境风', mystic:'暗黑神秘',
+    minimal:'极简留白', editorial:'杂志排版', collage:'拼贴杂志'};
 const ASPECTS = ['3:4','1:1','9:16','16:9','2.35:1'];
 const ITYPE_LABEL = {cover:'封面卡', quote:'金句卡', points:'要点卡', photo:'画面'};
 let PLAN = {style:'', platform:'', images:[], quotes:[], scenes:[], note:{}};
@@ -210,7 +232,7 @@ async function loadPlan() {
     if (r && r.plan) PLAN = {style: r.plan.style || '', platform: r.plan.platform || '',
                              images: r.plan.images || [], quotes: r.plan.quotes || [],
                              scenes: r.plan.scenes || [], note: r.plan.note || {}};
-    document.getElementById('plan-style').value = PLAN.style || 'purple';
+    document.getElementById('plan-style').value = PLAN.style || 'artistic';
     renderPlan();
 }
 
@@ -226,6 +248,7 @@ async function savePlan(silent) {
 
 async function genPlanNow() {
     if (!confirm('生成方案会覆盖当前方案（你编辑过的提示词与勾选都会丢失），继续？')) return;
+    await savePlan(true);                     // 先把人工选定的风格落库，方案生成按它走
     await startJob({article_id: ARTICLE_ID, cards: false, scenes: false, replan: true, plan_only: true});
 }
 
@@ -273,7 +296,7 @@ function pollJob(jobId) {
             if (j.plan_images) PLAN.images = j.plan_images;
             if (j.quotes && j.quotes.length) PLAN.quotes = j.quotes;
             if (j.scenes && j.scenes.length) PLAN.scenes = j.scenes;
-            document.getElementById('plan-style').value = PLAN.style || 'purple';
+            document.getElementById('plan-style').value = PLAN.style || 'artistic';
             renderPlan();
         }
         if (j.status === 'done' || j.status === 'failed') {
@@ -427,7 +450,7 @@ function showMeta(url) {
     const lines = [
         '文件名：' + name,
         '类型：' + ({card: '金句卡', scene: '场景图'}[m.kind] || m.kind || '-'),
-        '配色：' + (m.style || '-') + '   尺寸：' + (m.width || '-') + 'x' + (m.height || '-'),
+        '风格：' + (STYLE_LABEL[m.style] || m.style || '-') + '   尺寸：' + (m.width || '-') + 'x' + (m.height || '-'),
         '参数：seed=' + m.seed + ' · steps=' + m.steps + ' · cfg=' + m.cfg +
             ' · ' + m.sampler + '/' + m.scheduler,
         '生成时间：' + (m.created_at || '-'),

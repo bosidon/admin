@@ -305,7 +305,15 @@ function pollJob(jobId) {
     if (JOB_TIMER) clearInterval(JOB_TIMER);
     JOB_TIMER = setInterval(async function() {
         const j = await api('/api/illustrate/job/' + jobId);
-        if (!j || j.error) { clearInterval(JOB_TIMER); JOB_TIMER = null; busy(false); return; }
+        if (!j || j.error) {
+            clearInterval(JOB_TIMER); JOB_TIMER = null; busy(false);
+            const em = (j && j.error) || '任务状态查询失败';
+            const lgE = document.getElementById('gen-log');
+            if (lgE) lgE.textContent += (lgE.textContent ? '\n' : '') + '⚠ ' + em;
+            hint('⚠ ' + em);
+            toast('❌ 任务已中断（' + em + '）—— 请重新点「② 生成配图」', 'error');
+            return;
+        }
         const pct = j.total ? Math.round(j.done / j.total * 100) : 0;
         document.getElementById('gen-bar').style.width = pct + '%';
         const lg = document.getElementById('gen-log');

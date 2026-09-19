@@ -22,6 +22,7 @@ from pathlib import Path
 import requests
 
 from illustrate import SIZES, make_qrcode, compose_card_over_bg
+import jobs as jobstore
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -338,11 +339,9 @@ def save_plan_prompt(text):
 
 save_plan_prompt(load_plan_prompt_raw())    # 确保 prompts/image_agent.md 存在（缺失即补回）
 
-# 运行期状态（内存）
-JOBS = {}
-JOBS_LOCK = threading.Lock()
-RUN_LOCK = threading.Lock()          # 同一时间只跑一个任务
-JOB_TTL = 3600 * 6
+# 运行期状态：任务持久化在库里（data/database.db 的 jobs 表），重启不丢
+jobstore.init()
+RUN_LOCK = threading.Lock()          # 出图任务独占（一块 GPU）
 
 
 # ============================================================
@@ -618,37 +617,74 @@ def _log_gen_meta(log, article_id, name, kind, meta, style):
 
 
 # ============================================================
-# 任务
+# 配置（LLM / 任务并发）
+# ============================================================
+LLM_DEFAULTS = {"llm_base_url": "https://api.deepseek.com/v1/chat/completions",
+                "llm_model": "deepseek-chat", "llm_api_key": ""}
+
+
+def _env_all():
+    """读 /var/www/.env（或项目 .env）里的键值"""
+    out = {}
+    for p in (BASE_DIR / ".env", Path("/var/www/.env")):
+        try:
+            if p.exists():
+                for ln in p.read_text(encoding="utf-8").splitlines():
+                    ln = ln.strip()
+                    if ln and not ln.startswith("#") and "=" in ln:
+                        k, v = ln.split("=", 1)
+                        out[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return out
+
+
+def get_llm_config():
+    """LLM 参数：settings 表优先 → DEEPSEEK_API_KEY 环境变量 → 默认 DeepSeek 官网"""
+    cfg = dict(LLM_DEFAULTS)
+    try:
+        conn = _settings_db()
+        for r in conn.execute("SELECT key, value FROM settings WHERE key IN "
+                              "('llm_base_url','llm_model','llm_api_key')"):
+            if r["value"]:
+                cfg[r["key"]] = r["value"]
+        conn.close()
+    except Exception:
+        pass
+    if not cfg.get("llm_api_key"):
+        cfg["llm_api_key"] = _env_all().get("DEEPSEEK_API_KEY", "")
+    return cfg
+
+
+def get_job_parallel():
+    """纯 LLM 任务（生成方案 / 重写 / 文案）的并发度，设置页可改，默认 2"""
+    try:
+        conn = _settings_db()
+        r = conn.execute("SELECT value FROM settings WHERE key='job_llm_parallel'").fetchone()
+        conn.close()
+        return max(1, min(6, int((r["value"] if r else "") or 2)))
+    except Exception:
+        return 2
+
+
+# ============================================================
+# 任务（状态持久化在 jobs 表；函数名保持，调用点不变）
 # ============================================================
 def _set(job_id, **kw):
-    with JOBS_LOCK:
-        j = JOBS.get(job_id)
-        if j:
-            j.update(kw)
+    jobstore.update(job_id, **kw)
 
 
 def _log(job_id, msg):
-    line = "[%s] %s" % (time.strftime("%H:%M:%S"), msg)
-    with JOBS_LOCK:
-        j = JOBS.get(job_id)
-        if j:
-            j["log"].append(line)          # 原地修改，不 rebind
-            if len(j["log"]) > 200:
-                del j["log"][:-200]
+    jobstore.log(job_id, msg)
 
 
 def get_job(job_id):
-    with JOBS_LOCK:
-        j = JOBS.get(job_id)
-        return dict(j) if j else None
+    return jobstore.get(job_id)
 
 
 def _gc_jobs():
-    now = time.time()
-    with JOBS_LOCK:
-        for k in [k for k, v in JOBS.items()
-                  if v.get("finished_at") and now - v["finished_at"] > JOB_TTL]:
-            JOBS.pop(k, None)
+    """任务已持久化，无需清内存（历史任务按需在查询侧限条数）"""
+    return None
 
 
 def shutdown_instance():
@@ -1051,203 +1087,192 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
 # ============================================================
 # 统一生成任务（金句卡 + 场景配图，一次开机一次关机）
 # ============================================================
-def start_generate(article_id, opts, llm_cfg, card_size, card_want, scene_count):
-    """opts: {cards: bool, scenes: bool, replan: bool}"""
-    art = _read_article_full(article_id)
-    if not art:
-        return {"error": "文案不存在"}
+def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
+                   card_want=0, scene_count=0):
+    """任务入队（幂等）：① 生成方案 → kind=plan；② 出图 → kind=images
+    返回 {ok, job_id, kind, queue_pos, reused}；llm_cfg 仅为兼容旧调用保留
+    （后台任务自己从 settings / .env 取 key，不再经前端传）
+    """
+    if not _read_article_full(article_id):
+        return {"error": "文章不存在"}
+    plan_only = bool(opts.get("plan_only"))
     want_cards = bool(opts.get("cards"))
     want_scenes = bool(opts.get("scenes"))
-    plan_only = bool(opts.get("plan_only"))
     if not (want_cards or want_scenes) and not plan_only:
         return {"error": "请至少勾选一组（金句卡 / 场景配图）"}
     if not plan_only:
         cfg = get_comfy_config()
         if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
             return {"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}
-    # 只有真出图才拦锁：① 生成方案 / 🔄 重写是纯 LLM 调用，不占显存，可与出图并行
-    if not plan_only and RUN_LOCK.locked():
-        return {"error": "已有生成任务在跑，请等它结束"}
-
-    job_id = uuid.uuid4().hex[:12]
-    with JOBS_LOCK:
-        JOBS[job_id] = {
-            "job_id": job_id, "article_id": article_id, "status": "queued",
-            "total": (card_want if want_cards else 0) + (scene_count if want_scenes else 0),
-            "done": 0, "images": [], "log": [], "error": "",
-            "started_at": time.time(), "finished_at": None, "mode": "generate",
-            "title": art.get("title") or "", "style": "",
-            "quotes": [], "scenes": [],
-            "want_cards": want_cards, "want_scenes": want_scenes,
-        }
-    threading.Thread(
-        target=_generate_worker,
-        args=(job_id, article_id, opts, llm_cfg, card_size, int(card_want), int(scene_count)),
-        daemon=True).start()
-    _gc_jobs()
-    return {"ok": True, "job_id": job_id,
-            "total": JOBS[job_id]["total"]}
+    kind = "plan" if plan_only else "images"
+    payload = {"cards": want_cards, "scenes": want_scenes, "replan": bool(opts.get("replan")),
+               "plan_only": plan_only, "card_size": card_size,
+               "card_want": int(card_want or 0), "scene_count": int(scene_count or 0)}
+    total = 0 if plan_only else ((int(card_want or 0) if want_cards else 0)
+                                 + (int(scene_count or 0) if want_scenes else 0))
+    jid, reused = jobstore.DISPATCHER.enqueue(kind, article_id, payload, total)
+    return {"ok": True, "job_id": jid, "kind": kind, "reused": reused,
+            "queue_pos": jobstore.queue_pos(jid)}
 
 
-def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, scene_count):
-    def log(m):
-        _log(job_id, m)
+# ============================================================
+# 任务执行体（由 jobs.DISPATCHER 调度；状态/日志全部落 jobs 表）
+# ============================================================
+def _ensure_instance(job_id, log):
+    """确保实例 running（已在运行则跳过），返回是否本次开机"""
+    st = adl_status().get("data") or ""
+    if st == "running":
+        log("实例已在运行，跳过开机")
+        return False
+    log("启动实例…（当前状态 %s）" % (st or "未知"))
+    res = adl_power_on()
+    if res.get("code") != "Success":
+        raise RuntimeError("开机失败：%s" % (res.get("msg") or res.get("code")))
+    log("开机指令已下发")
+    for _ in range(60):
+        if jobstore.canceled(job_id):
+            raise RuntimeError("已取消")
+        time.sleep(3)
+        if (adl_status().get("data") or "") == "running":
+            log("实例已运行")
+            return True
+    raise RuntimeError("等待实例 running 超时")
 
-    # ① 生成方案不占锁（不碰显存），出图任务仍独占 RUN_LOCK
-    _lock_ctx = contextlib.nullcontext() if opts.get("plan_only") else RUN_LOCK
-    with _lock_ctx:
-        cfg = get_comfy_config()
-        art = _read_article_full(article_id) or {}
-        link = _link_of(art, article_id)
-        want_cards = bool(opts.get("cards"))
-        want_scenes = bool(opts.get("scenes"))
-        plan = read_plan(article_id)
-        quotes, scenes = [], []
-        card_urls, scene_urls = [], []
+
+def _shutdown_if_idle(job_id, log):
+    """收尾：队列里还有出图任务就保持实例运行（省一次开关机），否则关机"""
+    try:
+        if get_comfy_config().get("comfy_auto_shutdown", "1") != "1":
+            log("自动关机已关闭，实例保持运行")
+            return
+        n = jobstore.queued_count("images")
+        if n > 0:
+            log("队列还有 %d 个出图任务，实例保持运行" % n)
+            return
+        log("队列已空，关闭实例…")
+        r = adl_power_off()
+        log("关机结果：" + str(r.get("code") or r)[:80])
+    except Exception as e:
+        log("关机异常：" + str(e)[:200])
+
+
+def run_plan_job(job):
+    """① 生成方案：纯 LLM，不开机、不占显存（可与出图任务并行）"""
+    jid, article_id = job["id"], job.get("article_id")
+    opts = job.get("payload") or {}
+    _set(jid, stage="planning")
+    _log(jid, "AI 正在分析文案、设计配图方案…")
+    plan = read_plan(article_id)
+    newp, reason = gen_plan(_read_article_full(article_id) or {}, get_llm_config(),
+                            int(opts.get("card_want") or 0), int(opts.get("scene_count") or 0),
+                            style=plan.get("style") or "")
+    if not newp:
+        raise RuntimeError("方案生成失败：%s" % (reason or "未知原因"))
+    save_plan(article_id, newp)
+    _log(jid, "方案已生成：%d 张（%s）· 风格 %s"
+         % (len(newp["images"]), _type_brief(newp["images"]),
+            STYLE_LABEL.get(newp["style"], newp["style"])))
+    _set(jid, total=0, done=0, plan_images=newp["images"], quotes=newp["quotes"],
+         scenes=newp["scenes"], style=newp["style"], want_cards=False, want_scenes=False)
+
+
+def run_images_job(job):
+    """② 出图：一次开机 → 出完本任务 → 队列空了才关机"""
+    jid, article_id = job["id"], job.get("article_id")
+    opts = job.get("payload") or {}
+    want_cards = bool(opts.get("cards"))
+    want_scenes = bool(opts.get("scenes"))
+    card_size = opts.get("card_size") or "xiaohongshu"
+    cfg = get_comfy_config()
+    art = _read_article_full(article_id) or {}
+    link = _link_of(art, article_id)
+    plan = read_plan(article_id)
+    quotes = [q for q in plan["quotes"] if q.get("on", True)] if want_cards else []
+    scenes = [s for s in plan["scenes"] if s.get("on", True)] if want_scenes else []
+    if want_cards and not quotes:
+        raise RuntimeError("方案里没有勾选的金句 —— 请先在「① 生成方案」里勾选要出的条目")
+    if want_scenes and not scenes:
+        raise RuntimeError("方案里没有勾选的场景 —— 请先在「① 生成方案」里勾选要出的条目")
+    style = plan.get("style") or ""
+    if style not in STYLE_TYPES:
+        style = get_default_style()
+    total = len(quotes) + len(scenes)
+    _set(jid, quotes=plan["quotes"], scenes=plan["scenes"], style=style, total=total,
+         want_cards=want_cards, want_scenes=want_scenes)
+    card_urls, scene_urls, done = [], [], 0
+
+    with RUN_LOCK:                      # 一块 GPU：双保险（调度器侧并发已是 1）
         try:
-            # ---- ① 方案：只有「生成方案」才调 LLM（不再一步到位）----
-            need = bool(opts.get("replan"))
-            if need:
-                _set(job_id, status="planning")
-                log("AI 正在分析文案、设计配图方案…")
-                newp, reason = gen_plan(art, llm_cfg, card_want, scene_count,
-                                        style=plan.get("style") or "")
-                if newp:
-                    plan = newp
-                    save_plan(article_id, plan)
-                    log("方案已生成：%d 张（%s）· 风格 %s"
-                        % (len(plan["images"]), _type_brief(plan["images"]),
-                           STYLE_LABEL.get(plan["style"], plan["style"])))
-                else:
-                    log("方案生成失败：%s" % reason)
-                    if want_cards and not plan["quotes"]:
-                        fb = _extract_quotes_fallback(art.get("content_md"),
-                                                      art.get("title"), card_want)
-                        plan["quotes"] = [{"text": q, "bg": ""} for q in fb]
-                        if plan["style"] not in STYLE_TYPES:
-                            plan["style"] = get_default_style()
-                        save_plan(article_id, plan)
-                        log("改用正文抽句作为金句（%d 句）" % len(plan["quotes"]))
+            _set(jid, stage="booting")
+            _ensure_instance(jid, lambda m: _log(jid, m))
 
-            if opts.get("plan_only"):
-                _set(job_id, status="done", finished_at=time.time(), total=0, done=0,
-                     plan_images=plan["images"], quotes=plan["quotes"], scenes=plan["scenes"],
-                     style=plan["style"], want_cards=False, want_scenes=False)
-                log("方案已更新（仅分析，未出图、未开机）")
-                return
-
-            quotes = [q for q in plan["quotes"] if q.get("on", True)] if want_cards else []
-            scenes = [s for s in plan["scenes"] if s.get("on", True)] if want_scenes else []
-            if want_cards and not quotes:
-                raise RuntimeError("方案里没有勾选的金句 —— 请先在「① 生成方案」里勾选要出的条目")
-            if want_scenes and not scenes:
-                raise RuntimeError("方案里没有勾选的场景 —— 请先在「① 生成方案」里勾选要出的条目")
-            style = plan.get("style") or ""
-            if style not in STYLE_TYPES:
-                style = get_default_style()
-            total = len(quotes) + len(scenes)
-            _set(job_id, quotes=plan["quotes"], scenes=plan["scenes"],
-                 style=style, total=total)
-
-            # ---- ② 开机 ----
-            _set(job_id, status="booting")
-            st = adl_status().get("data") or ""
-            if st == "running":
-                log("实例已在运行，跳过开机")
-            else:
-                log("启动实例…（当前状态 %s）" % (st or "未知"))
-                res = adl_power_on()
-                if res.get("code") != "Success":
-                    raise RuntimeError("开机失败：%s" % (res.get("msg") or res.get("code")))
-                log("开机指令已下发")
-                for _ in range(60):
-                    time.sleep(3)
-                    if (adl_status().get("data") or "") == "running":
-                        log("实例已运行")
-                        break
-                else:
-                    raise RuntimeError("等待实例 running 超时")
-
-            # ---- ③ 等 ComfyUI ----
-            _set(job_id, status="ready")
-            base = resolve_base_url(logger=log)
+            _set(jid, stage="ready")
+            base = resolve_base_url(logger=lambda m: _log(jid, m))
             if not base:
                 raise RuntimeError("拿不到 ComfyUI 地址")
-            log("ComfyUI 地址：" + base)
-            if not comfy_ready(base, timeout=300, logger=log):
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
                 raise RuntimeError("ComfyUI 300s 内未就绪")
-            log("ComfyUI 已就绪")
+            _log(jid, "ComfyUI 已就绪")
+            _set(jid, stage="generating")
 
-            _set(job_id, status="generating")
             out_dir = GEN_DIR / str(article_id)
             out_dir.mkdir(parents=True, exist_ok=True)
-            done = 0
 
-            # ---- ④ 金句卡：AI 满版背景 + PIL 叠字 ----
+            # ④ 金句卡：AI 满版背景 + PIL 叠字
             if quotes:
                 cw, ch = SIZES.get(card_size, SIZES["xiaohongshu"])
                 for i, q in enumerate(quotes):
+                    if jobstore.canceled(jid):
+                        raise RuntimeError("已取消")
                     bgp = _with_style(q.get("bg") or FALLBACK_BG, style)
-                    log("金句卡 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
+                    _log(jid, "金句卡 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
                     fn, sub, meta = comfy_generate(base, bgp, cw, ch,
                                                    "qcbg_%d_%d" % (article_id, i), cfg)
                     bg = comfy_download(base, fn, sub)
-                    card = compose_card_over_bg(bg, q["text"],
-                                                size=card_size, qr_link=None)
-                    name = "qa_%02d_%s.png" % (i + 1,
-                                               hashlib.md5(card.tobytes()).hexdigest()[:6])
+                    card = compose_card_over_bg(bg, q["text"], size=card_size, qr_link=None)
+                    name = "qa_%02d_%s.png" % (i + 1, hashlib.md5(card.tobytes()).hexdigest()[:6])
                     card.save(str(out_dir / name), "PNG", optimize=True)
                     card_urls.append("/static/generated/%d/%s" % (article_id, name))
                     done += 1
-                    with JOBS_LOCK:
-                        if job_id in JOBS:
-                            JOBS[job_id]["done"] = done
-                            JOBS[job_id]["images"] = list(card_urls + scene_urls)
-                    log("金句卡 %d 完成 → %s" % (i + 1, name))
-                    _log_gen_meta(log, article_id, name, "card", meta, style)
+                    _set(jid, done=done, images=list(card_urls + scene_urls))
+                    _log(jid, "金句卡 %d 完成 → %s" % (i + 1, name))
+                    _log_gen_meta(lambda m: _log(jid, m), article_id, name, "card", meta, style)
 
-            # ---- ⑤ 场景配图：纯画面 ----
+            # ⑤ 场景/画面：纯出图
             for i, s in enumerate(scenes):
+                if jobstore.canceled(jid):
+                    raise RuntimeError("已取消")
                 w, h = ASPECT_SIZE.get(s["aspect"], ASPECT_SIZE["3:4"])
                 sp = _with_style(s["prompt"], style)
-                log("场景图 %d/%d 生成中（%s → %dx%d）…"
-                    % (i + 1, len(scenes), s["aspect"], w, h))
-                fn, sub, meta = comfy_generate(base, sp, w, h,
-                                               "zl_%d_%d" % (article_id, i), cfg)
+                _log(jid, "画面 %d/%d 生成中（%s → %dx%d）…"
+                     % (i + 1, len(scenes), s["aspect"], w, h))
+                fn, sub, meta = comfy_generate(base, sp, w, h, "zl_%d_%d" % (article_id, i), cfg)
                 data = comfy_download(base, fn, sub)
                 name = "ai_%02d_%s.png" % (i, hashlib.md5(data).hexdigest()[:6])
                 (out_dir / name).write_bytes(data)
                 scene_urls.append("/static/generated/%d/%s" % (article_id, name))
                 done += 1
-                with JOBS_LOCK:
-                    if job_id in JOBS:
-                        JOBS[job_id]["done"] = done
-                        JOBS[job_id]["images"] = list(card_urls + scene_urls)
-                log("场景图 %d 完成 → %s" % (i + 1, name))
-                _log_gen_meta(log, article_id, name, "scene", meta, style)
+                _set(jid, done=done, images=list(card_urls + scene_urls))
+                _log(jid, "画面 %d 完成 → %s" % (i + 1, name))
+                _log_gen_meta(lambda m: _log(jid, m), article_id, name, "scene", meta, style)
 
-            # ---- ⑥ 二维码图（跟金句卡同组）----
+            # ⑥ 二维码图（跟金句卡同组）
             if card_urls and link:
                 qimg = make_qrcode(link, box=400)
                 qname = "qr_%s.png" % hashlib.md5(link.encode("utf-8")).hexdigest()[:6]
                 qimg.save(str(out_dir / qname), "PNG", optimize=True)
                 card_urls.append("/static/generated/%d/%s" % (article_id, qname))
 
-            # ---- ⑦ 入库：只替换本次生成的组 ----
+            # ⑦ 入库：只替换本次生成的组
             if card_urls:
                 _merge_images(article_id, card_urls, drop_prefix=["qa_", "qr_", "auto_"])
             if scene_urls:
                 _merge_images(article_id, scene_urls, drop_prefix=["ai_"])
-            with JOBS_LOCK:
-                if job_id in JOBS:
-                    JOBS[job_id]["images"] = list(card_urls + scene_urls)
-                    JOBS[job_id]["done"] = total
-            _set(job_id, status="done", finished_at=time.time())
-            log("全部完成：金句卡 %d 张 · 场景图 %d 张" % (len(quotes), len(scenes)))
-
+            _set(jid, images=list(card_urls + scene_urls), done=total)
+            _log(jid, "全部完成：金句卡 %d 张 · 画面 %d 张" % (len(quotes), len(scenes)))
         except Exception as e:
-            log("❌ 生成失败：%s" % str(e)[:220])
-            # 失败策略：不动任何已有配图，只清理本次已落盘但未入库的残留
+            _log(jid, "❌ 生成失败：%s" % str(e)[:220])
             removed = 0
             for u in list(card_urls) + list(scene_urls):
                 try:
@@ -1258,19 +1283,15 @@ def _generate_worker(job_id, article_id, opts, llm_cfg, card_size, card_want, sc
                 except Exception:
                     pass
             if removed:
-                log("已清理本次未入库的残留图 %d 张" % removed)
-            log("已有配图未做任何改动。")
-            _set(job_id, status="failed", finished_at=time.time(),
-                 error="%s: %s" % (type(e).__name__, e))
+                _log(jid, "已清理本次未入库的残留图 %d 张" % removed)
+            _log(jid, "已有配图未做任何改动。")
+            raise RuntimeError(str(e)[:300])
         finally:
-            try:
-                if opts.get("plan_only"):
-                    pass
-                elif get_comfy_config().get("comfy_auto_shutdown", "1") == "1":
-                    log("任务结束，关闭实例…")
-                    r = adl_power_off()
-                    log("关机结果：" + str(r.get("code") or r)[:80])
-                else:
-                    log("自动关机已关闭，实例保持运行")
-            except Exception as e:
-                log("关机异常：" + str(e)[:200])
+            _shutdown_if_idle(jid, lambda m: _log(jid, m))
+
+
+def register_jobs():
+    """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
+    jobstore.DISPATCHER.register("images", run_images_job, 1)           # 一块 GPU：串行
+    jobstore.DISPATCHER.register("plan", run_plan_job, get_job_parallel)
+    jobstore.DISPATCHER.start()

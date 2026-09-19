@@ -42,7 +42,8 @@ LLM_DEFAULTS = {
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
-                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt)
+                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs)
+import jobs as jobstore
 
 # ============================================================
 # 工具函数
@@ -127,6 +128,18 @@ def init_db():
 
 if not os.environ.get('TEST_DATABASE'):
     init_db()
+    jobstore.init()                       # 任务表（持久化，重启不丢）
+    _orphans = jobstore.recover_orphans()  # 上次残留的排队/运行中任务 → 被中断
+    register_jobs()                        # 注册各任务执行体 + 启动调度器
+    if _orphans:
+        print("🔧 启动自检：%d 个残留任务已标记为「被中断」" % _orphans)
+        # 上次有任务被中断 → 实例可能还开着，自检关机（防漏计费）
+        try:
+            if jobstore.queued_count("images") == 0 and (adl_status().get("data") or "") == "running":
+                print("  实例仍在运行且无排队任务 → 关机：",
+                      shutdown_instance().get("msg"))
+        except Exception as _e:
+            print("  启动自检关机失败：", str(_e)[:120])
 
 # ============================================================
 # 内容库(content.db)连接
@@ -844,8 +857,32 @@ def api_illustrate_job(job_id):
     """查询生成任务进度"""
     j = get_job(job_id)
     if not j:
-        return jsonify({"error": "任务不存在或已过期"}), 404
+        return jsonify({"error": "任务不存在（可能已被清理）"}), 404
+    j["log"] = j.get("log_lines") or []
     return jsonify(dict(ok=True, **j))
+
+
+@app.route('/api/jobs')
+def api_jobs():
+    """任务列表：active=1 只看排队/进行中；article_id 过滤；默认最近 20 条"""
+    active = request.args.get('active') in ('1', 'true', 'yes')
+    aid = request.args.get('article_id')
+    try:
+        limit = max(1, min(100, int(request.args.get('limit') or 20)))
+    except Exception:
+        limit = 20
+    out = []
+    for j in jobstore.list_jobs(active=active, article_id=int(aid) if aid else None, limit=limit):
+        j["log"] = j.get("log_lines") or []
+        out.append(j)
+    return jsonify({"ok": True, "jobs": out, "summary": jobstore.active_summary()})
+
+
+@app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
+def api_job_cancel(job_id):
+    """取消任务：排队中直接撤销；进行中的出图任务会中断"""
+    job_ok = jobstore.cancel(job_id)
+    return jsonify({"ok": job_ok, "error": "" if job_ok else "任务不存在或已结束"})
 
 
 @app.route('/api/illustrate/rewrite-item', methods=['POST'])

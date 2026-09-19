@@ -884,7 +884,8 @@ REWRITE_PROMPT = (
     "你是自媒体配图策划专家。下面这条【{kind_label}】的配图描述不理想，请只重写这一条，"
     "其它条目一律不要改动。\n\n"
     "当前条目（type={itype} · 画幅 {aspect}）：\n{current}\n\n"
-    "要求：{requirement}\n"
+    "要求：换一个与当前明显不同的构思或意象（不要只改写措辞、不要沿用当前意象）；"
+    "图上文字保持简短（主标题≤12字、副标题≤18字、金句≤28字、要点≤16字）；图型与画幅不变。\n"
     "{palette}"
     "{hint}"
     "文案标题：{title}\n"
@@ -892,17 +893,7 @@ REWRITE_PROMPT = (
     "严格输出 JSON（不要输出多余文字）：{shape}"
 )
 
-# 各图型的重写要求与输出形状（texts 是数组）
-REWRITE_REQ = {
-    "cover": "封面卡：主标题 ≤12 字 + 副标题 ≤18 字，抓一眼就想点开；bg 换成完全不同的氛围/意象背景"
-             "（只画背景，画面中不要出现任何文字）。",
-    "quote": "金句卡：换一句与当前不同的金句（≤28 字，不要 emoji、不要话题标签）；bg 换成完全不同的"
-             "氛围/意象背景（不要沿用当前意象），画面中不要出现任何文字。",
-    "points": "要点卡：标题 ≤14 字 + 3-5 条要点（每条 ≤16 字，是同一主题下的并列要点）；bg 换成完全"
-              "不同的氛围/意象背景，画面中不要出现任何文字。",
-    "photo": "纯画面：换一个完全不同的画面构思（不要沿用当前构思）；画面中不要出现任何文字；"
-             "texts 必须是空数组。",
-}
+# 各图型的输出形状（texts 的条数即结构，程序按它解析）
 REWRITE_SHAPE = {
     "cover": '{"cn":"中文画面描述","texts":["主标题","副标题"],"bg":"english background prompt"}',
     "quote": '{"cn":"中文画面描述","texts":["金句"],"bg":"english background prompt"}',
@@ -948,7 +939,6 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
               .replace("{itype}", itype)
               .replace("{aspect}", item.get("aspect") or "3:4")
               .replace("{current}", cur)
-              .replace("{requirement}", REWRITE_REQ.get(itype, REWRITE_REQ["quote"]))
               .replace("{palette}", palette)
               .replace("{hint}", ("额外要求（优先满足）：%s\n" % h) if h else "")
               .replace("{title}", title)

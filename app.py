@@ -131,10 +131,26 @@ def init_db():
     conn.commit()
     conn.close()
 
+def _ensure_article_owner_cols():
+    """文案表补归属列（幂等；只 ADD COLUMN，不动任何旧数据）"""
+    try:
+        # 注意：CONTENT_DATABASE 在文件更后面才定义，此处必须自算路径
+        c = sqlite3.connect(str(DATA_DIR / "content.db"), timeout=10)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(articles)").fetchall()}
+        for name, ddl in (("owner_id", "INTEGER"), ("owner", "TEXT DEFAULT ''")):
+            if name not in cols:
+                c.execute("ALTER TABLE articles ADD COLUMN %s %s" % (name, ddl))
+        c.commit()
+        c.close()
+    except Exception as e:
+        print("  ⚠️ 文案归属列初始化失败：", str(e)[:120])
+
+
 if not os.environ.get('TEST_DATABASE'):
     init_db()
     jobstore.init()                       # 任务表（持久化，重启不丢）
     materialstore.init()                  # 素材表：建表 + 补 owner_id/owner 列（可空，不动旧数据）
+    _ensure_article_owner_cols()          # 文案表：补 owner_id/owner 列（幂等，不动旧数据）
     _orphans = jobstore.recover_orphans()  # 上次残留的排队/运行中任务 → 被中断
     register_jobs()                        # 注册各任务执行体 + 启动调度器
     if _orphans:
@@ -265,6 +281,59 @@ def _can_cancel(j, me_id, me_name):
     if oid:
         return bool(me_id) and oid == str(me_id)
     return bool(me_name) and (j.get("owner") or "") == me_name
+
+
+def _is_admin(u=None):
+    """管理员豁免：可查看/编辑全部文案与素材"""
+    u = u if u is not None else current_user()
+    return (u.get("role") or "") == "admin"
+
+
+def _article_owner(article_id):
+    """(owner_id, owner) —— 文案归属；老数据无归属返回 (None, '')"""
+    try:
+        r = get_content_db().execute('SELECT owner_id, owner FROM articles WHERE id=?',
+                                     (int(article_id),)).fetchone()
+        if r:
+            return (r["owner_id"], r["owner"] or "")
+    except Exception:
+        pass
+    return (None, "")
+
+
+def _can_access_article(article_id, u=None):
+    """文案可见性：admin 全部；其余仅本人；老数据（owner_id 为空）仅 admin 可见"""
+    u = u if u is not None else current_user()
+    if _is_admin(u):
+        return True
+    oid = _article_owner(article_id)[0]
+    if oid is None:
+        return False
+    try:
+        return int(oid) == int(u.get("id"))
+    except Exception:
+        return False
+
+
+def _guard_article(article_id):
+    """越权统一按「不存在」处理（不泄漏他人文案是否存在）；通过 → None"""
+    if _can_access_article(article_id):
+        return None
+    return jsonify({"error": "文案不存在"}), 404
+
+
+def _denied_page():
+    """页面越权/不存在时的极简提示页"""
+    return ('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+            '<title>文案不存在</title></head>'
+            '<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;'
+            'background:#f8fafc;font-family:-apple-system,\'PingFang SC\',sans-serif;color:#1e293b">'
+            '<div style="text-align:center"><div style="font-size:44px;margin-bottom:14px">🔒</div>'
+            '<div style="font-size:17px;font-weight:600;margin-bottom:10px">文案不存在或无权访问</div>'
+            '<div style="color:#64748b;font-size:13px;margin-bottom:22px">只能查看自己创建的内容</div>'
+            '<a href="/articles" style="color:#7c3aed;font-size:14px;text-decoration:none">← 返回文案列表</a>'
+            '</div></body></html>'), 404
 
 
 def _job_duration(j):
@@ -424,6 +493,11 @@ def api_list_articles():
     if line:
         where.append("IFNULL(NULLIF(service_line,''),'lingxiu')=?"); args.append(line)  # 老数据无 service_line → 视为灵性书籍
     sql = 'SELECT * FROM articles'
+    _u = current_user()
+    if not _is_admin(_u):
+        # 数据隔离：只看自己的；老数据（owner_id 为空）只有 admin 能看
+        where.append('owner_id = ?')
+        args.append((_u or {}).get('id'))
     if where:
         sql += ' WHERE ' + ' AND '.join(where)
     rows = db.execute(sql + ' ORDER BY created_at DESC', args).fetchall()
@@ -432,6 +506,9 @@ def api_list_articles():
 @app.route('/api/articles/<int:article_id>')
 def api_get_article(article_id):
     """文章详情"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     db = get_content_db()
     row = db.execute('SELECT * FROM articles WHERE id=?', (article_id,)).fetchone()
     if not row:
@@ -445,11 +522,12 @@ def api_create_article():
     db = get_content_db()
     content_md = data.get('content_md', '')
     word_count = len(content_md.replace(' ', '').replace('\n', ''))
+    _u = current_user()
     cursor = db.execute('''
         INSERT INTO articles (title, book, topic, angle, structure, hook, tone,
                               content_md, content_html, summary, tags, word_count,
-                              status, source, file_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              status, source, file_path, owner_id, owner)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         data.get('title', '无标题'),
         data.get('book', ''),
@@ -466,6 +544,8 @@ def api_create_article():
         data.get('status', 'pending'),
         data.get('source', 'ai'),
         data.get('file_path', ''),
+        (_u or {}).get('id'),
+        user_label(_u),
     ))
     db.commit()
     return jsonify({"ok": True, "id": cursor.lastrowid})
@@ -473,6 +553,9 @@ def api_create_article():
 @app.route('/api/articles/<int:article_id>', methods=['PUT'])
 def api_update_article(article_id):
     """更新文章（状态/内容）"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     data = request.json
     db = get_content_db()
     row = db.execute('SELECT id FROM articles WHERE id=?', (article_id,)).fetchone()
@@ -497,6 +580,9 @@ def api_update_article(article_id):
 @app.route('/api/articles/<int:article_id>/status', methods=['POST'])
 def api_update_article_status(article_id):
     """更新文章状态"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     data = request.json
     status = data.get('status')
     if status not in ('pending', 'approved', 'rejected', 'published'):
@@ -509,6 +595,9 @@ def api_update_article_status(article_id):
 @app.route('/api/articles/<int:article_id>', methods=['DELETE'])
 def api_delete_article(article_id):
     """删除文章（同时清理该文章生成的配图目录）"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     db = get_content_db()
     db.execute('DELETE FROM articles WHERE id=?', (article_id,))
     db.commit()
@@ -678,6 +767,9 @@ def api_rewrite_article(article_id):
     data = request.json or {}
     platform = data.get('platform') or 'wechat'
     content_type = data.get('content_type') or 'article'
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     db = get_content_db()
     row = db.execute('SELECT * FROM articles WHERE id=?', (article_id,)).fetchone()
     if not row:
@@ -725,12 +817,14 @@ def api_rewrite_article(article_id):
     wc = len(content_md.replace(' ', '').replace('\n', ''))
     cur = db.execute("INSERT INTO articles (title, platform, content_type, book, topic, angle,"
                      " structure, hook, tone, content_md, summary, tags, word_count,"
-                     " status, source, promo_uid, promo_src, promo_link, service_line)"
-                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?)",
+                     " status, source, promo_uid, promo_src, promo_link, service_line,"
+                     " owner_id, owner)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?, ?)",
                      (art.get('title', '未命名'), platform, content_type, src.get('book'), src.get('topic'),
                       src.get('angle'), src.get('structure'), src.get('hook'), src.get('tone'),
                       content_md, art.get('summary', ''), art.get('tags', ''), wc,
-                      src.get('promo_uid'), src.get('promo_src'), promo_link or None, line))
+                      src.get('promo_uid'), src.get('promo_src'), promo_link or None, line,
+                      src.get('owner_id'), src.get('owner') or ''))
     db.commit()
     return jsonify({"ok": True, "id": cur.lastrowid, "title": art.get('title', '未命名'),
                     "word_count": wc, "from": article_id})
@@ -894,12 +988,13 @@ def api_generate_article():
         word_count = len(content_md.replace(' ', '').replace('\n', ''))
 
         db = get_content_db()
+        _u = current_user()
         cursor = db.execute('''
             INSERT INTO articles (title, platform, content_type, book, topic, angle,
                                   structure, hook, tone, content_md, summary, tags,
                                   word_count, status, source, promo_uid, promo_src, promo_link,
-                                  service_line)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?)
+                                  service_line, owner_id, owner)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?, ?)
         ''', (
             article_data.get('title', '未命名'),
             platform, content_type,
@@ -910,6 +1005,8 @@ def api_generate_article():
             word_count,
             promo_uid or None, promo_src, promo_link or None,
             line,
+            (_u or {}).get('id'),
+            user_label(_u),
         ))
         db.commit()
 
@@ -951,13 +1048,17 @@ def api_save_settings():
 def api_list_video_plans():
     """视频计划列表"""
     db = get_content_db()
-    rows = db.execute('''
+    _u = current_user()
+    _sql = '''
         SELECT v.*, a.title as article_title, a.platform, a.content_type
         FROM video_plans v
-        LEFT JOIN articles a ON v.article_id = a.id
-        ORDER BY v.updated_at DESC, v.created_at DESC
-        LIMIT 200
-    ''').fetchall()
+        LEFT JOIN articles a ON v.article_id = a.id'''
+    _args = []
+    if not _is_admin(_u):
+        _sql += ' WHERE a.owner_id = ?'
+        _args.append((_u or {}).get('id'))
+    rows = db.execute(_sql + ' ORDER BY v.updated_at DESC, v.created_at DESC LIMIT 200',
+                      _args).fetchall()
     return jsonify([dict(r) for r in rows])
 
 @app.route('/api/video-plans', methods=['POST'])
@@ -967,6 +1068,9 @@ def api_create_video_plan():
     article_id = data.get('article_id')
     if not article_id:
         return jsonify({"error": "article_id 必填"}), 400
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     db = get_content_db()
     existing = db.execute('SELECT id FROM video_plans WHERE article_id=?', (article_id,)).fetchone()
     if existing:
@@ -984,6 +1088,9 @@ def api_get_video_plan(plan_id):
     row = db.execute('SELECT * FROM video_plans WHERE id=?', (plan_id,)).fetchone()
     if not row:
         return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row['article_id'])
+    if _g:
+        return _g
     return jsonify(dict(row))
 
 @app.route('/api/video-plans/<int:plan_id>', methods=['PUT'])
@@ -991,6 +1098,12 @@ def api_update_video_plan(plan_id):
     """保存脚本 / 分镜 / 状态"""
     data = request.json or {}
     db = get_content_db()
+    _row = db.execute('SELECT article_id FROM video_plans WHERE id=?', (plan_id,)).fetchone()
+    if not _row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(_row['article_id'])
+    if _g:
+        return _g
     sets, vals = [], []
     for f in ('script', 'storyboard', 'status', 'title'):
         if f in data:
@@ -1007,6 +1120,13 @@ def api_update_video_plan(plan_id):
 @app.route('/video-plan/<int:plan_id>')
 def video_plan_page(plan_id):
     """分镜脚本编辑页"""
+    try:
+        _row = get_content_db().execute('SELECT article_id FROM video_plans WHERE id=?',
+                                        (plan_id,)).fetchone()
+    except Exception:
+        _row = None
+    if not _row or not _can_access_article(_row['article_id']):
+        return _denied_page()
     return render_template('video_plan.html', plan_id=plan_id)
 
 # ============================================================
@@ -1017,9 +1137,36 @@ GEN_DIR = BASE_DIR / 'static' / 'generated'
 GEN_DIR.mkdir(parents=True, exist_ok=True)
 
 
+@app.route('/static/generated/<path:sub>', endpoint='generated_file')
+def generated_file(sub):
+    """配图/素材文件：登录用户只能取自己文案目录下的（admin 全部）"""
+    try:
+        p = (GEN_DIR / sub).resolve()
+        if not str(p).startswith(str(GEN_DIR.resolve())) or not p.is_file():
+            return '', 404
+    except Exception:
+        return '', 404
+    art = sub.split('/', 1)[0]
+    _u = current_user()
+    _url = '/static/generated/' + sub
+    if art.isdigit():
+        # 文章归属 或 素材归属 任一放行（推广员可能持有别人文案目录下的素材）
+        if not _can_access_article(int(art), _u) and \
+                not materialstore.can_view_url(_url, (_u or {}).get('id')):
+            return '', 404
+    elif not _is_admin(_u) and not materialstore.can_view_url(_url, (_u or {}).get('id')):
+        return '', 404
+    resp = send_file(str(p))
+    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    return resp
+
+
 @app.route('/api/articles/<int:article_id>/images', methods=['GET'])
 def api_get_article_images(article_id):
     """获取文案的配图列表"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     db = get_content_db()
     row = db.execute('SELECT images_json FROM articles WHERE id=?', (article_id,)).fetchone()
     if not row:
@@ -1052,6 +1199,9 @@ def api_save_plan_prompt():
 @app.route('/api/articles/<int:article_id>/illustrations/logs')
 def api_illustration_logs(article_id):
     """每张配图生成时提交的提示词与参数（出图排查用）"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     db = get_content_db()
     try:
         rows = db.execute(
@@ -1070,6 +1220,8 @@ def api_illustration_logs(article_id):
 @app.route('/illustrate/<int:article_id>')
 def illustrate_page(article_id):
     """配图编辑页"""
+    if not _can_access_article(article_id):
+        return _denied_page()
     return render_template('illustrate.html', article_id=article_id,
                            style_groups=style_groups(),
                            style_label_map=style_label_map())
@@ -1092,12 +1244,18 @@ PLATFORM_CARD = {
 @app.route('/api/articles/<int:article_id>/image-script', methods=['GET'])
 def api_get_image_script(article_id):
     """读取配图方案（金句组 + 场景组）"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     return jsonify({"ok": True, "plan": read_plan(article_id)})
 
 
 @app.route('/api/articles/<int:article_id>/image-script', methods=['POST'])
 def api_save_image_script(article_id):
     """保存配图方案"""
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     data = request.json or {}
     plan = data.get('plan')
     if not isinstance(plan, dict):
@@ -1115,6 +1273,9 @@ def api_illustrate_generate():
     article_id = data.get('article_id')
     if not article_id:
         return jsonify({"error": "缺少 article_id"}), 400
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     row = get_content_db().execute('SELECT platform FROM articles WHERE id=?',
                                    (int(article_id),)).fetchone()
     card_size, card_want = PLATFORM_CARD.get(
@@ -1238,6 +1399,9 @@ def api_rewrite_item():
         article_id = int(article_id)
     except Exception:
         return jsonify({"error": "index / article_id 必须是数字"}), 400
+    _g = _guard_article(article_id)
+    if _g:
+        return _g
     item, err = rewrite_plan_item(article_id, index,
                                   data.get('hint') or '', get_llm_config())
     if err:
@@ -1410,8 +1574,9 @@ def api_get_library():
     """素材库：我的素材（含历史未归属的老素材）/ 平台共享（暂未启用）"""
     library_type = request.args.get('type', 'all')     # all / image / audio / video
     scope = request.args.get('scope', 'mine')          # mine / shared
-    uid = (current_user() or {}).get('id')
-    return jsonify(materialstore.list_for(uid=uid, mtype=library_type, scope=scope))
+    u = current_user()
+    return jsonify(materialstore.list_for(uid=(u or {}).get('id'), mtype=library_type,
+                                          scope=scope, is_admin=_is_admin(u)))
 
 
 @app.route('/api/materials/options')
@@ -1423,7 +1588,11 @@ def api_materials_options():
 @app.route('/api/materials/thumb')
 def api_materials_thumb():
     """素材缩略图（网格用，360px）：避免列表页直接加载几 MB 原图"""
-    p = materialstore.url_to_path(request.args.get('u') or '')
+    u = current_user()
+    url_arg = request.args.get('u') or ''
+    if not _is_admin(u) and not materialstore.can_view_url(url_arg, (u or {}).get('id')):
+        return '', 404
+    p = materialstore.url_to_path(url_arg)
     if not p or not p.is_file():
         return '', 404
     t = materialstore.ensure_thumb(p)
@@ -1464,7 +1633,7 @@ def api_materials_delete():
     mid = body.get('id')
     if not mid:
         return jsonify({"error": "缺少 id"}), 400
-    r = materialstore.delete_material(mid, uid=u.get('id'))
+    r = materialstore.delete_material(mid, uid=u.get('id'), is_admin=_is_admin(u))
     if not r.get('ok'):
         return jsonify(r), (r.get('code') or 400)
     return jsonify(r)
@@ -1486,10 +1655,15 @@ def api_materials_process():
     if len(rows) != len(ids):
         return jsonify({"error": "部分素材不存在或已删除，请刷新"}), 400
     uid = u.get('id')
-    for r in rows:                       # 越权保护：只能加工自己的（或历史未归属的）
-        own = r.get('owner_id')
-        if own is not None and (not uid or int(own) != int(uid)):
-            return jsonify({"error": "只能加工自己的素材"}), 403
+    if not _is_admin(u):                 # 越权保护：只能加工自己的（admin 豁免）
+        for r in rows:
+            own = r.get('owner_id')
+            try:
+                same = own is not None and int(own) == int(uid)
+            except Exception:
+                same = False
+            if not same:
+                return jsonify({"error": "只能加工自己的素材"}), 403
     err = materialstore.validate(action, rows, params)
     if err:
         return jsonify({"error": err}), 400

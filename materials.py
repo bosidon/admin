@@ -244,6 +244,43 @@ def _job_owner(article_id):
     return (None, "")
 
 
+def article_owner_uid(article_id):
+    """文案归属 uid（content.db articles.owner_id）；老数据无归属 → None"""
+    try:
+        c = sqlite3.connect(CONTENT_DB, timeout=10)
+        r = c.execute("SELECT owner_id FROM articles WHERE id=?", (int(article_id),)).fetchone()
+        c.close()
+        if r:
+            return _norm_uid(r[0])
+    except Exception:
+        pass
+    return None
+
+
+def can_view_url(url, uid):
+    """按素材 URL 判断该用户能否查看（admin 由调用方豁免）"""
+    url = (url or "").split("?")[0]
+    if not url:
+        return False
+    uid = _norm_uid(uid)
+    try:
+        c = _conn()
+        r = c.execute("SELECT owner_id, article_id FROM materials WHERE file_path=?", (url,)).fetchone()
+        c.close()
+    except Exception:
+        r = None
+    if r:
+        own = _norm_uid(r["owner_id"])
+        if own is None:                       # 老数据无归属 → 仅 admin（上层已放行）
+            return False
+        return own == uid
+    # 未入库的文件（新生成还没 sync / 缩略图缓存）→ 按文案归属判定
+    parts = url.split("/")
+    if len(parts) >= 4 and parts[1] == "static" and parts[2] == "generated" and parts[3].isdigit():
+        return article_owner_uid(parts[3]) == uid
+    return False
+
+
 def _label(title, stem):
     t = (title or "").strip()
     if not t:
@@ -299,15 +336,17 @@ def get_material(mid):
     return dict(r) if r else None
 
 
-def list_for(uid=None, mtype="all", scope="mine", limit=200):
-    """素材列表：mine = 我的 + 未归属的历史素材；shared = 平台共享（暂未启用）"""
+def list_for(uid=None, mtype="all", scope="mine", limit=200, is_admin=False):
+    """素材列表：mine = 只有自己的（老数据无归属 → 仅 admin）；shared = 平台共享（暂未启用）"""
     c = _conn()
     where, args = ["status = 'approved'"], []
     if scope == "shared":
         where.append("scope = 'shared'")
+    elif is_admin:
+        pass                                   # admin 看全部
     else:
-        where.append("(owner_id IS NULL OR owner_id = ?)")
-        args.append(int(uid or 0))
+        where.append("owner_id = ?")
+        args.append(int(_norm_uid(uid) or 0))
     if mtype and mtype != "all":
         where.append("type = ?")
         args.append(mtype)
@@ -317,15 +356,15 @@ def list_for(uid=None, mtype="all", scope="mine", limit=200):
     return [dict(r) for r in rows]
 
 
-def delete_material(mid, uid=None):
-    """删除素材：只允许删自己的（或历史未归属的）；同时删磁盘文件"""
+def delete_material(mid, uid=None, is_admin=False):
+    """删除素材：只允许删自己的（admin 豁免）；同时删磁盘文件"""
     c = _conn()
     r = c.execute("SELECT * FROM materials WHERE id=?", (int(mid),)).fetchone()
     if not r:
         c.close()
         return {"ok": False, "error": "素材不存在"}
-    own = r["owner_id"]
-    if own is not None and int(own) != int(uid or 0):
+    own = _norm_uid(r["owner_id"])
+    if not is_admin and own != _norm_uid(uid):
         c.close()
         return {"ok": False, "error": "只能删除自己的素材", "code": 403}
     path = url_to_path(r["file_path"])
@@ -352,8 +391,12 @@ def sync_article_images(article_id, owner_id=None, owner=""):
         return 0
     title, line = _article_meta(article_id)
     owner_id = _norm_uid(owner_id)
-    if owner_id is None:
-        owner_id, owner = _job_owner(article_id)
+    if owner_id is None:                      # 没传 → 跟文案归属，再回落历史任务
+        owner_id = article_owner_uid(article_id)
+        if owner_id is not None:
+            owner = ""
+        else:
+            owner_id, owner = _job_owner(article_id)
     n = 0
     for p in sorted(d.iterdir()):
         if not p.is_file() or p.suffix.lower() not in IMG_EXT:
@@ -377,7 +420,11 @@ def backfill():
         out["dirs"] += 1
         aid = int(d.name)
         title, line = _article_meta(aid)
-        oid, onm = _job_owner(aid)
+        oid = article_owner_uid(aid)
+        if oid is not None:
+            onm = ""
+        else:
+            oid, onm = _job_owner(aid)
         for p in sorted(d.iterdir()):
             if not p.is_file():
                 continue

@@ -121,15 +121,15 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 出图后端是 AutoDL ComfyUI（Qwen-Image），据此：
 
-- **提示词英文优先**：`bg` 必须是英文提示词（本套模型的文本编码器 Qwen2.5-VL 双语可读，英文是为了命中率与风格稳定）。中文只写在 `texts`（图上文字）与 `cn`（给人看的中文画面描述）里
+- **提示词英文优先**：`bg` 以英文为主（本套模型的文本编码器 Qwen2.5-VL 双语可读，英文是为了命中率与风格稳定）；要让 AI 直接画中文文字时，在 `bg` 里原样写出那段中文。中文画面描述写 `cn`，图上文字写 `texts`
 - **画幅 5 选 1**：`3:4`（小红书/封面）· `1:1`（朋友圈/知乎/微博）· `9:16`（抖音/快手/视频号/直播）· `16:9`（长视频/B站/公众号内页）· `2.35:1`（公众号头图）
 - **配色 4 选 1**（写进 `style`）：`purple` 深紫·灵性塔罗 · `dark` 玄黑·心理哲思 · `gold` 米金·疗愈温柔 · `maya` 青绿·玛雅图腾
 - **4 种图型**（每张图必须标 `type`）：
-  - `cover` 封面卡：主标题 + 副标题（可加时间/地点），AI 出满版背景，文字由程序精确叠加
+  - `cover` 封面卡：主标题 + 副标题（可加时间/地点），AI 出满版背景，文字由程序叠加（也可让 AI 直接画在画面里）
   - `quote` 金句卡：一句金句，居中大字
   - `points` 要点卡：标题 + 3-5 条编号要点
-  - `photo` 纯画面：画面里不得出现任何文字
-- **凡要在图上出现的中文，一律放 `texts` 数组，绝不让 AI 去画文字**
+  - `photo` 纯画面：以画面为主，可以不含文字，也可以让 AI 直接画出少量文字
+- **图上文字两条路都可用**：写进 `texts`（由程序精确叠加，**要求中文准确时优先用这条**），或直接在 `bg` 里描述让 AI 画出来（适合装饰性文字、字母/英文、艺术字形）。**同一段文字不要既写 `texts` 又写进 `bg`**（会叠两遍）
 - **文字上限**：cover 主标题 ≤ 12 字 + 副标题 ≤ 18 字；quote ≤ 28 字；points 标题 ≤ 14 字、每条要点 ≤ 16 字；整张不超过 5 行
 - **`texts` 里只写正文，不要写序号或项目符号**（「1.」「一、」「·」一律不要，编号由程序自动加）
 - **数量与配比由你定**：按平台 + 文案类型给合理张数与图型配比，可以是 0 张，不要凑数
@@ -177,7 +177,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 # 生图提示词公式
 
-英文：主体 + 动作/状态 + 场景 + 构图 + 镜头 + 光线 + 色彩 + 风格 + 材质 + 情绪 + 画质 + `no text, no letters, no watermark`（画幅由系统按 `aspect` 设定，不用写 `--ar` 之类的工具参数）
+英文：主体 + 动作/状态 + 场景 + 构图 + 镜头 + 光线 + 色彩 + 风格 + 材质 + 情绪 + 画质（画幅由系统按 `aspect` 设定，不用写 `--ar` 之类的工具参数）；**画面不需要任何文字时**，再追加 `no text, no letters, no watermark`
 
 中文：一句话说清画面（10-40 字），要具体、可画、能一眼判断画面对不对
 
@@ -216,7 +216,7 @@ PLAN_PROMPT_DEFAULT = """# 角色
 - `texts`：数组。cover = [主标题, 副标题]；quote = [金句]；points = [标题, 要点1, 要点2…]；photo = []
 - `section` / `at`：视频类填段落（镜号）与时间点，如 `"第2段"`、`"00:45"`；图文类填 `""`
 - `cn`：中文画面描述，10-40 字，给人看
-- `bg`：英文提示词，画面中不得出现任何文字
+- `bg`：英文提示词；要让 AI 画进画面的文字可用自然语言描述（中英文都可）。**中文文字建议同时写进 `texts`**（AI 画中文容易出错，程序叠字更稳）
 - `style`：只能 4 选 1
 - `note`：全部中文、简洁；`note` 不参与出图，只给人看
 
@@ -234,14 +234,28 @@ PLAN_PROMPT_DEFAULT = """# 角色
 
 # 用户消息模板：本次任务参数（System Prompt 里不出现占位符）
 PLAN_USER_TEMPLATE = (
-    "【本次任务】\n"
-    "平台：{platform}\n"
-    "文案类型：{ctype}\n"
-    "画幅按「平台适配」自己定；数量与图型配比按「文案类型档位」自己定（可以是 0 张）。\n"
-    "配色 4 选 1（写进 style）。\n"
-    "严格按「输出格式」只回一个 JSON 对象。\n\n"
-    "文案标题：{title}\n"
-    "文案正文：\n{content}"
+    "## 任务\n"
+    "为下面这篇自媒体文案产出配图方案。\n"
+    "\n"
+    "## 输入参数\n"
+    "- 平台：{platform}（id: {platform_id}）\n"
+    "- 文案类型：{ctype}\n"
+    "- 文案标题：{title}\n"
+    "\n"
+    "## 文案正文\n"
+    "<<<CONTENT\n"
+    "{content}\n"
+    "CONTENT\n"
+    "\n"
+    "## 输出要求\n"
+    "- 只输出一个 JSON 对象（不要 Markdown、不要解释、不要代码块围栏）\n"
+    "- 顶层字段：style / platform / images / note / reason\n"
+    "- style ∈ {styles}\n"
+    "- images[].type ∈ {itypes}\n"
+    "- images[].aspect ∈ {aspects}\n"
+    "- images[].texts 为字符串数组；photo 类型的 texts 必须为空数组\n"
+    "- 数量与图型配比按系统提示词的「文案类型档位」自行决定（可以是 0 张）\n"
+    "- platform 填平台 id（如 xiaohongshu）"
 )
 
 # 平台标识 → 中文名（写进用户消息，让 LLM 能对上平台适配表）
@@ -840,7 +854,11 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0):
     ctype = (art.get("content_type") or "").strip()
     user_msg = (PLAN_USER_TEMPLATE
                 .replace("{platform}", PLATFORM_LABEL.get(plat, plat or "未指定"))
+                .replace("{platform_id}", plat or "未指定")
                 .replace("{ctype}", CTYPE_LABEL.get(ctype, ctype or "article 图文文章"))
+                .replace("{styles}", " | ".join(STYLE_PROMPT))
+                .replace("{itypes}", " | ".join(IMAGE_TYPES))
+                .replace("{aspects}", " | ".join(ASPECTS))
                 .replace("{title}", title)
                 .replace("{content}", content))
     j, err = _llm_json(url, key, model,

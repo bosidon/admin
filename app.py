@@ -455,12 +455,9 @@ def api_options():
     ]
     content_types = [
         {'id': 'article', 'name': '图文文章'},
-        {'id': 'xhs_note', 'name': '小红书笔记'},
         {'id': 'short_video', 'name': '短视频脚本'},
         {'id': 'long_video', 'name': '长视频脚本'},
         {'id': 'speech', 'name': '口播稿'},
-        {'id': 'podcast_script', 'name': '播客脚本'},
-        {'id': 'qa', 'name': '问答'},
     ]
 
     return jsonify({
@@ -484,6 +481,10 @@ def api_generate_article():
     promo_uid = data.get('promo_uid') or ''          # 推广人 uid
     promo_src = data.get('promo_src') or ('c' + str(int(time.time()))[-6:])   # 内容来源码
 
+    PLAT_NAME = {'wechat': '公众号', 'xiaohongshu': '小红书', 'video_account': '视频号',
+                 'douyin': '抖音', 'bilibili': 'B站', 'kuaishou': '快手',
+                 'podcast': '播客', 'zhihu': '知乎', 'toutiao': '头条'}
+
     # 读品牌指引
     guide_path = Path("/home/bosidon/projects/social-media/gongzhonghao/AGENT_GUIDE.md")
     guide = guide_path.read_text()[:3000] if guide_path.exists() else ''
@@ -492,14 +493,15 @@ def api_generate_article():
     type_specs = {
         'article': {
             'wechat':    '1000-2000字公众号长文',
-            'xiaohongshu': '500-1000字图文笔记',
+            'xiaohongshu': '300-1000字小红书笔记',
             'video_account': '800-1500字视频文案',
             'douyin':    '300-500字短视频文案',
             'bilibili':  '1500-3000字深度长文',
-        },
-        'xhs_note': {
-            'xiaohongshu': '300-800字小红书笔记，多用emoji，末尾加标签',
-            '_default':   '300-800字短笔记，多用emoji，末尾加标签',
+            'kuaishou':  '300-800字短视频文案',
+            'zhihu':     '800-2000字知乎回答',
+            'toutiao':   '800-1500字图文文章',
+            'podcast':   '800-2000字播客节目简介',
+            '_default':  '800-1500字图文文章',
         },
         'short_video': {
             'wechat':    '对应60-180秒视频的分镜脚本',
@@ -507,6 +509,7 @@ def api_generate_article():
             'douyin':    '对应15-60秒视频的分镜脚本',
             'xiaohongshu': '对应30-90秒视频的分镜脚本',
             'bilibili':  '对应1-3分钟视频的分镜脚本',
+            '_default':  '对应30-90秒视频的分镜脚本',
         },
         'long_video': {
             'wechat':    '对应3-10分钟视频的完整分镜脚本',
@@ -523,28 +526,33 @@ def api_generate_article():
     }
     type_format = {
         'article':    'Markdown格式，分段清晰',
-        'xhs_note':   'Markdown，多用emoji，末尾加标签',
         'short_video': '分镜格式，每段标注【画面】【台词】【时长】',
         'long_video':  '分镜格式，每段标注【画面】【台词】【时长】【转场】',
         'speech':     '口语化，标注语气停顿和重音',
     }
+    # 平台覆盖：小红书按「笔记体」输出（原 xhs_note 的写法，已合并进图文文章）
+    fmt_platform = {
+        'xiaohongshu': '短句分段，多用 emoji，正文不用 Markdown 标题层级，末尾加标签',
+    }
     type_label = {
-        'article': '图文文章', 'xhs_note': '小红书笔记',
-        'short_video': '短视频脚本', 'long_video': '长视频脚本', 'speech': '口播稿',
+        'article': '图文文章', 'short_video': '短视频脚本',
+        'long_video': '长视频脚本', 'speech': '口播稿',
     }
 
     spec_group = type_specs.get(content_type, type_specs['article'])
     word_spec = spec_group.get(platform, spec_group.get('_default', '1000-2000字'))
     fmt = type_format.get(content_type, 'Markdown格式')
-    label = type_label.get(content_type, content_type)
+    fmt = fmt_platform.get(platform, fmt)
+    label = type_label.get(content_type, type_label['article'])
 
+    plat_name = PLAT_NAME.get(platform, platform)
     prompt = f"""你是「仙宝心灵成长」的专职内容创作Agent。
 
 ## 任务
-生成一篇「{dict(wechat='公众号',xiaohongshu='小红书',video_account='视频号',douyin='抖音',bilibili='B站').get(platform, platform)}」平台的{label}。
+生成一篇「{plat_name}」平台的{label}。
 
 ## 参数
-- 自媒体平台：{dict(wechat='公众号',xiaohongshu='小红书',video_account='视频号',douyin='抖音',bilibili='B站').get(platform, platform)}
+- 自媒体平台：{plat_name}
 - 内容类型：{label}
 - 书目：{book or '自动选择'}
 - 话题：{topic or '自动选择'}

@@ -56,7 +56,7 @@ let currentFilter = '';
 let ALL_TOPICS = [];
 
 const PLATFORM_MAP = {wechat:'公众号',xiaohongshu:'小红书',video_account:'视频号',douyin:'抖音',bilibili:'B站',kuaishou:'快手',podcast:'播客',zhihu:'知乎',toutiao:'头条'};
-const CONTENT_TYPE_MAP = {'article':'📄 图文文章','xhs_note':'📕 小红书笔记','short_video':'🎬 短视频脚本','long_video':'📹 长视频脚本','speech':'🎤 口播稿','podcast_script':'🎙️ 播客脚本','qa':'💬 问答'};
+const CONTENT_TYPE_MAP = {'article':'📄 图文文章','short_video':'🎬 短视频脚本','long_video':'📹 长视频脚本','speech':'🎤 口播稿'};
 
 function formatCST(utcStr) {
     if (!utcStr) return '-';
@@ -141,24 +141,24 @@ async function showGenerate() {
     // 平台-类型联动映射
     const PLATFORM_TYPES = {
         'wechat': ['article', 'speech', 'long_video'],
-        'xiaohongshu': ['xhs_note', 'article'],
+        'xiaohongshu': ['article'],
         'video_account': ['short_video', 'speech', 'long_video'],
         'douyin': ['short_video', 'speech'],
         'bilibili': ['long_video', 'article'],
         'kuaishou': ['short_video', 'speech'],
-        'podcast': ['podcast_script', 'speech'],
-        'zhihu': ['qa', 'article'],
+        'podcast': ['speech', 'article'],
+        'zhihu': ['article', 'speech'],
         'toutiao': ['article', 'short_video'],
     };
     const DEFAULT_TYPE = {
         'wechat': 'article',
-        'xiaohongshu': 'xhs_note',
+        'xiaohongshu': 'article',
         'video_account': 'short_video',
         'douyin': 'short_video',
         'bilibili': 'long_video',
         'kuaishou': 'short_video',
-        'podcast': 'podcast_script',
-        'zhihu': 'qa',
+        'podcast': 'speech',
+        'zhihu': 'article',
         'toutiao': 'article',
     };
 
@@ -241,8 +241,8 @@ async function showGenerate() {
 
     // 平台+类型联动映射
     const DEFAULTS = {
-        'zhihu+qa': {structure:'qa', hook:'提问式', tone:'reflective'},
-        'podcast+podcast_script': {structure:'story', hook:'故事式', tone:'reflective'},
+        'zhihu+article': {structure:'qa', hook:'提问式', tone:'reflective'},
+        'podcast+speech': {structure:'story', hook:'故事式', tone:'reflective'},
         'douyin+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
         'kuaishou+short_video': {structure:'listicle', hook:'场景代入', tone:'energetic'},
         'wechat+article': {structure:'standard', hook:'金句开头', tone:'warm'},

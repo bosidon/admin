@@ -19,7 +19,7 @@
 {% block scripts %}
 <script>
 const PLATFORM_MAP = {wechat:'公众号', xiaohongshu:'小红书', video_account:'视频号', douyin:'抖音', bilibili:'B站', kuaishou:'快手', podcast:'播客', zhihu:'知乎', toutiao:'头条'};
-const CTYPE_MAP = {article:'图文文章', xhs_note:'小红书笔记', short_video:'短视频脚本', long_video:'长视频脚本', speech:'口播稿', podcast_script:'播客脚本', qa:'问答'};
+const CTYPE_MAP = {article:'图文文章', short_video:'短视频脚本', long_video:'长视频脚本', speech:'口播稿'};
 
 async function load() {
     const all = await api('/api/articles');

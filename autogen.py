@@ -873,6 +873,64 @@ _PLAT_ASPECT = {"xiaohongshu": "3:4", "moments": "1:1", "wechat": "16:9", "video
                 "youtube": "16:9", "twitter": "16:9", "instagram": "1:1", "podcast": "1:1"}
 
 
+_ASPECT_PAT = [
+    ("2.35:1", ("2.35:1", "2.35", "21:9", "2.39:1")),
+    ("16:9", ("16:9", "1.78:1")),
+    ("9:16", ("9:16",)),
+    ("1:1", ("1:1",)),
+    ("3:4", ("3:4",)),
+]
+# 平台关键词 → 画幅（识别不到明确比例时的兜底）
+_ASPECT_KEYWORD = {
+    "wechat": (("头图", "封面", "banner", "横幅", "宽幅"), "2.35:1"),
+    "xiaohongshu": (("封面",), "3:4"),
+}
+
+
+def _norm_txt(s):
+    """统一全角冒号/斜杠、压掉冒号两侧空格，便于匹配「2.35 : 1」这类写法"""
+    t = str(s or "").replace("：", ":").replace("／", "/")
+    return re.sub(r"\s*:\s*", ":", t)
+
+
+def _aspect_from_text(txt):
+    """从文本里认出画幅（2.35:1 / 16:9 / 9:16 / 1:1 / 3:4），没有返回空串"""
+    t = _norm_txt(txt)
+    for asp, keys in _ASPECT_PAT:
+        for k in keys:
+            if k in t:
+                return asp
+    return ""
+
+
+def _clean_aspect_words(txt):
+    """去掉提示词里的比例字样（画幅由程序设定，留在提示词里会让模型画成宽银幕黑边）"""
+    t = _norm_txt(txt)
+    for _, keys in _ASPECT_PAT:
+        for k in sorted(keys, key=len, reverse=True):
+            t = t.replace(k, "")
+    t = re.sub(r"(?i)\b(aspect\s+ratio|aspect|ratio)\b", "", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    return t.replace(" ,", ",").replace(" .", ".").replace(",,", ",").strip(" ,.、-()（）")
+
+
+def _aspect_of(art, item=None):
+    """三级优先：① 条目文本（title → cn → bg）里明确的画幅 ② 平台关键词 ③ 类型档位 + 平台"""
+    item = item or {}
+    for k in ("title", "cn", "bg"):
+        asp = _aspect_from_text(item.get(k))
+        if asp:
+            return asp, k
+    plat = str((art or {}).get("platform") or "").strip()
+    kw = _ASPECT_KEYWORD.get(plat)
+    if kw:
+        words, asp = kw
+        blob = str(item.get("title") or "") + str(item.get("cn") or "")
+        if any(w in blob for w in words):
+            return asp, "关键词"
+    return _default_aspect(art), "档位"
+
+
 def _default_aspect(art, title=""):
     if "头图" in (title or ""):
         return "2.35:1"
@@ -893,7 +951,7 @@ def _plan_out(data, default_style="", art=None):
     art = art or {}
     images = []
     for it in (data.get("images") or []):
-        asp0 = _default_aspect(art, it.get("title") if isinstance(it, dict) else "")
+        asp0 = _aspect_of(art, it)[0] if isinstance(it, dict) else _default_aspect(art)
         n = _norm_image(it, asp0)
         if n:
             images.append(n)
@@ -1249,7 +1307,7 @@ def run_images_job(job):
                 for i, q in enumerate(quotes):
                     if jobstore.canceled(jid):
                         raise RuntimeError("已取消")
-                    bgp = _with_style(q.get("bg") or FALLBACK_BG, style)
+                    bgp = _with_style(_clean_aspect_words(q.get("bg") or FALLBACK_BG), style)
                     _log(jid, "金句卡 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
                     fn, sub, meta = comfy_generate(base, bgp, cw, ch,
                                                    "qcbg_%d_%d" % (article_id, i), cfg)
@@ -1268,7 +1326,7 @@ def run_images_job(job):
                 if jobstore.canceled(jid):
                     raise RuntimeError("已取消")
                 w, h = ASPECT_SIZE.get(s["aspect"], ASPECT_SIZE["3:4"])
-                sp = _with_style(s["prompt"], style)
+                sp = _with_style(_clean_aspect_words(s["prompt"]), style)
                 _log(jid, "画面 %d/%d 生成中（%s → %dx%d）…"
                      % (i + 1, len(scenes), s["aspect"], w, h))
                 fn, sub, meta = comfy_generate(base, sp, w, h, "zl_%d_%d" % (article_id, i), cfg)

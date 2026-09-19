@@ -42,7 +42,8 @@ LLM_DEFAULTS = {
 from illustrate import stamp_qr
 from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
-                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok)
+                     load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok,
+                     get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config)
 import jobs as jobstore
 
 # ============================================================
@@ -208,6 +209,14 @@ def init_content_db():
         );
         CREATE INDEX IF NOT EXISTS idx_illu_logs_article ON illustration_logs(article_id);
     ''')
+    # Auto-migrate: 补 unet / lora / denoise 列（CREATE TABLE IF NOT EXISTS 对已存在的表是空操作）
+    lcols = [r[1] for r in conn.execute("PRAGMA table_info(illustration_logs)").fetchall()]
+    for _col, _ddl in (("unet", "VARCHAR(200) DEFAULT ''"),
+                       ("lora", "VARCHAR(400) DEFAULT ''"),
+                       ("denoise", "REAL")):
+        if _col not in lcols:
+            conn.execute("ALTER TABLE illustration_logs ADD COLUMN %s %s" % (_col, _ddl))
+    conn.commit()
     # Auto-migrate: add platform/content_type if missing
     cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
     if 'platform' not in cols:
@@ -785,7 +794,7 @@ def api_illustration_logs(article_id):
     try:
         rows = db.execute(
             'SELECT name, kind, prompt, neg, style, seed, steps, cfg, sampler, scheduler, '
-            'width, height, created_at FROM illustration_logs WHERE article_id=? '
+            'width, height, unet, lora, denoise, created_at FROM illustration_logs WHERE article_id=? '
             'ORDER BY id DESC', (article_id,)).fetchall()
     except Exception:
         rows = []
@@ -919,6 +928,34 @@ def api_instance_status():
 def api_instance_shutdown():
     """手动关闭实例（兜底）"""
     return jsonify(shutdown_instance())
+
+
+@app.route('/api/comfy/check', methods=['POST'])
+def api_comfy_check():
+    """检测「自由填写」的模型 / 采样参数：拉实例清单逐项核对（只报告，不改配置）
+
+    接收当前表单值（未保存也能检测）；实例没开机 / 地址不通 → ok=False + reason"""
+    cfg = get_comfy_config()
+    form = request.json or {}
+    for k, v in form.items():
+        if str(k).startswith('comfy_'):
+            cfg[k] = '' if v is None else str(v)
+    base = resolve_base_url()
+    if not base:
+        return jsonify({"ok": False, "reason": "拿不到 ComfyUI 地址（实例未开机或配置为空）"})
+    try:
+        lists = comfy_object_info(base)
+    except Exception as e:
+        msg = str(e)
+        if msg.startswith("HTTP"):
+            reason = "实例未运行（网关返回 %s）—— 出图时会自动开机" % msg.split()[1]
+        else:
+            reason = "实例未运行或地址不通（%s）" % type(e).__name__
+        return jsonify({"ok": False, "base": base, "reason": reason})
+    r = check_comfy_config(cfg, lists)
+    r["ok"] = True
+    r["base"] = base
+    return jsonify(r)
 
 
 @app.route('/api/illustrate/overlay-qr', methods=['POST'])

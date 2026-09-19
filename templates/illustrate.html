@@ -529,7 +529,8 @@ function showMeta(url) {
         '类型：' + ({card: '金句卡', scene: '场景图'}[m.kind] || m.kind || '-'),
         '风格：' + (STYLE_LABEL[m.style] || m.style || '-') + '   尺寸：' + (m.width || '-') + 'x' + (m.height || '-'),
         '参数：seed=' + m.seed + ' · steps=' + m.steps + ' · cfg=' + m.cfg +
-            ' · ' + m.sampler + '/' + m.scheduler,
+            ' · ' + m.sampler + '/' + m.scheduler + ' · 降噪 ' + (m.denoise == null ? 1 : m.denoise),
+        '模型：' + (m.unet || '-') + (m.lora ? ('  ·  LoRA ' + m.lora) : ''),
         '生成时间：' + (m.created_at || '-'),
         '',
         '—— 正向提示词（最终提交给 ComfyUI）——',

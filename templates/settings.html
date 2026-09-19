@@ -58,8 +58,34 @@
     </div>
 
     <div class="form-group">
-        <label class="form-label">绘图模型（unet）</label>
+        <label class="form-label">底模（unet）</label>
         <input type="text" class="form-input" id="comfy-unet" placeholder="qwen_image_fp8_e4m3fn.safetensors">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">文本编码器</label>
+        <input type="text" class="form-input" id="comfy-clip" placeholder="qwen_2.5_vl_7b_fp8_scaled.safetensors">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">VAE</label>
+        <input type="text" class="form-input" id="comfy-vae" placeholder="qwen_image_vae.safetensors">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">LoRA（逗号分隔，可写 名称:权重）</label>
+        <input type="text" class="form-input" id="comfy-lora" placeholder="Qwen-Image-Lightning-4steps.safetensors:1.0，另一个.safetensors:0.8">
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">采样参数（步数 / CFG / 采样器 / 调度器 / 降噪）</label>
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;">
+            <input type="text" class="form-input" id="comfy-steps" placeholder="20">
+            <input type="text" class="form-input" id="comfy-cfg" placeholder="2.5">
+            <input type="text" class="form-input" id="comfy-sampler" placeholder="euler">
+            <input type="text" class="form-input" id="comfy-scheduler" placeholder="simple">
+            <input type="text" class="form-input" id="comfy-denoise" placeholder="1.0">
+        </div>
     </div>
 
     <div class="form-group">
@@ -68,8 +94,11 @@
         </label>
     </div>
 
+    <div id="comfy-check" style="margin:4px 0 12px;font-size:12px;color:#475569;line-height:1.9;white-space:pre-wrap;"></div>
+
     <div style="display:flex;gap:10px;align-items:center;">
         <button class="btn btn-primary" onclick="saveComfy()">保存生图配置</button>
+        <button class="btn btn-outline" onclick="checkComfy()">检测配置</button>
         <button class="btn btn-outline" onclick="checkInstance()">查看实例状态</button>
         <span id="comfy-status" style="font-size:12px;color:#64748b;"></span>
     </div>
@@ -152,10 +181,59 @@ async function saveComfy() {
         comfy_api_token: document.getElementById('comfy-api-token').value.trim(),
         comfy_base_url: document.getElementById('comfy-base-url').value.trim(),
         comfy_unet: document.getElementById('comfy-unet').value.trim(),
+        comfy_clip: document.getElementById('comfy-clip').value.trim(),
+        comfy_vae: document.getElementById('comfy-vae').value.trim(),
+        comfy_lora: document.getElementById('comfy-lora').value.trim(),
+        comfy_steps: document.getElementById('comfy-steps').value.trim(),
+        comfy_cfg: document.getElementById('comfy-cfg').value.trim(),
+        comfy_sampler: document.getElementById('comfy-sampler').value.trim(),
+        comfy_scheduler: document.getElementById('comfy-scheduler').value.trim(),
+        comfy_denoise: document.getElementById('comfy-denoise').value.trim(),
         comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0'
     };
     await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
     toast('生图配置已保存');
+}
+
+function comfyForm() {
+    const g = function(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; };
+    return {
+        comfy_unet: g('comfy-unet'), comfy_clip: g('comfy-clip'), comfy_vae: g('comfy-vae'),
+        comfy_lora: g('comfy-lora'), comfy_steps: g('comfy-steps'), comfy_cfg: g('comfy-cfg'),
+        comfy_sampler: g('comfy-sampler'), comfy_scheduler: g('comfy-scheduler'),
+        comfy_denoise: g('comfy-denoise')
+    };
+}
+
+async function checkComfy() {
+    const box = document.getElementById('comfy-check');
+    box.textContent = '检测中…';
+    let j = null;
+    try {
+        j = await api('/api/comfy/check', {method: 'POST', body: JSON.stringify(comfyForm())});
+    } catch (e) {
+        box.textContent = '⚠ 检测失败：' + e.message;
+        return;
+    }
+    if (!j || !j.ok) {
+        box.textContent = '⚠ ' + ((j && j.reason) || '检测失败');
+        return;
+    }
+    const lines = [];
+    (j.items || []).forEach(function(it) {
+        lines.push((it.ok ? '✅' : '❌') + ' ' + it.label + '：' + (it.value || '（空）') +
+            (it.hint ? '  —— ' + it.hint : ''));
+    });
+    (j.loras || []).forEach(function(l) {
+        lines.push((l.ok ? '✅' : '❌') + ' LoRA：' + l.name +
+            (l.weight === 1 ? '' : ':' + l.weight) + (l.hint ? '  —— ' + l.hint : ''));
+    });
+    (j.notes || []).forEach(function(n) { lines.push('⚠ ' + n); });
+    const c = j.counts || {};
+    lines.push('清单：底模 ' + (c.comfy_unet || 0) + ' · 编码器 ' + (c.comfy_clip || 0) +
+        ' · VAE ' + (c.comfy_vae || 0) + ' · LoRA ' + (c.comfy_lora || 0) +
+        ' · 采样器 ' + (c.comfy_sampler || 0) + ' · 调度器 ' + (c.comfy_scheduler || 0));
+    box.textContent = lines.join('\n');
 }
 
 async function checkInstance() {
@@ -175,6 +253,14 @@ async function loadSettings() {
     document.getElementById('comfy-api-token').value = settings['comfy_api_token'] || '';
     document.getElementById('comfy-base-url').value = settings['comfy_base_url'] || '';
     document.getElementById('comfy-unet').value = settings['comfy_unet'] || 'qwen_image_fp8_e4m3fn.safetensors';
+    document.getElementById('comfy-clip').value = settings['comfy_clip'] || 'qwen_2.5_vl_7b_fp8_scaled.safetensors';
+    document.getElementById('comfy-vae').value = settings['comfy_vae'] || 'qwen_image_vae.safetensors';
+    document.getElementById('comfy-lora').value = settings['comfy_lora'] || '';
+    document.getElementById('comfy-steps').value = settings['comfy_steps'] || '20';
+    document.getElementById('comfy-cfg').value = settings['comfy_cfg'] || '2.5';
+    document.getElementById('comfy-sampler').value = settings['comfy_sampler'] || 'euler';
+    document.getElementById('comfy-scheduler').value = settings['comfy_scheduler'] || 'simple';
+    document.getElementById('comfy-denoise').value = settings['comfy_denoise'] || '1.0';
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
     const pr = await api('/api/prompts/plan');
     document.getElementById('plan-system-prompt').value = (pr && pr.content) || '';

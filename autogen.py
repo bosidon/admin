@@ -13,6 +13,7 @@ import json
 import re
 import random
 import contextlib
+import difflib
 import sqlite3
 import threading
 import time
@@ -42,6 +43,11 @@ DEFAULTS = {
     "comfy_clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
     "comfy_vae": "qwen_image_vae.safetensors",
     "comfy_steps": "20",
+    "comfy_cfg": "2.5",
+    "comfy_sampler": "euler",
+    "comfy_scheduler": "simple",
+    "comfy_denoise": "1.0",
+    "comfy_lora": "",
     "comfy_auto_shutdown": "1",
 }
 
@@ -75,6 +81,65 @@ SAMPLER_CFG = 2.5
 SAMPLER_NAME = "euler"
 SCHEDULER = "simple"
 DENOISE = 1.0
+
+# 采样参数默认（settings 留空 / 填错 → 回落这里；不填 = 与旧行为完全一致）
+SAMPLER_DEF = {"steps": 20, "cfg": SAMPLER_CFG, "sampler": SAMPLER_NAME,
+               "scheduler": SCHEDULER, "denoise": DENOISE}
+DEF_TEXT = {"comfy_sampler": SAMPLER_NAME, "comfy_scheduler": SCHEDULER}
+
+
+def get_sampler_cfg(cfg=None):
+    """采样参数：settings（comfy_*）优先，空 / 非法回落默认"""
+    cfg = cfg if cfg is not None else get_comfy_config()
+
+    def _int(v, dv):
+        try:
+            n = int(float(str(v).strip()))
+            return n if n > 0 else dv
+        except Exception:
+            return dv
+
+    def _flt(v, dv):
+        try:
+            return float(str(v).strip())
+        except Exception:
+            return dv
+
+    def _txt(v, dv):
+        return str(v or "").strip() or dv
+
+    out = {"steps": _int(cfg.get("comfy_steps"), SAMPLER_DEF["steps"]),
+           "cfg": _flt(cfg.get("comfy_cfg"), SAMPLER_DEF["cfg"]),
+           "sampler": _txt(cfg.get("comfy_sampler"), SAMPLER_DEF["sampler"]),
+           "scheduler": _txt(cfg.get("comfy_scheduler"), SAMPLER_DEF["scheduler"]),
+           "denoise": _flt(cfg.get("comfy_denoise"), SAMPLER_DEF["denoise"])}
+    if out["cfg"] <= 0:
+        out["cfg"] = SAMPLER_DEF["cfg"]
+    if not (0 < out["denoise"] <= 1):
+        out["denoise"] = SAMPLER_DEF["denoise"]
+    return out
+
+
+def parse_lora(spec):
+    """comfy_lora 文本 → [(名称, model权重, clip权重)]
+
+    逗号 / 分号 / 换行分隔；可写 `名称:0.8`（不写 = 1.0）"""
+    out = []
+    for part in re.split(r"[,;\n]+", str(spec or "")):
+        p = part.strip()
+        if not p:
+            continue
+        name, w = p, 1.0
+        if ":" in p:
+            a, b = p.rsplit(":", 1)
+            try:
+                w = float(b.strip())
+                name = a.strip()
+            except Exception:
+                name, w = p, 1.0
+        if name:
+            out.append((name, w, w))
+    return out
 
 # 配图风格（14 选 1）：人工在 ① 区下拉选定；出图时把英文风格词追加到正向提示词
 STYLE_PROMPT = {
@@ -485,28 +550,135 @@ def comfy_ready(base, timeout=300, logger=None, interval=6):
         time.sleep(interval)
     return False
 
+# 「检测配置」用：字段 → (中文名, 是否必填)；清单 key 与 settings key 同名
+CHECK_FIELDS = (
+    ("comfy_unet", "底模 unet", True),
+    ("comfy_clip", "文本编码器", True),
+    ("comfy_vae", "VAE", True),
+    ("comfy_sampler", "采样器", False),
+    ("comfy_scheduler", "调度器", False),
+)
+
+# 清单来源：settings key → (ComfyUI 节点, 输入字段)
+OBJ_NODES = {
+    "comfy_unet": ("UNETLoader", "unet_name"),
+    "comfy_clip": ("CLIPLoader", "clip_name"),
+    "comfy_vae": ("VAELoader", "vae_name"),
+    "comfy_lora": ("LoraLoader", "lora_name"),
+    "comfy_sampler": ("KSampler", "sampler_name"),
+    "comfy_scheduler": ("KSampler", "scheduler"),
+}
+
+
+def comfy_object_info(base, timeout=25):
+    """拉 ComfyUI /object_info，抽出可核对的清单（文件名 / 采样器 / 调度器）"""
+    r = requests.get(base.rstrip("/") + "/object_info", timeout=timeout)
+    if r.status_code != 200:
+        raise RuntimeError("HTTP %s" % r.status_code)
+    oi = r.json()
+    out = {}
+    for key, (node, field) in OBJ_NODES.items():
+        vals = []
+        try:
+            spec = (oi.get(node) or {}).get("input") or {}
+            for grp in ("required", "optional"):
+                f = (spec.get(grp) or {}).get(field)
+                if f and isinstance(f[0], list):
+                    vals = [str(x) for x in f[0]]
+                    break
+        except Exception:
+            vals = []
+        out[key] = vals
+    return out
+
+
+def _near(v, avail):
+    """拼错时给近似名建议"""
+    try:
+        m = difflib.get_close_matches(v, avail, n=1, cutoff=0.55)
+        return ("像 %s ？" % m[0]) if m else ""
+    except Exception:
+        return ""
+
+
+def check_comfy_config(cfg, lists):
+    """逐项核对自由填写的值（只报告，不阻断）；lists = comfy_object_info() 的结果"""
+    cfg = cfg or {}
+    lists = lists or {}
+    items = []
+    for key, label, must in CHECK_FIELDS:
+        v = str(cfg.get(key) or "").strip()
+        av = lists.get(key) or []
+        if not v:
+            if must:
+                ok, hint = False, "未填写"
+            else:
+                ok, hint = True, "留空 = 默认 %s" % DEF_TEXT.get(key, "")
+        elif v in av:
+            ok, hint = True, ""
+        else:
+            ok = False
+            hint = _near(v, av) or ("清单里没有这个名字（可选项 %d 个）" % len(av))
+        items.append({"key": key, "label": label, "value": v, "ok": ok, "hint": hint})
+
+    loras = []
+    for nm, w, _ in parse_lora(cfg.get("comfy_lora")):
+        av = lists.get("comfy_lora") or []
+        if nm in av:
+            loras.append({"name": nm, "weight": w, "ok": True, "hint": ""})
+        else:
+            loras.append({"name": nm, "weight": w, "ok": False,
+                          "hint": _near(nm, av) or "清单里没有这个 LoRA"})
+
+    sp = get_sampler_cfg(cfg)
+    notes = []
+    low = " ".join([nm.lower() for nm, _, _ in parse_lora(cfg.get("comfy_lora"))])
+    if "lightning" in low:
+        notes.append("LoRA 含 Lightning 加速模型：建议 cfg=1.0、步数 4~8（当前 cfg=%s、步数=%s）"
+                     % (sp["cfg"], sp["steps"]))
+    if "edit" in str(cfg.get("comfy_unet") or "").lower():
+        notes.append("底模是 Edit 系（需要输入图）：当前出图流程没有输入图，可能跑不通")
+    if str(cfg.get("comfy_clip") or "").strip() and "qwen" not in str(cfg.get("comfy_clip")).lower():
+        notes.append("出图走 Qwen-Image：文本编码器通常是 qwen 系（clip 类型固定 qwen_image）")
+
+    return {"items": items, "loras": loras, "notes": notes, "sample": sp,
+            "counts": {k: len(v) for k, v in lists.items()}}
+
 
 def build_workflow(prompt, w, h, seed, cfg, prefix, neg):
-    steps = int(cfg.get("comfy_steps") or 20)
-    return {
+    """组装出图工作流：采样参数取 settings（留空 = 旧默认）；comfy_lora 非空时串 LoraLoader 链"""
+    sp = get_sampler_cfg(cfg)
+    model_ref, clip_ref = ["1", 0], ["2", 0]
+    loras = parse_lora(cfg.get("comfy_lora"))
+    wf = {
         "1": {"class_type": "UNETLoader",
               "inputs": {"unet_name": cfg.get("comfy_unet"), "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader",
               "inputs": {"clip_name": cfg.get("comfy_clip"), "type": "qwen_image"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": cfg.get("comfy_vae")}},
-        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": clip_ref}},
         "5": {"class_type": "CLIPTextEncode",
-              "inputs": {"text": neg, "clip": ["2", 0]}},
+              "inputs": {"text": neg, "clip": clip_ref}},
         "6": {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}},
         "7": {"class_type": "KSampler",
-              "inputs": {"seed": seed, "steps": steps, "cfg": SAMPLER_CFG,
-                         "sampler_name": SAMPLER_NAME, "scheduler": SCHEDULER,
-                         "denoise": DENOISE, "model": ["1", 0],
+              "inputs": {"seed": seed, "steps": sp["steps"], "cfg": sp["cfg"],
+                         "sampler_name": sp["sampler"], "scheduler": sp["scheduler"],
+                         "denoise": sp["denoise"], "model": model_ref,
                          "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0]}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "SaveImage",
               "inputs": {"filename_prefix": prefix, "images": ["8", 0]}},
     }
+    for i, (nm, sw_m, sw_c) in enumerate(loras):
+        nid = str(10 + i)
+        wf[nid] = {"class_type": "LoraLoader",
+                   "inputs": {"lora_name": nm, "strength_model": sw_m,
+                              "strength_clip": sw_c, "model": model_ref, "clip": clip_ref}}
+        model_ref, clip_ref = [nid, 0], [nid, 0]
+    wf["7"]["inputs"]["model"] = model_ref
+    wf["4"]["inputs"]["clip"] = clip_ref
+    wf["5"]["inputs"]["clip"] = clip_ref
+    return wf
 
 
 def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, seed=None):
@@ -517,9 +689,12 @@ def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, seed=None):
         seed = random.randint(1, 2 ** 31 - 1)
     neg_text = load_negative_prompt()                # 文件里的「负面提示词」段 + 强制安全词
     wf = build_workflow(prompt, w, h, seed, cfg, prefix, neg_text)
+    sp = get_sampler_cfg(cfg)
     meta = {"prompt": prompt, "neg": neg_text, "seed": seed,
-            "steps": int(cfg.get("comfy_steps") or 20), "cfg": SAMPLER_CFG,
-            "sampler": SAMPLER_NAME, "scheduler": SCHEDULER,
+            "steps": sp["steps"], "cfg": sp["cfg"],
+            "sampler": sp["sampler"], "scheduler": sp["scheduler"],
+            "denoise": sp["denoise"], "unet": cfg.get("comfy_unet") or "",
+            "lora": cfg.get("comfy_lora") or "",
             "width": w, "height": h}
     r = requests.post(base + "/prompt", json={"prompt": wf}, timeout=60)
     if r.status_code != 200:
@@ -590,12 +765,13 @@ def _save_gen_log(article_id, name, kind, meta, style=""):
                      (article_id, name))
         conn.execute(
             "INSERT INTO illustration_logs (article_id, name, kind, prompt, neg, style, "
-            "seed, steps, cfg, sampler, scheduler, width, height) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "seed, steps, cfg, sampler, scheduler, width, height, unet, lora, denoise) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (article_id, name, kind, meta.get("prompt", ""), meta.get("neg", ""), style,
              meta.get("seed"), meta.get("steps"), meta.get("cfg"),
              meta.get("sampler"), meta.get("scheduler"),
-             meta.get("width"), meta.get("height")))
+             meta.get("width"), meta.get("height"),
+             meta.get("unet", ""), meta.get("lora", ""), meta.get("denoise")))
         conn.commit()
         conn.close()
         return None
@@ -605,10 +781,11 @@ def _save_gen_log(article_id, name, kind, meta, style=""):
 
 def _log_gen_meta(log, article_id, name, kind, meta, style):
     """任务日志打印 + 落库：这张图最终提交的提示词与参数"""
-    log("\u24d8 参数：seed=%s · steps=%s · cfg=%s · %s/%s · %dx%d · 风格 %s"
+    extra = (" · LoRA " + meta["lora"]) if meta.get("lora") else ""
+    log("\u24d8 参数：seed=%s · steps=%s · cfg=%s · %s/%s · %dx%d · 风格 %s · 底模 %s%s"
         % (meta.get("seed"), meta.get("steps"), meta.get("cfg"), meta.get("sampler"),
            meta.get("scheduler"), meta.get("width"), meta.get("height"),
-           STYLE_LABEL.get(style, style) or "-"))
+           STYLE_LABEL.get(style, style) or "-", (meta.get("unet") or "-"), extra))
     log("\u24d8 正向：" + (meta.get("prompt") or ""))
     log("\u24d8 负面：" + (meta.get("neg") or ""))
     err = _save_gen_log(article_id, name, kind, meta, style)

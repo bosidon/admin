@@ -128,6 +128,9 @@
             <a href="/library" class="{% if request.path == '/library' %}active{% endif %}">📦 素材库</a>
             <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">⚙️ 设置</a>
         </div>
+        <div class="nav" style="position:absolute;bottom:14px;left:12px;right:12px;border-top:1px solid rgba(255,255,255,0.1);padding-top:10px;">
+            <div id="userBox"></div>
+        </div>
     </div>
     
     <div class="main">
@@ -184,6 +187,8 @@
         
     </script>
     <script src="/static/js/app.js"></script>
+    <script src="/assets/xianbao/auth-widget.js?v=20260917"></script>
+    <script>if (window.XianbaoAuth) XianbaoAuth.init({el:'#userBox'});</script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

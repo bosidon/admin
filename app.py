@@ -190,6 +190,67 @@ def current_user():
     return g.cur_user
 
 
+# ============================================================
+# 门禁：全站需登录，且仅 admin（管理员）/ sales（推广员）可用
+# 统一在 before_request 收口 —— 所有页面与接口一次生效
+# ============================================================
+STAFF_ROLES = ("admin", "sales")
+_GATE_FREE = ("/favicon.ico",)   # 仅图标放行：门页自包含（组件走 nginx 的 /assets/），
+                                 # /static 下的配图同样需登录才可访问
+
+
+def _gate_page(u):
+    """未登录 / 无权限 时返回的极简门页（自带登录组件，登录后自动回站）"""
+    if u:
+        name = (u.get("nickname") or u.get("email") or "当前账号")
+        tip = "当前账号 <b>%s</b> 无权限<br>仅管理员 / 推广员可用" % name
+        btn = "退出登录"
+        act = ("XianbaoAuth.logout();setTimeout(function(){location.reload();},800);")
+    else:
+        tip = "请登录后使用仙宝内容平台"
+        btn = "登录 / 注册"
+        act = ("var t=setInterval(function(){if(window.XianbaoAuth&&XianbaoAuth.isLoggedIn())"
+               "{clearInterval(t);location.reload();}},500);XianbaoAuth.showLogin();")
+    return (
+        '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+        '<title>\u8bf7\u767b\u5f55 - \u4ed9\u5b9d\u5185\u5bb9\u5e73\u53f0</title>'
+        '<style>'
+        "body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;"
+        "background:#1e1b4b;color:#fff;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif}"
+        ".box{text-align:center;padding:0 24px}"
+        ".box h1{font-size:20px;margin:0 0 12px}"
+        ".box p{color:#94a3b8;font-size:14px;line-height:1.7;margin:0 0 26px}"
+        "#gate-btn{padding:10px 30px;background:#7c3aed;border:none;border-radius:8px;color:#fff;"
+        "font-size:15px;font-weight:600;cursor:pointer}"
+        "#gate-btn:hover{background:#6d28d9}"
+        '</style></head><body><div class="box">'
+        '<h1>📝 仙宝内容平台</h1>'
+        '<p>' + tip + '</p>'
+        '<button id="gate-btn">' + btn + '</button>'
+        '</div>'
+        '<script src="/assets/xianbao/auth-widget.js?v=20260917"></script>'
+        '<script>document.getElementById("gate-btn").onclick=function(){' + act + '};</script>'
+        '</body></html>'
+    )
+
+
+@app.before_request
+def _require_staff():
+    """全站门禁：仅 admin / sales 可访问，其余 401 / 403"""
+    p = request.path or "/"
+    if request.method == "OPTIONS" or p.startswith(_GATE_FREE):
+        return None
+    u = current_user()
+    if (u.get("role") or "") in STAFF_ROLES:
+        return None
+    if p.startswith("/api/"):
+        if not u:
+            return jsonify(success=False, error="未登录"), 401
+        return jsonify(success=False, error="需要管理员或推广员权限"), 403
+    return _gate_page(u), (200 if not u else 403)
+
+
 def user_label(u=None):
     """展示用用户名：昵称 → 邮箱 → 空"""
     u = u if u is not None else current_user()

@@ -207,6 +207,50 @@ def current_user():
 
 
 # ============================================================
+# 引流计数（文案编号 → 该文案带来的注册数）
+#   数据源：auth 服务 users.referred_src（仅首次归因写入，不重复计）
+#   60 秒内存缓存 + 失败静默降级 —— 绝不阻塞页面
+# ============================================================
+_REF_CACHE = {"t": 0.0, "map": {}}
+
+
+def ref_counts():
+    """{'<文案编号>': 注册数}；auth 不可用时返回上次结果（或空 dict）"""
+    now = time.time()
+    if now - _REF_CACHE["t"] < 60:
+        return _REF_CACHE["map"]
+    _REF_CACHE["t"] = now      # 先更新时间：失败也退避 60s，避免每次渲染都等超时
+    try:
+        tok = (load_env().get("INTERNAL_TOKEN") or "").strip()
+        if not tok:
+            return _REF_CACHE["map"]
+        r = requests.get(AUTH_API + "/api/users/internal/referral-sources",
+                         headers={"x-internal-token": tok}, timeout=2)
+        d = r.json()
+        if d.get("success"):
+            m = {}
+            for row in ((d.get("data") or {}).get("rows") or []):
+                k = str(row.get("src") or "").strip()
+                if k.isdigit():
+                    m[k] = int(row.get("cnt") or 0)
+            _REF_CACHE["map"] = m
+    except Exception:
+        pass
+    return _REF_CACHE["map"]
+
+
+def with_ref_counts(rows):
+    """给文案列表注入 ref_count（无引流 → 0）"""
+    rc = ref_counts()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["ref_count"] = rc.get(str(d.get("id")), 0)
+        out.append(d)
+    return out
+
+
+# ============================================================
 # 门禁：全站需登录，且仅 admin（管理员）/ sales（推广员）可用
 # 统一在 before_request 收口 —— 所有页面与接口一次生效
 # ============================================================
@@ -501,7 +545,7 @@ def api_list_articles():
     if where:
         sql += ' WHERE ' + ' AND '.join(where)
     rows = db.execute(sql + ' ORDER BY created_at DESC', args).fetchall()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(with_ref_counts(rows))
 
 @app.route('/api/articles/<int:article_id>')
 def api_get_article(article_id):
@@ -513,7 +557,9 @@ def api_get_article(article_id):
     row = db.execute('SELECT * FROM articles WHERE id=?', (article_id,)).fetchone()
     if not row:
         return jsonify({"error": "not found"}), 404
-    return jsonify(dict(row))
+    d = dict(row)
+    d['ref_count'] = ref_counts().get(str(d.get('id')), 0)
+    return jsonify(d)
 
 @app.route('/api/articles', methods=['POST'])
 def api_create_article():

@@ -104,6 +104,7 @@ async function load() {
         const contentType = CONTENT_TYPE_MAP[a.content_type]||a.content_type||'-';
         const titleLink = `<a href="/articles/${a.id}" style="color:inherit;text-decoration:none;font-weight:500;">${a.title||'未命名'}</a>`;
         const date = formatCST(a.created_at);
+        const refBadge = a.ref_count > 0 ? ` <span style="display:inline-block;background:#dcfce7;color:#166534;padding:2px 6px;border-radius:4px;font-size:12px;margin-left:6px;vertical-align:middle;" title="该文案带来的注册数">引流 ${a.ref_count}</span>` : '';
         const actions = `<a href="/articles/${a.id}" class="btn btn-outline btn-sm" title="查看">👁️</a>`
             + ` <a href="/illustrate/${a.id}" class="btn btn-outline btn-sm" title="配图">🖼️</a>`
             + (a.promo_link ? ` <button class="btn btn-outline btn-sm promo-copy-btn" data-link="${a.promo_link}" title="复制推广链接">🔗</button>` : '');
@@ -115,7 +116,7 @@ async function load() {
         const delBtn = ` <button class="btn btn-danger btn-sm" onclick="deleteArticle(${a.id})" title="删除">🗑️</button>`;
 
         return `<tr style="border-bottom:1px solid #f1f5f9;">
-            <td style="padding:10px 16px;">${titleLink}</td>
+            <td style="padding:10px 16px;">${titleLink}${refBadge}</td>
             <td style="padding:10px 8px;"><span style="background:#ede9fe;color:#5b21b6;padding:2px 6px;border-radius:4px;font-size:12px;">${PLATFORM_MAP[a.platform]||a.platform||'-'}</span></td>
             <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.book ? '<a href="https://lingxiu.xianbao.online/search?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;">'+a.book+'</a>' : '-'}</td>
             <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.topic||'-'}</td>

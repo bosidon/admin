@@ -59,6 +59,7 @@ async function load() {
             <div><div style="font-size:12px;color:var(--text2);">🎨 风格</div><div style="font-weight:600;">${a.tone || '-'}</div></div>
             <div><div style="font-size:12px;color:var(--text2);">📅 生成时间</div><div style="font-weight:600;">${formatCST(a.created_at)}</div></div>
             <div><div style="font-size:12px;color:var(--text2);">🏷️ 标签</div><div style="font-weight:600;">${a.tags || '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">🔗 引流注册</div><div style="font-weight:600;">${a.ref_count || 0}</div></div>
         </div>
         ${a.summary ? `<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:12px;margin-bottom:16px;">
             <div style="font-size:12px;color:#92400e;margin-bottom:4px;">📋 摘要（${(a.summary||'').length}/120字）</div>

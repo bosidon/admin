@@ -1423,13 +1423,19 @@ def gen_storyboard(article_content, llm_cfg):
     import os
     prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
     prompt_md = open(prompts_dir + "/video_storyboard.md", encoding="utf-8").read()
-    user_msg = prompt_md.replace("{{CONTENT}}", article_content[:8000])
+    _mk = "\n---USER---\n"
+    if _mk in prompt_md:
+        _sp, _up = prompt_md.split(_mk, 1)
+    else:
+        _sp, _up = "", prompt_md
+    system_msg = _sp.strip() or "你是一位专业短视频分镜导演。只输出 JSON，不要其他文字。"
+    user_msg = _up.replace("{{CONTENT}}", article_content[:8000])
     url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
     if "/chat/completions" not in url:
         url += "/chat/completions"
     data, err = _llm_json(url, llm_cfg.get("llm_api_key", ""),
                    llm_cfg.get("llm_model") or "deepseek-chat",
-                   [{"role": "system", "content": "你是一位专业短视频分镜导演。只输出 JSON，不要其他文字。"},
+                   [{"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg}])
     if err:
         raise RuntimeError("LLM 调用失败: " + err[:200])

@@ -16,7 +16,7 @@ LINES = ("lingxiu", "maya", "tarot", "psych")
 LINE_NAME = {"lingxiu": "灵性书籍", "maya": "玛雅天赋", "tarot": "塔罗", "psych": "心理咨询"}
 
 # 设置页要展示的「本条可用占位符」
-PLACEHOLDERS_COMMON = ["业务线", "平台", "内容类型", "字数", "选题", "语气", "输出格式", "素材", "品牌指引"]
+PLACEHOLDERS_COMMON = ["业务线", "平台", "内容类型", "字数", "选题", "语气", "输出格式", "素材"]
 PLACEHOLDERS = {
     "lingxiu": PLACEHOLDERS_COMMON + ["书目", "话题", "角度", "结构", "钩子"],
     "maya": PLACEHOLDERS_COMMON + ["选题类型", "选题对象"],
@@ -40,9 +40,6 @@ SKELETON = """你是「仙宝心灵成长」{{业务线}}业务线的专职文�
 
 ## 选题素材（**唯一事实来源**）
 {{素材}}
-
-## 品牌指引（摘要）
-{{品牌指引}}
 
 ## 写作要求
 1. 只用素材里的术语与说法（如印记 / 图腾 / 音阶 / 波符这类原体系词汇），**不要换成星座、占星等其它体系的说法**；不要编造素材里没有的数据、年份、比例或案例
@@ -193,3 +190,51 @@ def render_rewrite(values):
 def rewrite_meta():
     return {"line": "rewrite", "name": "改写 Agent", "path": "prompts/rewrite_agent.md",
             "placeholders": REWRITE_PLACEHOLDERS}
+
+# ============ system / user 拆分（2026-09-21）============
+# 提词文件里用一行 `---USER---` 分隔：
+#   分隔符之上 = system 段（角色 / 铁律 / 输出契约，固定不变 → 命中 LLM 前缀缓存）
+#   分隔符之下 = user 段（本次参数 / 素材，每次都变）
+# 没有分隔符 → 兼容旧行为：整段作为一条 user 消息
+MARKER = "---USER---"
+
+
+def _split_raw(raw):
+    """按 MARKER 拆成 (system原文, user原文|None)"""
+    t = raw or ""
+    if ("\n" + MARKER + "\n") in t:
+        a, b = t.split("\n" + MARKER + "\n", 1)
+        return a.strip(), b.strip()
+    if t.lstrip().startswith(MARKER):
+        return "", t.split(MARKER, 1)[1].strip()
+    return t.strip(), None
+
+
+def _sub(raw, values):
+    def f(m):
+        v = values.get(m.group(1).strip())
+        v = "" if v is None else str(v).strip()
+        return v if v else "（无）"
+    return _PH_RE.sub(f, raw)
+
+
+def render_split(line, values):
+    """返回 (system文本, user文本|None)。user 为 None 时按旧行为发一条 user 消息。"""
+    sys_raw, usr_raw = _split_raw(load_raw(line))
+    return _sub(sys_raw, values), (_sub(usr_raw, values) if usr_raw is not None else None)
+
+
+def render_rewrite_split(values):
+    sys_raw, usr_raw = _split_raw(load_rewrite_raw())
+    return _sub(sys_raw, values), (_sub(usr_raw, values) if usr_raw is not None else None)
+
+
+def messages_for(system_text, user_text, fallback_user):
+    """组装 messages：有 user 段 → system+user 两条；否则 → 单条 user（兼容旧提词）"""
+    if user_text is None:
+        return [{"role": "user", "content": fallback_user}]
+    msgs = []
+    if system_text:
+        msgs.append({"role": "system", "content": system_text})
+    msgs.append({"role": "user", "content": user_text})
+    return msgs

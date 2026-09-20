@@ -823,13 +823,15 @@ def api_rewrite_article(article_id):
     plat_name = PLAT_LABEL.get(platform, platform)
     spec = REWRITE_SPEC.get(content_type, REWRITE_SPEC['article'])
     body = (src.get('content_md') or '')[:6000]
-    prompt = article_prompts.render_rewrite({
+    _vals = {
         '平台': plat_name,
         '内容类型': CTYPE_LABEL.get(content_type, content_type),
         '字数要求': spec,
         '选题方向': src.get('topic') or src.get('book') or '（原文自定）',
         '原文': body,
-    })
+    }
+    _sys2, _usr2 = article_prompts.render_rewrite_split(_vals)
+    _msgs2 = article_prompts.messages_for(_sys2, _usr2, _sys2)
     llm = get_llm_config()
     api_key = llm.get('llm_api_key')
     if not api_key:
@@ -838,7 +840,7 @@ def api_rewrite_article(article_id):
         with jobstore.LLM_GATE:
             resp = requests.post(llm['llm_base_url'],
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=dict({"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
+                json=dict({"model": llm['llm_model'], "messages": _msgs2},
                           **({"user_id": uid_ok("p" + str(src.get('owner_id')))} if src.get('owner_id') else {})),
                 timeout=180)
         raw = resp.json()['choices'][0]['message']['content']
@@ -968,13 +970,15 @@ def api_generate_article():
             topic_show = ' · '.join([x for x in (kind_name, topic_obj) if x]) or '自动选择'
         else:
             topic_show = '、'.join([x for x in (book, topic) if x]) or '自动选择'
-    prompt = article_prompts.render(line, {
+    vars_ = {
         '业务线': line_label, '平台': plat_name, '内容类型': label, '字数': word_spec,
         '选题': topic_show, '语气': tone or '温暖、真诚、有洞察',
         '角度': angle, '结构': structure, '钩子': hook, '输出格式': fmt,
         '素材': material[:4500],
         '书目': book, '话题': topic, '选题类型': kind_name, '选题对象': topic_obj,
-    })
+    }
+    _sys, _usr = article_prompts.render_split(line, vars_)
+    _msgs = article_prompts.messages_for(_sys, _usr, _sys)
 
     llm = get_llm_config()
     api_key = llm['llm_api_key']
@@ -985,7 +989,7 @@ def api_generate_article():
         with jobstore.LLM_GATE:            # 同步文案也占 LLM 域名额（防绕过限流打爆 key）
             resp = requests.post(llm['llm_base_url'],
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=dict({"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
+                json=dict({"model": llm['llm_model'], "messages": _msgs},
                           **({"user_id": uid_ok("p" + str(promo_uid))} if promo_uid else {})),
                 timeout=120
             )

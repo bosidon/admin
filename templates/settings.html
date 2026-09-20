@@ -415,7 +415,8 @@ async function loadAgentPrompt() {
     if (r && r.path) bits.push('文件：' + r.path);
     const ph = (r && r.placeholders) || [];
     if (ph.length) bits.push('可用占位符：' + ph.map(function(p) { return '{' + '{' + p + '}' + '}'; }).join(' '));
-    if (info.noreset) bits.push('（此提词无内置默认，不支持一键恢复）');
+    bits.push('分段：单独一行 ---USER--- 之上 = system（角色/铁律/输出契约，固定不变）｜ 之下 = user（本次参数与素材）｜ 不写分隔符则整段作为一条 user 消息');
+    if (id === 'storyboard') bits.push('（此提词无内置默认，不支持一键恢复）');
     document.getElementById('agent-hint').innerHTML = bits.join('<br>');
     document.getElementById('agent-reset').style.display = info.noreset ? 'none' : '';
 }

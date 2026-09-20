@@ -43,8 +43,9 @@
     <h3 style="margin-bottom:20px;">🎨 AI 生图（AutoDL ComfyUI）</h3>
 
     <div class="form-group">
-        <label class="form-label">应用实例 UUID（pro- 开头）</label>
-        <input type="text" class="form-input" id="comfy-instance-uuid" placeholder="pro-xxxxxxxxxxxx">
+        <label class="form-label">实例池（每行一台：<code>pro-xxxxxxxxxxxx|备注</code>，顺序即优先级）</label>
+        <textarea class="form-input" id="comfy-instances" rows="3" placeholder="pro-7895a8aee534|北京B区 ¥1.68/h&#10;pro-7898f1e60d45|西北B区 ¥6.46/h"
+                  style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;resize:vertical;"></textarea>
     </div>
 
     <div class="form-group">
@@ -101,6 +102,11 @@
             <input type="text" class="form-input" id="comfy-scheduler" placeholder="simple">
             <input type="text" class="form-input" id="comfy-denoise" placeholder="1.0">
         </div>
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">同时出图任务数（GPU 并行上限，≤ 实例池台数）</label>
+        <input type="number" class="form-input" id="gpu-parallel" min="1" max="8" placeholder="2">
     </div>
 
     <div class="form-group">
@@ -175,7 +181,9 @@
 <script>
 async function saveComfy(msg) {
     const data = {
-        comfy_instance_uuid: document.getElementById('comfy-instance-uuid').value.trim(),
+        comfy_instances: document.getElementById('comfy-instances').value.trim(),
+        comfy_instance_uuid: (document.getElementById('comfy-instances').value.trim().split('\n')[0] || '').split('|')[0].trim(),
+        gpu_parallel: document.getElementById('gpu-parallel').value.trim() || '2',
         comfy_api_token: document.getElementById('comfy-api-token').value.trim(),
         comfy_base_url: document.getElementById('comfy-base-url').value.trim(),
         comfy_unet: document.getElementById('comfy-unet').value.trim(),
@@ -316,7 +324,8 @@ async function loadSettings() {
     document.getElementById('llm-model').value = settings['llm_model'] || 'deepseek-chat';
     document.getElementById('llm-parallel').value = settings['llm_parallel'] || '2';
     if (settings['llm_api_key']) document.getElementById('llm-api-key').value = settings['llm_api_key'];
-    document.getElementById('comfy-instance-uuid').value = settings['comfy_instance_uuid'] || '';
+    document.getElementById('comfy-instances').value = settings['comfy_instances'] || settings['comfy_instance_uuid'] || '';
+    document.getElementById('gpu-parallel').value = settings['gpu_parallel'] || '2';
     document.getElementById('comfy-api-token').value = settings['comfy_api_token'] || '';
     document.getElementById('comfy-base-url').value = settings['comfy_base_url'] || '';
     document.getElementById('comfy-unet').value = settings['comfy_unet'] || 'qwen_image_fp8_e4m3fn.safetensors';

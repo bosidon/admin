@@ -49,6 +49,7 @@ DEFAULTS = {
     "comfy_denoise": "1.0",
     "comfy_lora": "",
     "comfy_auto_shutdown": "1",
+    "comfy_instances": "",          # 实例池：每行一台 `uuid|备注`，顺序=优先级；为空则回落 comfy_instance_uuid
 }
 
 # aspect → (宽, 高)，与 illustrate.py 的 SIZES 对齐
@@ -631,15 +632,12 @@ def _adl(method, path, body=None):
         return {"code": "Exception", "msg": "%s: %s" % (type(e).__name__, e)}
 
 
-def adl_status():
-    cfg = get_comfy_config()
-    return _adl("GET", "/status", {"instance_uuid": cfg.get("comfy_instance_uuid", "")})
+def adl_status(instance_uuid=""):
+    return _adl("GET", "/status", {"instance_uuid": instance_uuid or primary_uuid()})
 
 
 def adl_snapshot(instance_uuid=""):
-    cfg = get_comfy_config()
-    return _adl("GET", "/snapshot",
-                {"instance_uuid": instance_uuid or cfg.get("comfy_instance_uuid", "")})
+    return _adl("GET", "/snapshot", {"instance_uuid": instance_uuid or primary_uuid()})
 
 
 def adl_list_instances():
@@ -651,14 +649,16 @@ def adl_list_instances():
 
 
 def adl_hosts():
-    """主机看板数据：每台实例的状态/规格/单价（只读，不开关机）"""
-    cur = (get_comfy_config().get("comfy_instance_uuid") or "").strip()
+    """主机看板数据：每台实例的状态/规格/单价（只读，不开关机）+ 是否在实例池里（含顺序号）"""
+    pool = instance_uuids()
+    cur = pool[0] if pool else ""
     out = []
     for it in adl_list_instances():
         u = it.get("uuid") or ""
         h = {"uuid": u, "name": it.get("name") or "", "status": it.get("status") or "",
              "region": it.get("region_name") or "", "spec": it.get("gpu_spec_uuid") or "",
-             "alias": "", "price": None, "current": u == cur}
+             "alias": "", "price": None, "current": u == cur,
+             "in_pool": u in pool, "pool_seq": (pool.index(u) + 1) if u in pool else 0}
         try:
             snap = (adl_snapshot(u).get("data") or {})
             h["alias"] = snap.get("snapshot_gpu_alias_name") or ""
@@ -670,15 +670,225 @@ def adl_hosts():
     return out
 
 
-def adl_power_on():
-    cfg = get_comfy_config()
+def adl_power_on(instance_uuid=""):
     return _adl("POST", "/power_on",
-                {"instance_uuid": cfg.get("comfy_instance_uuid", ""), "payload": "gpu"})
+                {"instance_uuid": instance_uuid or primary_uuid(), "payload": "gpu"})
 
 
-def adl_power_off():
+def adl_power_off(instance_uuid=""):
+    return _adl("POST", "/power_off", {"instance_uuid": instance_uuid or primary_uuid()})
+
+
+# ------------------------------------------------------------
+# ⭐ 实例池：多实例并行（每台一把锁 → 同台串行、跨台并行）
+# ------------------------------------------------------------
+_LOCK_POOL = {}                    # uuid -> Lock
+_LOCK_GUARD = threading.Lock()
+_SLOT = {"n": 0}                   # 正在占用「并行名额」的任务数
+_SLOT_GUARD = threading.Lock()
+
+
+def instance_pool():
+    """实例池（有序）：settings.comfy_instances 每行 `uuid|备注`；为空则回落旧的单实例字段"""
     cfg = get_comfy_config()
-    return _adl("POST", "/power_off", {"instance_uuid": cfg.get("comfy_instance_uuid", "")})
+    out = []
+    for ln in str(cfg.get("comfy_instances") or "").replace(",", "\n").split("\n"):
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        parts = ln.split("|", 1)
+        u = parts[0].strip()
+        if u and u not in [x["uuid"] for x in out]:
+            out.append({"uuid": u, "note": (parts[1].strip() if len(parts) > 1 else "")})
+    if not out:
+        u = str(cfg.get("comfy_instance_uuid") or "").strip()
+        if u:
+            out.append({"uuid": u, "note": "（兼容旧配置）"})
+    return out
+
+
+def instance_uuids():
+    return [x["uuid"] for x in instance_pool()]
+
+
+def primary_uuid():
+    pool = instance_uuids()
+    return pool[0] if pool else ""
+
+
+def parallel_limit():
+    """并行上限 = min(调度器的 gpu 域并发上限, 池内台数)；gpu_parallel 在设置页配（默认 2）"""
+    n = 1
+    try:
+        n = int(jobstore.domain_limit("gpu"))
+    except Exception:
+        n = 1
+    return max(1, min(n, len(instance_uuids()) or 1))
+
+
+def instance_lock(uuid):
+    with _LOCK_GUARD:
+        if uuid not in _LOCK_POOL:
+            _LOCK_POOL[uuid] = threading.Lock()
+        return _LOCK_POOL[uuid]
+
+
+def _slot_take():
+    with _SLOT_GUARD:
+        if _SLOT["n"] < parallel_limit():
+            _SLOT["n"] += 1
+            return True
+    return False
+
+
+def _slot_drop():
+    with _SLOT_GUARD:
+        if _SLOT["n"] > 0:
+            _SLOT["n"] -= 1
+
+
+def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300):
+    """挑一台「空闲且可用」的实例并锁住（返回 uuid, lock）
+    顺序：池内正在 running 的优先（秒级可用）→ 其余按池序尝试开机（无库存重试）
+    全忙/开不起来 → 等待（可被取消）；调用方负责 lock.release() + _slot_drop()"""
+    t0, warned = time.time(), False
+    while True:
+        if jobstore.canceled(job_id):
+            raise RuntimeError("已取消")
+        pool = instance_pool()
+        if not pool:
+            raise RuntimeError("未配置应用实例（设置页「实例池」）")
+        cands = pool[:max(1, parallel_limit())]
+        if _slot_take():
+            # ① 先挑已经在 running 且锁空闲的（不用等开机）
+            for x in cands:
+                lk = instance_lock(x["uuid"])
+                if not lk.acquire(blocking=False):
+                    continue
+                try:
+                    if (adl_status(x["uuid"]).get("data") or "") == "running":
+                        log("使用实例 %s（已在运行）" % x["uuid"])
+                        return x["uuid"], lk
+                except Exception:
+                    pass
+                lk.release()
+            # ② 再按池序尝试开机（先关掉 ① 探到的 shutdown 状态就是正常路径）
+            for i, x in enumerate(cands):
+                lk = instance_lock(x["uuid"])
+                if not lk.acquire(blocking=False):
+                    continue
+                left = len(cands) - i - 1                        # 后面还有候选 → 别在一台上耗满 5 分钟
+                try:
+                    jobstore.update(job_id, stage="booting", host=x["uuid"])
+                    _ensure_instance(x["uuid"], job_id, log,
+                                     timeout=(boot_timeout if not left else min(120, boot_timeout)))
+                    return x["uuid"], lk
+                except Exception as e:
+                    log("实例 %s 不可用（%s）%s" % (x["uuid"], str(e)[:70],
+                                                "→ 换下一台" if left else ""))
+                    lk.release()
+            _slot_drop()
+        if not warned:
+            jobstore.update(job_id, stage="waiting")
+            log("等待空闲实例…（%d 台：并行上限 %d）" % (len(cands), parallel_limit()))
+            warned = True
+        if time.time() - t0 > timeout:
+            raise RuntimeError("等待空闲实例超时（%d 分钟）" % (timeout // 60))
+        time.sleep(5)
+
+
+class _InstanceCtx:
+    """with instance_ctx(jid, log) as inst: —— 进场拿实例（含开机），退场释放锁与并行名额"""
+    def __init__(self, job_id, log):
+        self.job_id, self.log = job_id, log
+        self.uuid = self.lock = None
+
+    def __enter__(self):
+        self.uuid, self.lock = acquire_ready_instance(self.job_id, self.log)
+        return self.uuid
+
+    def __exit__(self, *exc):
+        try:
+            if self.lock:
+                self.lock.release()
+        finally:
+            _slot_drop()
+        return False
+
+
+def instance_ctx(job_id, log):
+    return _InstanceCtx(job_id, log)
+
+
+# ------------------------------------------------------------
+# ⭐ 模型名适配：同一份配置跑多台实例（不同实例的同名模型可能在不同子目录）
+# ------------------------------------------------------------
+_ENUM_CACHE = {}                   # base -> (ts, {kind: [names]})
+
+
+def instance_enums(base, ttl=600):
+    """该实例的模型枚举（缓存 ttl 秒）：unet / clip / vae / lora / ckpt"""
+    key = base or ""
+    now = time.time()
+    hit = _ENUM_CACHE.get(key)
+    if hit and (now - hit[0]) < ttl:
+        return hit[1]
+    oi = requests.get(key.rstrip("/") + "/object_info", timeout=90).json()
+
+    def enum(node, field):
+        try:
+            return list(oi[node]["input"]["required"][field][0])
+        except Exception:
+            return []
+    d = {"unet_name": enum("UNETLoader", "unet_name"),
+         "clip_name": enum("CLIPLoader", "clip_name"),
+         "vae_name": enum("VAELoader", "vae_name"),
+         "lora_name": enum("LoraLoader", "lora_name"),
+         "ckpt_name": enum("CheckpointLoaderSimple", "ckpt_name")}
+    _ENUM_CACHE[key] = (now, d)
+    return d
+
+
+def fit_name(kind, name, base):
+    """把模型名适配成该实例上的实际路径：精确命中 → 同名文件（不同子目录）→ 子串；找不到原样返回"""
+    name = str(name or "").strip()
+    if not name:
+        return name
+    try:
+        opts = instance_enums(base).get(kind) or []
+    except Exception:
+        return name
+    if not opts or name in opts:
+        return name
+    tail = name.split("/")[-1].lower()
+    for o in opts:
+        if o.split("/")[-1].lower() == tail:
+            return o
+    for o in opts:
+        if tail in o.lower():
+            return o
+    return name
+
+
+def fit_workflow(wf, base, logger=None):
+    """提交前把工作流里该实例没有的模型名换成实际路径；返回 [(kind, old, new), ...]"""
+    changes = []
+    try:
+        for node in (wf or {}).values():
+            ins = (node or {}).get("inputs") or {}
+            for k in ("unet_name", "clip_name", "vae_name", "lora_name", "ckpt_name"):
+                v = ins.get(k)
+                if isinstance(v, str) and v:
+                    nv = fit_name(k, v, base)
+                    if nv != v:
+                        ins[k] = nv
+                        changes.append((k, v, nv))
+                        if logger:
+                            logger("ⓘ 模型名适配：%s → %s" % (v, nv))
+    except Exception as e:
+        if logger:
+            logger("⚠ 模型名适配跳过（%s）" % str(e)[:80])
+    return changes
 
 
 def _comfy_ping(base, timeout=6):
@@ -689,10 +899,10 @@ def _comfy_ping(base, timeout=6):
         return False
 
 
-def _snapshot_domain():
-    """实例实时域名（AutoDL 换区/重建后域名会变）"""
+def _snapshot_domain(instance_uuid=""):
+    """指定实例的实时域名（AutoDL 换区/重建后域名会变）"""
     try:
-        snap = adl_snapshot().get("data") or {}
+        snap = adl_snapshot(instance_uuid).get("data") or {}
     except Exception:
         snap = {}
     dom = str(snap.get("service_6006_domain") or "").strip().rstrip("/")
@@ -701,25 +911,26 @@ def _snapshot_domain():
     return dom if dom.startswith("http") else "https://" + dom
 
 
-def resolve_base_url(logger=None):
-    """ComfyUI 访问地址：settings 优先；配了但探不通 → 自动回落到实例实时域名"""
+def base_for(instance_uuid="", logger=None):
+    """指定实例的 ComfyUI 地址：池中第一台优先用 settings 里配的地址（探得通才用），其余用实时域名"""
     cfg = get_comfy_config()
+    u = instance_uuid or primary_uuid()
     base = (cfg.get("comfy_base_url") or "").strip().rstrip("/")
     if base and not base.startswith("http"):
         base = "https://" + base
-    if base and _comfy_ping(base):
+    if base and u == primary_uuid() and _comfy_ping(base):
         return base
-    live = _snapshot_domain()
-    if live and live.rstrip("/") != base.rstrip("/"):
-        if logger:
-            if base:
-                logger("配置的 ComfyUI 地址探不通（%s），改用实例实时域名：%s" % (base, live))
-            else:
-                logger("未配置 ComfyUI 地址，改用实例实时域名：" + live)
-        return live
-    if not base and live:
+    live = _snapshot_domain(u)
+    if live:
+        if logger and base and live.rstrip("/") != base.rstrip("/"):
+            logger("实例 %s 实时地址：%s" % (u, live))
         return live
     return base
+
+
+def resolve_base_url(logger=None):
+    """（兼容旧调用）池中第一台的 ComfyUI 地址"""
+    return base_for(primary_uuid(), logger)
 
 
 # ============================================================
@@ -889,6 +1100,7 @@ def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, seed=None):
             "denoise": sp["denoise"], "unet": cfg.get("comfy_unet") or "",
             "lora": cfg.get("comfy_lora") or "",
             "width": w, "height": h}
+    meta["name_fit"] = fit_workflow(wf, base)      # 按实例适配模型名（多实例目录结构可能不同）
     r = requests.post(base + "/prompt", json={"prompt": wf}, timeout=60)
     if r.status_code != 200:
         raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, r.text[:300]))
@@ -981,8 +1193,9 @@ def comfy_run_wf(base, wf, timeout=900, poll=3):
     raise RuntimeError("加工超时（%ds）" % timeout)
 
 
-def _run_wf_one(base, wf, timeout=900):
+def _run_wf_one(base, wf, timeout=900, logger=None):
     """跑一个工作流并取回第一张图的字节"""
+    fit_workflow(wf, base, logger)                 # 按实例适配模型名
     imgs = comfy_run_wf(base, wf, timeout=timeout)
     return comfy_download(base, imgs[0][0], imgs[0][1])
 
@@ -1046,6 +1259,8 @@ def _log_gen_meta(log, article_id, name, kind, meta, style):
         % (meta.get("seed"), meta.get("steps"), meta.get("cfg"), meta.get("sampler"),
            meta.get("scheduler"), meta.get("width"), meta.get("height"),
            style_label_map().get(style, style) or "-", (meta.get("unet") or "-"), extra))
+    for _k, _old, _new in (meta.get("name_fit") or []):
+        log("\u24d8 模型名适配：%s → %s" % (_old, _new))
     log("\u24d8 正向：" + (meta.get("prompt") or ""))
     log("\u24d8 负面：" + (meta.get("neg") or ""))
     err = _save_gen_log(article_id, name, kind, meta, style)
@@ -1612,8 +1827,8 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
         return {"error": "请至少勾选一组要出图的条目"}
     if not plan_only:
         cfg = get_comfy_config()
-        if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
-            return {"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}
+        if not instance_uuids() or not cfg.get("comfy_api_token"):
+            return {"error": "未配置实例池 / Token，请去「设置」页填写"}
     kind = "plan" if plan_only else "images"
     payload = {"cards": want_cards, "scenes": want_scenes, "replan": bool(opts.get("replan")),
                "plan_only": plan_only, "card_size": card_size,
@@ -1629,9 +1844,9 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
 # ============================================================
 # 任务执行体（由 jobs.DISPATCHER 调度；状态/日志全部落 jobs 表）
 # ============================================================
-def _ensure_instance(job_id, log):
-    """确保实例 running（已在运行则跳过），返回是否本次开机"""
-    st = adl_status().get("data") or ""
+def _ensure_instance(instance_uuid, job_id, log, timeout=300):
+    """确保指定实例 running（已在运行则跳过），返回是否本次开机"""
+    st = adl_status(instance_uuid).get("data") or ""
     if st == "running":
         log("实例已在运行，跳过开机")
         return False
@@ -1639,10 +1854,10 @@ def _ensure_instance(job_id, log):
     # ⚠️ 开机常被「当前算力规格暂无库存，请修改配置或稍等再试」拒绝 → 每 30s 重试，最长 5 分钟
     # （实测重试即可抢到；不是配置错误，所以只有这类文案才重试，其它错误立刻失败）
     res, t0 = {}, time.time()
-    while time.time() - t0 < 300:
+    while time.time() - t0 < timeout:
         if jobstore.canceled(job_id):
             raise RuntimeError("已取消")
-        res = adl_power_on()
+        res = adl_power_on(instance_uuid)
         if res.get("code") == "Success":
             break
         msg = str(res.get("msg") or res.get("code") or "")
@@ -1658,29 +1873,31 @@ def _ensure_instance(job_id, log):
         if jobstore.canceled(job_id):
             raise RuntimeError("已取消")
         time.sleep(3)
-        if (adl_status().get("data") or "") == "running":
+        if (adl_status(instance_uuid).get("data") or "") == "running":
             log("实例已运行")
             return True
     raise RuntimeError("等待实例 running 超时")
 
 
-def _shutdown_if_idle(job_id, log):
-    """收尾：队列里还有出图任务就保持实例运行（省一次开关机），否则关机"""
+def _shutdown_if_idle(job_id, instance_uuid, log):
+    """收尾：还有排队任务（可能要用这台）就保持运行，否则关掉本次用的这台实例"""
     try:
         if get_comfy_config().get("comfy_auto_shutdown", "1") != "1":
             log("自动关机已关闭，实例保持运行")
             return
-        # 注意：必须连「正在跑」的一起数 —— 只数排队时，若同域有两个任务
-        # （比如从脚本入队、域判定不一致），先跑完的那个会把机器关掉，
-        # 正在等开机的另一个就直接失败（实测踩过）。
         gpu_kinds = ("images", "cutout", "edit", "stitch", "txt2img")   # 漏一个就会把还有任务的实例关掉
-        n = sum(jobstore.queued_count(k) + jobstore.running_count(k) for k in gpu_kinds)
-        if n > 1:
-            log("还有 %d 个 GPU 任务未完成，实例保持运行" % (n - 1))
+        pending = sum(jobstore.queued_count(k) for k in gpu_kinds)
+        if pending > 0:
+            log("还有 %d 个排队任务，实例 %s 保持运行" % (pending, instance_uuid))
             return
-        log("队列已空，关闭实例…")
-        r = adl_power_off()
-        log("关机结果：" + str(r.get("code") or r)[:80])
+        log("队列已空，关闭实例 %s…" % instance_uuid)
+        r = adl_power_off(instance_uuid)
+        code = str(r.get("code") or r)
+        msg = str(r.get("msg") or "")
+        if code == "Success" or "BadRequest" in code:      # 本来就没开机 → 也算完成（幂等）
+            log("关机完成")
+        else:
+            log("关机结果：" + (code + " " + msg)[:100])
     except Exception as e:
         log("关机异常：" + str(e)[:200])
 
@@ -1770,13 +1987,10 @@ def run_images_job(job):
          want_cards=want_cards, want_scenes=want_scenes)
     card_urls, scene_urls, done = [], [], 0
 
-    with RUN_LOCK:                      # 一块 GPU：双保险（调度器侧并发已是 1）
+    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：按池顺序挑一台空闲可用的（同台串行、跨台并行）
         try:
-            _set(jid, stage="booting", host=cfg.get("comfy_instance_uuid") or "")
-            _ensure_instance(jid, lambda m: _log(jid, m))
-
-            _set(jid, stage="ready")
-            base = resolve_base_url(logger=lambda m: _log(jid, m))
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
             if not base:
                 raise RuntimeError("拿不到 ComfyUI 地址")
             _log(jid, "ComfyUI 地址：" + base)
@@ -1847,7 +2061,7 @@ def run_images_job(job):
             raise RuntimeError(str(e)[:300])
         finally:
             _sync_materials(article_id, job)
-            _shutdown_if_idle(jid, lambda m: _log(jid, m))
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
 
 
 def run_material_job(job):
@@ -1864,18 +2078,16 @@ def run_material_job(job):
     if err:
         raise RuntimeError(err)
     cfg = get_comfy_config()
-    if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
-        raise RuntimeError("未配置应用实例 UUID / Token，请去「设置」页填写")
+    if not instance_uuids() or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置实例池 / Token，请去「设置」页填写")
     total = 1 if kind == "stitch" else len(rows)
     _set(jid, total=total, done=0)
     _log(jid, "%s：%d 张素材" % (title, len(rows)))
     results, done = [], 0
-    with RUN_LOCK:
+    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：挑一台空闲可用的
         try:
-            _set(jid, stage="booting", host=cfg.get("comfy_instance_uuid") or "")
-            _ensure_instance(jid, lambda m: _log(jid, m))
-            _set(jid, stage="ready")
-            base = resolve_base_url(logger=lambda m: _log(jid, m))
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
             if not base:
                 raise RuntimeError("拿不到 ComfyUI 地址")
             _log(jid, "ComfyUI 地址：" + base)
@@ -1893,7 +2105,7 @@ def run_material_job(job):
                 name = mat.out_name(kind, rows[0].get("file_path"), params,
                                     "|".join(sorted(r.get("file_path") or "" for r in rows)))
                 wf = mat.build_wf(kind, imgs, params, cfg=cfg)
-                (outdir / name).write_bytes(_run_wf_one(base, wf))
+                (outdir / name).write_bytes(_run_wf_one(base, wf, logger=lambda m: _log(jid, m)))
                 url = "%s/materials/%s/%s" % (mat.URL_PREFIX, aid, name)
                 results.append((rows[0], url))
                 done = 1
@@ -1915,7 +2127,7 @@ def run_material_job(job):
                     wf = mat.build_wf(kind, imgs, params, cfg=cfg,
                                       prompt=mat.make_prompt(kind, params),
                                       seed=random.randint(1, 2 ** 31 - 1))
-                    (outdir / name).write_bytes(_run_wf_one(base, wf))
+                    (outdir / name).write_bytes(_run_wf_one(base, wf, logger=lambda m: _log(jid, m)))
                     url = "%s/materials/%s/%s" % (mat.URL_PREFIX, aid, name)
                     results.append((r, url))
                     done += 1
@@ -1935,7 +2147,7 @@ def run_material_job(job):
             _log(jid, "❌ %s失败：%s" % (title, str(e)[:220]))
             raise RuntimeError(str(e)[:300])
         finally:
-            _shutdown_if_idle(jid, lambda m: _log(jid, m))
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
 
 
 def run_txt2img_job(job):
@@ -1952,17 +2164,15 @@ def run_txt2img_job(job):
     if not text:
         raise RuntimeError("提词不能为空")
     cfg = get_comfy_config()
-    if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
-        raise RuntimeError("未配置应用实例 UUID / Token，请去「设置」页填写")
+    if not instance_uuids() or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置实例池 / Token，请去「设置」页填写")
     short = text if len(text) <= 24 else text[:24] + "…"
     _set(jid, total=1, done=0, style=style)
     _log(jid, "文生图：%s（风格 %s · %s）" % (short, style_label_map().get(style, style) or "-", aspect))
-    with RUN_LOCK:
+    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：挑一台空闲可用的
         try:
-            _set(jid, stage="booting", host=cfg.get("comfy_instance_uuid") or "")
-            _ensure_instance(jid, lambda m: _log(jid, m))
-            _set(jid, stage="ready")
-            base = resolve_base_url(logger=lambda m: _log(jid, m))
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
             if not base:
                 raise RuntimeError("拿不到 ComfyUI 地址")
             _log(jid, "ComfyUI 地址：" + base)
@@ -1987,7 +2197,7 @@ def run_txt2img_job(job):
             _log(jid, "❌ 文生图失败：%s" % str(e)[:220])
             raise RuntimeError(str(e)[:300])
         finally:
-            _shutdown_if_idle(jid, lambda m: _log(jid, m))
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
 
 
 def register_jobs():

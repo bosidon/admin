@@ -45,7 +45,8 @@ from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok,
                      get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config,
                      load_model_groups, load_model_config, adl_hosts,
-                     style_groups, style_label_map, style_types, get_default_style, ASPECT_SIZE)
+                     style_groups, style_label_map, style_types, get_default_style, ASPECT_SIZE,
+                     instance_uuids, parallel_limit, adl_power_off)
 import jobs as jobstore
 import lines as contentlines
 import materials as materialstore
@@ -1491,17 +1492,31 @@ def api_rewrite_item():
 
 @app.route('/api/illustrate/instance', methods=['GET'])
 def api_instance_status():
-    """查询 AutoDL 应用实例状态"""
-    r = adl_status()
-    return jsonify({"ok": r.get("code") == "Success",
-                    "status": r.get("data") or "",
-                    "msg": r.get("msg") or r.get("code") or ""})
+    """查询实例池状态（多实例：逐台返回；status 取第一台，兼容旧前端）"""
+    pool = instance_uuids()
+    items, first = [], ""
+    for i, u in enumerate(pool):
+        r = adl_status(u)
+        st = r.get("data") or ""
+        if not i:
+            first = st
+        items.append({"uuid": u, "seq": i + 1, "status": st,
+                      "ok": r.get("code") == "Success",
+                      "msg": r.get("msg") or r.get("code") or ""})
+    return jsonify({"ok": True, "status": first, "pool": items,
+                    "parallel": parallel_limit(), "msg": ""})
 
 
 @app.route('/api/illustrate/shutdown', methods=['POST'])
 def api_instance_shutdown():
-    """手动关闭实例（兜底）"""
-    return jsonify(shutdown_instance())
+    """手动关闭实例（兜底）：关掉实例池里全部实例"""
+    out = []
+    for u in instance_uuids():
+        r = adl_power_off(u)
+        out.append({"uuid": u, "code": r.get("code") or "", "msg": str(r.get("msg") or "")[:80]})
+    ok = all(x["code"] in ("Success", "BadRequest") for x in out) if out else True
+    return jsonify({"ok": ok, "instances": out,
+                    "msg": "；".join("%s: %s" % (x["uuid"], x["code"]) for x in out) or "实例池为空"})
 
 
 @app.route('/api/comfy/check', methods=['POST'])
@@ -1745,8 +1760,8 @@ def api_materials_txt2img():
     if aspect not in ASPECT_SIZE:
         return jsonify({"error": "比例不存在"}), 400
     cfg = get_comfy_config()
-    if not cfg.get('comfy_instance_uuid') or not cfg.get('comfy_api_token'):
-        return jsonify({"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}), 400
+    if not instance_uuids() or not cfg.get('comfy_api_token'):
+        return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
     payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect}
     jid, reused = jobstore.DISPATCHER.enqueue('txt2img', None, payload, 1, priority=10,
                                              owner=user_label(u), owner_id=u.get('id'))
@@ -1843,8 +1858,8 @@ def api_materials_process():
     if err:
         return jsonify({"error": err}), 400
     cfg = get_comfy_config()
-    if not cfg.get('comfy_instance_uuid') or not cfg.get('comfy_api_token'):
-        return jsonify({"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}), 400
+    if not instance_uuids() or not cfg.get('comfy_api_token'):
+        return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
     payload = {"ids": [int(r['id']) for r in rows], "params": params}
     total = 1 if action == 'stitch' else len(rows)
     jid, reused = jobstore.DISPATCHER.enqueue(action, None, payload, total, priority=10,

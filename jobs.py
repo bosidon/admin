@@ -39,6 +39,7 @@ KIND_LABEL = {"images": "生成配图", "plan": "生成方案", "rewrite": "重�
 STATUS_LABEL = {"queued": "排队中", "running": "进行中", "done": "已完成",
                 "failed": "失败", "canceled": "已取消", "interrupted": "被中断"}
 STAGE_LABEL = {"planning": "分析文案", "booting": "开机中", "ready": "等 ComfyUI",
+               "waiting": "等空闲实例",
                "generating": "出图中", "": ""}
 
 

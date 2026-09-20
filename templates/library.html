@@ -61,9 +61,10 @@
 {% block scripts %}
 <script>
 let ITEMS = [], SEL = new Set(), OPTS = {}, PANEL_ACTION = '', SEQ = 0;
-let ORDERED = [];          // 当前渲染顺序（分组后），查看层的上一个/下一个按它走
-let GROUPS = [];           // 当前分组
-const COLLAPSED = new Set();   // 收起的文案分组（key = 文案编号，0 = 未归类）
+let ORDERED = [];          // 当前「可见」顺序（分类/分组后），查看层的上一个/下一个按它走
+let TREE = [];             // 顶层分类（文章配图 / 上传 / 编辑 …）
+let NODES = {};            // key → 节点（分类 + 文案子组）
+const OPEN = new Map();    // 手动展开/收起（未记录 → 默认：分类展开、文案子组折叠）
 const TYPE_ICON = {image:'🖼', audio:'🎵', video:'🎬'};
 const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版'};
 const LINE_LABEL = {lingxiu:'灵性书籍', maya:'玛雅天赋', tarot:'塔罗', psych:'心理咨询'};
@@ -84,42 +85,76 @@ async function load() {
     render(); syncSel();
 }
 
-/* ---------- 按文案归类 ---------- */
-function buildGroups(rows) {
-    const map = new Map();
-    rows.forEach(m => {
-        const k = parseInt(m.article_id || 0, 10) || 0;
-        if (!map.has(k)) { map.set(k, []); }
-        map.get(k).push(m);
-    });
-    const gs = [...map.entries()].map(([k, items]) => ({
-        key: k, items: items, ids: items.map(m => m.id),
-        title: (items[0] && items[0].article_title) || (k ? ('文案 #' + k) : '未归类'),
-        line: (items[0] && items[0].article_line) || '',    // 文案业务线（无文案的未归类 → 不显示标签）
-        latest: items.reduce((s, m) => ((m.created_at || '') > s ? m.created_at : s), '')
-    }));
-    gs.sort((a, b) => {
-        if (a.key === 0) { return 1; }              // 未归类固定最后
-        if (b.key === 0) { return -1; }
-        return (b.latest || '').localeCompare(a.latest || '');   // 按组内最新素材时间倒序
-    });
-    return gs;
-}
-
+/* ---------- 两级归类：分类（文章配图 / 上传 / 编辑…）→ 文案子组 ---------- */
+const SRC_TITLE = {upload: '上传', edit: '编辑', cutout: '抠图', stitch: '拼版'};
 const GRID_STYLE = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;';
 
-function groupHead(g) {
-    const off = COLLAPSED.has(g.key);
-    const all = g.ids.length > 0 && g.ids.every(id => SEL.has(id));
-    return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
-        + '<span onclick="toggleGroup(' + g.key + ')" style="cursor:pointer;display:flex;align-items:center;gap:7px;min-width:0;">'
-        + '<span style="color:#94a3b8;font-size:12px;width:10px;">' + (off ? '▸' : '▾') + '</span>'
-        + '<span style="font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(640px,58vw);">'
-        + esc(g.title) + '</span></span>'
-        + (g.line ? '<span class="tag tag-gray" style="font-size:11px;">' + esc(LINE_LABEL[g.line] || g.line) + '</span>' : '')
-        + '<span style="font-size:12px;color:#94a3b8;">' + g.items.length + ' 张</span>'
+function mkNode(key, type, o) {          // 建节点并登记（全选/折叠都按 key 找）
+    const n = Object.assign({key: key, type: type, ids: o.items.map(m => m.id)}, o);
+    NODES[key] = n;
+    return n;
+}
+
+function buildTree(rows) {
+    const arts = new Map(), bySrc = new Map();
+    rows.forEach(m => {
+        const aid = parseInt(m.article_id || 0, 10) || 0;
+        if (aid) {                                  // 有文案 → 一律进「文章配图」（含抠图/编辑/拼版产物）
+            if (!arts.has(aid)) { arts.set(aid, []); }
+            arts.get(aid).push(m);
+        } else {                                    // 无文案 → 按来源分类（上传 / 编辑 / 抠图 / 拼版）
+            const k = m.source || 'other';
+            if (!bySrc.has(k)) { bySrc.set(k, []); }
+            bySrc.get(k).push(m);
+        }
+    });
+    NODES = {};
+    const cats = [];
+    if (arts.size) {
+        const subs = [...arts.entries()].map(([aid, items]) => mkNode('s:' + aid, 'group', {
+            items: items,
+            title: (items[0] && items[0].article_title) || ('文案 #' + aid),
+            line: (items[0] && items[0].article_line) || '',
+            latest: items.reduce((s, m) => ((m.created_at || '') > s ? m.created_at : s), '')
+        })).sort((a, b) => (b.latest || '').localeCompare(a.latest || ''));   // 文案子组：最新素材时间倒序
+        const all = [];
+        subs.forEach(x => x.items.forEach(m => all.push(m)));
+        cats.push(mkNode('cat:article', 'cat', {title: '文章配图', items: all, children: subs}));
+    }
+    ['upload', 'edit', 'cutout', 'stitch'].forEach(k => {
+        if (bySrc.has(k)) { cats.push(mkNode('cat:' + k, 'cat', {title: SRC_TITLE[k] || k, items: bySrc.get(k)})); }
+    });
+    if (bySrc.has('other')) { cats.push(mkNode('cat:other', 'cat', {title: '未归类', items: bySrc.get('other')})); }
+    return cats;
+}
+
+function isOpen(n) {                     // 默认：分类展开、文案子组折叠
+    return OPEN.has(n.key) ? OPEN.get(n.key) : (n.type === 'cat');
+}
+
+function flatten(tree) {                 // 只收「当前可见」的卡片，查看层的上一个/下一个不跳进收起的分组
+    let out = [];
+    tree.forEach(c => {
+        if (!isOpen(c)) { return; }
+        if (c.children) { c.children.forEach(sub => { if (isOpen(sub)) { out = out.concat(sub.items); } }); }
+        else { out = out.concat(c.items); }
+    });
+    return out;
+}
+
+function head(n) {
+    const open = isOpen(n), cat = n.type === 'cat';
+    const canSel = n.type === 'group' || !n.children;      // 「文章配图」大类不提供全选（会一次选几十张）
+    const all = canSel && n.ids.length > 0 && n.ids.every(id => SEL.has(id));
+    return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:' + (cat ? '12px' : '10px') + ';">'
+        + '<span onclick="toggleNode(\'' + n.key + '\')" style="cursor:pointer;display:flex;align-items:center;gap:7px;min-width:0;">'
+        + '<span style="color:#94a3b8;font-size:12px;width:10px;">' + (open ? '▾' : '▸') + '</span>'
+        + '<span style="font-weight:600;font-size:' + (cat ? '14.5px' : '13.5px')
+        + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(640px,58vw);">' + esc(n.title) + '</span></span>'
+        + (n.line ? '<span class="tag tag-gray" style="font-size:11px;">' + esc(LINE_LABEL[n.line] || n.line) + '</span>' : '')
+        + '<span style="font-size:12px;color:#94a3b8;">' + n.ids.length + ' 张</span>'
         + '<span style="flex:1;"></span>'
-        + '<button class="btn btn-outline btn-sm" onclick="selectGroup(' + g.key + ')">' + (all ? '取消' : '全选') + '</button>'
+        + (canSel ? '<button class="btn btn-outline btn-sm" onclick="selectNode(\'' + n.key + '\')">' + (all ? '取消' : '全选') + '</button>' : '')
         + '</div>';
 }
 
@@ -129,29 +164,34 @@ function render() {
     document.getElementById('count').textContent = rows.length + ' 项';
     const el = document.getElementById('grid');
     if (!rows.length) {
-        GROUPS = []; ORDERED = [];
+        TREE = []; NODES = {}; ORDERED = [];
         el.innerHTML = '<div style="text-align:center;padding:44px;color:#94a3b8;">'
             + '📭 暂无素材<br><span style="font-size:12px;">配图生成的图会自动出现在这里，也可以直接上传</span></div>';
         return;
     }
-    GROUPS = buildGroups(rows);
-    ORDERED = GROUPS.reduce((a, g) => a.concat(g.items), []);
-    el.innerHTML = GROUPS.map((g, i) => '<div style="' + (i ? 'margin-top:20px;padding-top:16px;border-top:1px solid #f1f5f9;' : '') + '">'
-        + groupHead(g)
-        + (COLLAPSED.has(g.key) ? '' : '<div style="' + GRID_STYLE + '">' + g.items.map(card).join('') + '</div>')
+    TREE = buildTree(rows);
+    ORDERED = flatten(TREE);
+    el.innerHTML = TREE.map((c, i) => '<div style="' + (i ? 'margin-top:22px;padding-top:16px;border-top:1px solid #e2e8f0;' : '') + '">'
+        + head(c)
+        + (isOpen(c) ? (c.children
+            ? c.children.map(sub => '<div style="padding-left:2px;margin-bottom:16px;">' + head(sub)
+                + (isOpen(sub) ? '<div style="' + GRID_STYLE + '">' + sub.items.map(card).join('') + '</div>' : '') + '</div>').join('')
+            : '<div style="' + GRID_STYLE + '">' + c.items.map(card).join('') + '</div>') : '')
         + '</div>').join('');
 }
 
-function toggleGroup(key) {
-    if (COLLAPSED.has(key)) { COLLAPSED.delete(key); } else { COLLAPSED.add(key); }
+function toggleNode(key) {
+    const n = NODES[key];
+    if (!n) { return; }
+    OPEN.set(key, !isOpen(n));
     render();
 }
 
-function selectGroup(key) {          // 组头全选 / 取消（只作用于该文案下的素材）
-    const g = GROUPS.find(x => x.key === key);
-    if (!g) { return; }
-    const all = g.ids.every(id => SEL.has(id));
-    g.ids.forEach(id => { if (all) { SEL.delete(id); } else { SEL.add(id); } });
+function selectNode(key) {               // 组头全选 / 取消（文案子组 或 上传/编辑 等分类）
+    const n = NODES[key];
+    if (!n) { return; }
+    const all = n.ids.length > 0 && n.ids.every(id => SEL.has(id));
+    n.ids.forEach(id => { if (all) { SEL.delete(id); } else { SEL.add(id); } });
     render(); syncSel();
 }
 
@@ -323,8 +363,7 @@ let VDRAG = null;
 function viewerVisible() { return document.getElementById('viewer').style.display === 'flex'; }
 
 function viewList(type) {
-    const src = ORDERED.length ? ORDERED : ITEMS;    // 跟随分组后的显示顺序
-    return src.filter(m => m.type === type);
+    return ORDERED.filter(m => m.type === type);     // 只看当前可见的（收起的分组不参与上一个/下一个）
 }
 
 function openViewer(id) {

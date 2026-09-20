@@ -1655,8 +1655,25 @@ def api_get_library():
     library_type = request.args.get('type', 'all')     # all / image / audio / video
     scope = request.args.get('scope', 'mine')          # mine / shared
     u = current_user()
-    return jsonify(materialstore.list_for(uid=(u or {}).get('id'), mtype=library_type,
-                                          scope=scope, is_admin=_is_admin(u)))
+    rows = materialstore.list_for(uid=(u or {}).get('id'), mtype=library_type,
+                                  scope=scope, is_admin=_is_admin(u))
+    # 归属文案标题（素材库按文案归类用；跨库查 content.db，取不到留空由前端回落「文案 #id」）
+    ids = sorted({int(r.get("article_id") or 0) for r in rows if (r.get("article_id") or 0)})
+    titles = {}
+    if ids:
+        try:
+            cdb = get_content_db()
+            q = ",".join("?" * len(ids))
+            for t in cdb.execute("SELECT id, title, IFNULL(NULLIF(service_line,''),'lingxiu') AS line "
+                                 "FROM articles WHERE id IN (%s)" % q, ids).fetchall():
+                titles[t["id"]] = ((t["title"] or "").strip(), t["line"] or "")
+        except Exception:
+            titles = {}
+    for r in rows:
+        t = titles.get(int(r.get("article_id") or 0)) or ("", "")
+        r["article_title"] = t[0]
+        r["article_line"] = t[1]
+    return jsonify(rows)
 
 
 @app.route('/api/materials/options')

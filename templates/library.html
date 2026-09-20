@@ -25,7 +25,7 @@
         <span style="flex:1;"></span>
         <span id="count" style="font-size:12px;color:#94a3b8;"></span>
     </div>
-    <div id="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;"></div>
+    <div id="grid"></div>
 </div>
 
 <div id="panel" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:999;align-items:center;justify-content:center;">
@@ -61,6 +61,9 @@
 {% block scripts %}
 <script>
 let ITEMS = [], SEL = new Set(), OPTS = {}, PANEL_ACTION = '', SEQ = 0;
+let ORDERED = [];          // 当前渲染顺序（分组后），查看层的上一个/下一个按它走
+let GROUPS = [];           // 当前分组
+const COLLAPSED = new Set();   // 收起的文案分组（key = 文案编号，0 = 未归类）
 const TYPE_ICON = {image:'🖼', audio:'🎵', video:'🎬'};
 const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版'};
 const LINE_LABEL = {lingxiu:'灵性书籍', maya:'玛雅天赋', tarot:'塔罗', psych:'心理咨询'};
@@ -81,17 +84,75 @@ async function load() {
     render(); syncSel();
 }
 
+/* ---------- 按文案归类 ---------- */
+function buildGroups(rows) {
+    const map = new Map();
+    rows.forEach(m => {
+        const k = parseInt(m.article_id || 0, 10) || 0;
+        if (!map.has(k)) { map.set(k, []); }
+        map.get(k).push(m);
+    });
+    const gs = [...map.entries()].map(([k, items]) => ({
+        key: k, items: items, ids: items.map(m => m.id),
+        title: (items[0] && items[0].article_title) || (k ? ('文案 #' + k) : '未归类'),
+        line: (items[0] && items[0].article_line) || '',    // 文案业务线（无文案的未归类 → 不显示标签）
+        latest: items.reduce((s, m) => ((m.created_at || '') > s ? m.created_at : s), '')
+    }));
+    gs.sort((a, b) => {
+        if (a.key === 0) { return 1; }              // 未归类固定最后
+        if (b.key === 0) { return -1; }
+        return (b.latest || '').localeCompare(a.latest || '');   // 按组内最新素材时间倒序
+    });
+    return gs;
+}
+
+const GRID_STYLE = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;';
+
+function groupHead(g) {
+    const off = COLLAPSED.has(g.key);
+    const all = g.ids.length > 0 && g.ids.every(id => SEL.has(id));
+    return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
+        + '<span onclick="toggleGroup(' + g.key + ')" style="cursor:pointer;display:flex;align-items:center;gap:7px;min-width:0;">'
+        + '<span style="color:#94a3b8;font-size:12px;width:10px;">' + (off ? '▸' : '▾') + '</span>'
+        + '<span style="font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(640px,58vw);">'
+        + esc(g.title) + '</span></span>'
+        + (g.line ? '<span class="tag tag-gray" style="font-size:11px;">' + esc(LINE_LABEL[g.line] || g.line) + '</span>' : '')
+        + '<span style="font-size:12px;color:#94a3b8;">' + g.items.length + ' 张</span>'
+        + '<span style="flex:1;"></span>'
+        + '<button class="btn btn-outline btn-sm" onclick="selectGroup(' + g.key + ')">' + (all ? '取消' : '全选') + '</button>'
+        + '</div>';
+}
+
 function render() {
     const q = (val('q') || '').trim().toLowerCase();
     const rows = ITEMS.filter(m => !q || (m.name || '').toLowerCase().includes(q));
     document.getElementById('count').textContent = rows.length + ' 项';
     const el = document.getElementById('grid');
     if (!rows.length) {
-        el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
+        GROUPS = []; ORDERED = [];
+        el.innerHTML = '<div style="text-align:center;padding:44px;color:#94a3b8;">'
             + '📭 暂无素材<br><span style="font-size:12px;">配图生成的图会自动出现在这里，也可以直接上传</span></div>';
         return;
     }
-    el.innerHTML = rows.map(card).join('');
+    GROUPS = buildGroups(rows);
+    ORDERED = GROUPS.reduce((a, g) => a.concat(g.items), []);
+    el.innerHTML = GROUPS.map((g, i) => '<div style="' + (i ? 'margin-top:20px;padding-top:16px;border-top:1px solid #f1f5f9;' : '') + '">'
+        + groupHead(g)
+        + (COLLAPSED.has(g.key) ? '' : '<div style="' + GRID_STYLE + '">' + g.items.map(card).join('') + '</div>')
+        + '</div>').join('');
+}
+
+function toggleGroup(key) {
+    if (COLLAPSED.has(key)) { COLLAPSED.delete(key); } else { COLLAPSED.add(key); }
+    render();
+}
+
+function selectGroup(key) {          // 组头全选 / 取消（只作用于该文案下的素材）
+    const g = GROUPS.find(x => x.key === key);
+    if (!g) { return; }
+    const all = g.ids.every(id => SEL.has(id));
+    g.ids.forEach(id => { if (all) { SEL.delete(id); } else { SEL.add(id); } });
+    render(); syncSel();
 }
 
 const ICON_BTN = 'width:24px;height:24px;line-height:22px;text-align:center;border-radius:6px;'
@@ -262,8 +323,8 @@ let VDRAG = null;
 function viewerVisible() { return document.getElementById('viewer').style.display === 'flex'; }
 
 function viewList(type) {
-    const q = (val('q') || '').trim().toLowerCase();
-    return ITEMS.filter(m => m.type === type && (!q || (m.name || '').toLowerCase().includes(q)));
+    const src = ORDERED.length ? ORDERED : ITEMS;    // 跟随分组后的显示顺序
+    return src.filter(m => m.type === type);
 }
 
 function openViewer(id) {

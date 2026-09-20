@@ -27,16 +27,22 @@
 <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
         <div style="font-weight:600;font-size:15px;">任务列表 <span id="job-count" style="font-size:12px;font-weight:400;color:var(--text2);"></span></div>
-        <div id="filters" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <div id="owner-filter"></div>
+            <div id="filters" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+        </div>
     </div>
     <div id="jobs"></div>
+    <div id="timing" style="display:none;"></div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-const FILTERS = [['', '全部'], ['queued', '排队中'], ['running', '进行中'], ['done', '已完成'], ['failed', '失败']];
-let CUR = '';
+const TABS = [['active', '进行中'], ['done', '已完成']];   // 两类：进行中=排队+进行；已完成=完成+失败+取消+中断
+let TAB = 'active';
+let OWNER = '';                       // 管理员用户筛选（owner_id）
+let ME = {admin: false, id: '', name: ''};
 let TIMER = null;
 
 function esc(s) {
@@ -52,6 +58,12 @@ function fmtDur(s) {
     if (s < 60) return s + ' 秒';
     const m = Math.floor(s / 60), r = s % 60;
     return m + ' 分' + (r ? r + ' 秒' : '');
+}
+function fmtDurLong(s) {                 // 统计用（支持小时）
+    s = Math.round(s || 0);
+    if (s < 60) return s + ' 秒';
+    if (s < 3600) return Math.floor(s / 60) + ' 分' + (s % 60 ? (s % 60) + ' 秒' : '');
+    return Math.floor(s / 3600) + ' 小时 ' + Math.floor((s % 3600) / 60) + ' 分';
 }
 const ST_COLOR = {running: 'var(--info)', queued: 'var(--warning)', failed: 'var(--danger)',
                   canceled: 'var(--text2)', interrupted: 'var(--warning)', done: 'var(--success)'};
@@ -96,12 +108,24 @@ async function loadHosts() {
 
 /* ---------- 统计 + 任务列表 ---------- */
 function renderFilters() {
-    document.getElementById('filters').innerHTML = FILTERS.map(([k, lbl]) =>
-        '<span onclick="setFilter(\'' + k + '\')" style="cursor:pointer;font-size:12px;padding:4px 10px;border-radius:100px;'
-        + (k === CUR ? 'background:var(--primary);color:#fff;' : 'background:var(--bg);color:var(--text2);border:1px solid var(--border);')
+    document.getElementById('filters').innerHTML = TABS.map(([k, lbl]) =>
+        '<span onclick="setTab(\'' + k + '\')" style="cursor:pointer;font-size:12px;padding:4px 10px;border-radius:100px;'
+        + (k === TAB ? 'background:var(--primary);color:#fff;' : 'background:var(--bg);color:var(--text2);border:1px solid var(--border);')
         + '">' + lbl + '</span>').join('');
 }
-function setFilter(k) { CUR = k; renderFilters(); loadJobs(); }
+function setTab(k) { TAB = k; OWNER = ''; renderFilters(); loadJobs(); }
+function setOwner(v) { OWNER = v; loadJobs(); }
+function renderOwnerFilter(owners) {          // 管理员在「已完成」里筛选用户
+    const el = document.getElementById('owner-filter');
+    if (!ME.admin || TAB !== 'done') { el.innerHTML = ''; return; }
+    const sel = String(OWNER);
+    const opts = (owners || []).map(o =>
+        '<option value="' + esc(o.id) + '"' + (sel === String(o.id) ? ' selected' : '') + '>'
+        + esc(o.name) + '（' + o.count + '）</option>').join('');
+    el.innerHTML = '<select onchange="setOwner(this.value)" style="font-size:12px;padding:5px 8px;'
+        + 'border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);">'
+        + '<option value="">全部用户</option>' + opts + '</select>';
+}
 
 function jobRow(j) {
     const col = ST_COLOR[j.status] || 'var(--text2)';
@@ -114,8 +138,10 @@ function jobRow(j) {
     const x = j.can_cancel
         ? '<span onclick="cancelJob(\'' + j.id + '\')" title="取消任务" style="cursor:pointer;color:var(--danger);padding:0 4px;">✕</span>'
         : '';
+    const own = ME.admin
+        ? '<td style="padding:9px 10px;font-size:13px;">' + esc(j.owner || '—') + '</td>' : '';
     return '<tr style="border-top:1px solid var(--border);">'
-        + '<td style="padding:9px 10px;font-size:13px;">' + esc(j.owner || '—') + '</td>'
+        + own
         + '<td style="padding:9px 10px;font-size:13px;max-width:320px;">' + link + '</td>'
         + '<td style="padding:9px 10px;"><span class="tag tag-gray">' + esc(j.kind_label || j.kind) + '</span></td>'
         + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;">' + (j.total ? j.done + '/' + j.total : '—') + '</td>'
@@ -126,25 +152,45 @@ function jobRow(j) {
         + '</tr>';
 }
 
+function renderTiming(t) {          // 「已完成」列表底部：用时统计
+    const el = document.getElementById('timing');
+    if (!t || !t.count) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    const kinds = (t.by_kind || []).map(k =>
+        '<span style="display:inline-block;background:var(--bg);border:1px solid var(--border);'
+        + 'border-radius:100px;padding:3px 10px;margin:5px 6px 0 0;font-size:12px;">'
+        + esc(k.label) + ' ' + k.count + ' 个 · ' + fmtDurLong(k.seconds)
+        + '（平均 ' + fmtDurLong(k.avg) + '）</span>').join('');
+    el.style.display = 'block';
+    el.innerHTML = '<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px;">'
+        + '<div style="font-size:13px;">已完成 <b>' + t.count + '</b> 个 · 合计用时 <b>'
+        + fmtDurLong(t.seconds) + '</b> · 平均 <b>' + fmtDurLong(t.avg) + '</b>'
+        + '<span style="color:var(--text2);font-size:12px;">（含开机等待）</span></div>'
+        + (kinds ? '<div>' + kinds + '</div>' : '') + '</div>';
+}
+
 let SEQ = 0;                       // 过滤/刷新并发保护：旧请求的返回一律丢弃
 async function loadJobs() {
     const my = ++SEQ;
-    const r = await api('/api/jobs?limit=50' + (CUR ? '&status=' + CUR : ''));
+    let qs = '/api/jobs?limit=50&state=' + TAB;
+    if (TAB === 'done' && OWNER) qs += '&owner=' + encodeURIComponent(OWNER);
+    const r = await api(qs);
     if (my !== SEQ) return;
     if (!r || !r.jobs) return;
+    ME = r.me || ME;
     const s = r.stats || {};
     document.getElementById('s-queued').textContent = s.queued || 0;
     document.getElementById('s-running').textContent = s.running || 0;
     document.getElementById('s-done').textContent = s.done_today || 0;
     document.getElementById('s-failed').textContent = s.failed_today || 0;
     document.getElementById('job-count').textContent = '(' + r.jobs.length + ')';
+    renderOwnerFilter(r.owners);
     const el = document.getElementById('jobs');
     if (!r.jobs.length) {
         el.innerHTML = '<div style="font-size:13px;color:var(--text2);padding:10px 2px;">没有任务</div>';
     } else {
         el.innerHTML = '<table style="width:100%;border-collapse:collapse;">'
             + '<thead><tr style="text-align:left;color:var(--text2);font-size:12px;">'
-            + '<th style="padding:0 10px 8px;font-weight:600;">用户</th>'
+            + (ME.admin ? '<th style="padding:0 10px 8px;font-weight:600;">用户</th>' : '')
             + '<th style="padding:0 10px 8px;font-weight:600;">文案</th>'
             + '<th style="padding:0 10px 8px;font-weight:600;">类型</th>'
             + '<th style="padding:0 10px 8px;font-weight:600;">进度</th>'
@@ -152,7 +198,8 @@ async function loadJobs() {
             + '<th style="padding:0 10px 8px;font-weight:600;">时间 · 耗时</th>'
             + '<th></th></tr></thead><tbody>' + r.jobs.map(jobRow).join('') + '</tbody></table>';
     }
-    if ((s.queued || 0) + (s.running || 0) > 0) startPoll(); else stopPoll();
+    renderTiming(TAB === 'done' ? r.timing : null);
+    if (TAB === 'active' && (s.queued || 0) + (s.running || 0) > 0) startPoll(); else stopPoll();
 }
 
 async function cancelJob(id) {

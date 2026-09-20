@@ -1406,10 +1406,25 @@ def api_jobs():
     st = request.args.get('status') or None
     if st not in ('queued', 'running', 'done', 'failed', 'canceled', 'interrupted'):
         st = None
+    state = request.args.get('state') or None
+    if state not in ('active', 'done'):
+        state = None
     me = current_user()
     me_id, me_name = str(me.get("id") or ""), user_label(me)
+    _adm = _is_admin(me)
+    # 归属权限：活跃任务（排队/进行中）全员可见；终态任务（完成/失败/取消/中断）只看自己，
+    #           管理员看全部并可 ?owner=<uid> 筛选；带 article_id（配图页）时文章归属已校验，不受限
+    owner_id, me_only = None, None
+    if not aid:
+        if _adm:
+            ow = (request.args.get('owner') or '').strip()
+            if ow:
+                owner_id = me_id if ow == 'me' else ow
+        else:
+            me_only = me_id
     for j in jobstore.list_jobs(active=active, article_id=int(aid) if aid else None,
-                                limit=limit, status=st):
+                                limit=limit, status=st, state=state,
+                                owner_id=owner_id, me_id=me_only):
         j["log"] = j.get("log_lines") or []
         out.append(j)
     # 补文案名称（任务行显示《标题》；取不到留空，前端回落 #id）
@@ -1427,8 +1442,16 @@ def api_jobs():
         j["article_title"] = titles.get(j.get("article_id"), "")
         j["can_cancel"] = _can_cancel(j, me_id, me_name)
         j["duration"] = _job_duration(j)
+    # 用时统计（已完成）：口径 finished-started，含开机等待；范围跟随当前可见范围，不受 limit 限制
+    if _adm:
+        t_owner = owner_id if not aid else None
+    else:
+        t_owner = me_id          # 非管理员：用时统计永远只算自己（与「终态只看自己」一致）
     return jsonify({"ok": True, "jobs": out, "summary": jobstore.active_summary(),
-                    "stats": jobstore.stats_today()})
+                    "stats": jobstore.stats_today(owner_id=(None if (aid or _adm) else me_id)),
+                    "timing": jobstore.timing_summary(owner_id=t_owner),
+                    "me": {"id": me_id, "name": me_name, "admin": _adm},
+                    "owners": jobstore.owner_options() if (_adm and not aid) else []})
 
 
 @app.route('/api/jobs/<job_id>/cancel', methods=['POST'])

@@ -161,18 +161,29 @@ def find_active(kind, article_id, payload=None):
     return None
 
 
-def list_jobs(active=False, article_id=None, limit=20, status=None):
+def list_jobs(active=False, article_id=None, limit=20, status=None,
+              state=None, owner_id=None, me_id=None):
+    """state='active'（排队+进行中）/ 'done'（终态）；
+       owner_id：只看该归属人；me_id：非管理员视角（活跃任务全员可见 + 终态只看自己）"""
     c = _conn()
     sql = "SELECT * FROM jobs WHERE 1=1"
     args = []
-    if active:
+    if active or state == 'active':
         sql += " AND status IN ('queued','running')"
+    elif state == 'done':
+        sql += " AND status IN (%s)" % ",".join("'%s'" % x for x in STATUS_DONE)
     if article_id:
         sql += " AND article_id=?"
         args.append(int(article_id))
     if status:
         sql += " AND status=?"
         args.append(status)
+    if owner_id:
+        sql += " AND owner_id=?"
+        args.append(str(owner_id))
+    if me_id:
+        sql += " AND (status IN ('queued','running') OR owner_id=?)"
+        args.append(str(me_id))
     sql += (" ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,"
             " created_at DESC LIMIT ?")
     args.append(int(limit))
@@ -433,21 +444,62 @@ class Dispatcher:
 DISPATCHER = Dispatcher()
 
 
-def stats_today():
-    """看板统计：排队 / 进行中 / 今日完成 / 今日失败或取消"""
+def stats_today(owner_id=None):
+    """看板统计：排队 / 进行中 / 今日完成 / 今日失败或取消
+       owner_id 给定时「今日完成/今日失败」只统计该用户（终态任务只看自己）"""
     c = _conn()
     day = time.strftime("%Y-%m-%d")
     def n(sql, a=()):
         return c.execute(sql, a).fetchone()[0]
+    own = " AND owner_id=?" if owner_id else ""
+    a_done = (day + "%", str(owner_id)) if owner_id else (day + "%",)
     out = {"queued": n("SELECT COUNT(*) FROM jobs WHERE status='queued'"),
            "running": n("SELECT COUNT(*) FROM jobs WHERE status='running'"),
-           "done_today": n("SELECT COUNT(*) FROM jobs WHERE status='done' AND finished_at LIKE ?",
-                           (day + "%",)),
+           "done_today": n("SELECT COUNT(*) FROM jobs WHERE status='done' AND finished_at LIKE ?" + own, a_done),
            "failed_today": n("SELECT COUNT(*) FROM jobs WHERE status IN "
-                             "('failed','canceled','interrupted') AND finished_at LIKE ?",
-                             (day + "%",))}
+                             "('failed','canceled','interrupted') AND finished_at LIKE ?" + own, a_done)}
     c.close()
     return out
+
+
+# 用时统计口径：finished_at - started_at（含开机 + 等 ComfyUI 就绪的完整占用）
+_SEC = "((julianday(finished_at) - julianday(started_at)) * 86400)"
+
+def _terminal_where(owner_id=None):
+    w = ("status IN (%s) AND IFNULL(started_at,'')<>'' AND IFNULL(finished_at,'')<>''"
+         % ",".join("'%s'" % x for x in STATUS_DONE))
+    a = []
+    if owner_id:
+        w += " AND owner_id=?"
+        a.append(str(owner_id))
+    return w, a
+
+
+def timing_summary(owner_id=None):
+    """已完成任务用时统计（不受列表条数限制）。
+       owner_id=None → 全部用户；返回 总数/合计秒/平均秒 + 按类型明细"""
+    w, a = _terminal_where(owner_id)
+    c = _conn()
+    r = c.execute("SELECT COUNT(*) n, COALESCE(SUM(%s),0) secs, COALESCE(AVG(%s),0) av"
+                  " FROM jobs WHERE %s" % (_SEC, _SEC, w), a).fetchone()
+    rows = c.execute("SELECT kind, COUNT(*) n, COALESCE(SUM(%s),0) secs, COALESCE(AVG(%s),0) av"
+                     " FROM jobs WHERE %s GROUP BY kind ORDER BY secs DESC" % (_SEC, _SEC, w), a).fetchall()
+    c.close()
+    kinds = [{"kind": x["kind"], "label": KIND_LABEL.get(x["kind"], x["kind"]),
+              "count": int(x["n"]), "seconds": int(round(x["secs"] or 0)),
+              "avg": int(round(x["av"] or 0))} for x in rows]
+    return {"count": int(r["n"]), "seconds": int(round(r["secs"] or 0)),
+            "avg": int(round(r["av"] or 0)), "by_kind": kinds}
+
+
+def owner_options():
+    """已完成任务的归属人列表（管理员筛选用户用）"""
+    c = _conn()
+    rows = c.execute("SELECT owner_id, MAX(owner) owner, COUNT(*) n FROM jobs"
+                     " WHERE IFNULL(owner_id,'')<>'' GROUP BY owner_id ORDER BY n DESC").fetchall()
+    c.close()
+    return [{"id": str(x["owner_id"]), "name": (x["owner"] or ("#" + str(x["owner_id"]))),
+             "count": int(x["n"])} for x in rows]
 
 
 def active_summary():

@@ -4,13 +4,24 @@
 {% block page_title %}📦 素材库{% endblock %}
 
 {% block topbar_right %}
-<label class="btn btn-primary" style="cursor:pointer;margin:0;">⬆ 上传
-    <input type="file" id="file" multiple accept="image/*,audio/*,video/*" style="display:none;" onchange="upload(this)">
-</label>
-<button class="btn btn-outline" id="btn-cutout" disabled onclick="openPanel('cutout')">✂️ 抠图所选</button>
-<span id="edit-fns" style="display:flex;gap:6px;flex-wrap:wrap;"></span>
-<button class="btn btn-outline" id="btn-stitch" disabled onclick="openPanel('stitch')">🧩 拼版所选</button>
-<button class="btn btn-outline" onclick="load()">🔄 刷新</button>
+<style>
+    /* 本页顶栏铺满：加工功能居左、上传/下载/刷新居右 */
+    .topbar > div:last-child { flex: 1; min-width: 0; }
+</style>
+<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;width:100%;">
+    <span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button class="btn btn-outline" id="btn-cutout" disabled onclick="openPanel('cutout')">✂️ 抠图</button>
+        <span id="edit-fns" style="display:flex;gap:8px;flex-wrap:wrap;"></span>
+        <button class="btn btn-outline" id="btn-stitch" disabled onclick="openPanel('stitch')">🧩 拼版</button>
+    </span>
+    <span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <label class="btn btn-primary" style="cursor:pointer;margin:0;">⬆ 上传
+            <input type="file" id="file" multiple accept="image/*,audio/*,video/*" style="display:none;" onchange="upload(this)">
+        </label>
+        <button class="btn btn-outline" id="btn-download" disabled onclick="downloadSelected()">⬇ 下载</button>
+        <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
+    </span>
+</div>
 {% endblock %}
 
 {% block content %}
@@ -245,10 +256,11 @@ function toggle(id) {
 
 function syncSel() {                 // 顶部工具栏：勾选数不匹配就置灰（抠图 1 张 / 编辑 1-3 张 / 拼版 2-9 张）
     const n = SEL.size;
-    const bc = document.getElementById('btn-cutout'), bs = document.getElementById('btn-stitch');
-    bc.disabled = n !== 1;
-    bs.disabled = n < 2 || n > 9;
-    bs.textContent = n ? ('🧩 拼版所选（' + n + '）') : '🧩 拼版所选';
+    const bc = document.getElementById('btn-cutout'), bs = document.getElementById('btn-stitch'),
+          bd = document.getElementById('btn-download');
+    bc.disabled = n !== 1;                                  // 抠图：正好 1 张
+    bs.disabled = n < 2 || n > 9;                           // 拼版：2-9 张
+    if (bd) { bd.disabled = n < 1; }                        // 下载：至少 1 张
     ((OPTS.edit || {}).modes || []).forEach(m => {          // 编辑 4 个功能：1-3 张可用
         const b = document.getElementById('btn-edit-' + m.id);
         if (b) { b.disabled = n < 1 || n > 3; }
@@ -362,6 +374,36 @@ async function submitPanel() {
     if (!r.ok) { if (tab) { tab.close(); } toast(r.error || '入队失败', 'error'); return; }
     toast(r.reused ? '已有同样的任务在进行，进度见任务看板' : '已入队，进度见任务看板');
     closePanel(); SEL.clear(); syncSel(); render();
+}
+
+async function downloadSelected() {      // 勾选的素材打包成 zip 下载
+    const ids = [...SEL];
+    if (!ids.length) { return; }
+    toast('正在打包 ' + ids.length + ' 张…', 'info');
+    try {
+        const r = await fetch('/api/materials/download', {
+            method: 'POST', credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ids: ids})
+        });
+        if (!r.ok) {
+            let msg = '下载失败';
+            try { msg = (await r.json()).error || msg; } catch (e) { /* 非 JSON */ }
+            toast(msg, 'error');
+            return;
+        }
+        const blob = await r.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = '素材_' + ids.length + '张_' + new Date().toISOString().slice(0, 10) + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { URL.revokeObjectURL(a.href); }, 5000);
+        toast('已开始下载 ' + ids.length + ' 张');
+    } catch (e) {
+        toast('下载失败：' + e, 'error');
+    }
 }
 
 async function del(id) {

@@ -1722,6 +1722,52 @@ def api_materials_upload():
     return jsonify({"ok": True, "items": items, "errors": errors})
 
 
+@app.route('/api/materials/download', methods=['POST'])
+def api_materials_download():
+    """批量下载所选素材（打包 zip）；只允许自己的（admin 豁免）"""
+    import io as _io
+    import zipfile
+    u = current_user() or {}
+    body = request.get_json(silent=True) or {}
+    ids = body.get('ids') or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "请先选择素材"}), 400
+    rows = [r for r in (materialstore.get_material(i) for i in ids) if r]
+    if not rows:
+        return jsonify({"error": "素材不存在或已删除"}), 400
+    if not _is_admin(u):
+        uid = u.get('id')
+        for r in rows:
+            own = r.get('owner_id')
+            try:
+                same = own is not None and int(own) == int(uid)
+            except Exception:
+                same = False
+            if not same:
+                return jsonify({"error": "只能下载自己的素材"}), 403
+    buf = _io.BytesIO()
+    n = 0
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        used = set()
+        for r in rows:
+            fp = materialstore.url_to_path(r.get('file_path'))
+            if not fp or not fp.is_file():
+                continue
+            name = fp.name
+            k = 2
+            while name in used:                       # 重名文件加序号，避免 zip 内互相覆盖
+                name = "%s_%d%s" % (fp.stem, k, fp.suffix)
+                k += 1
+            used.add(name)
+            z.write(str(fp), name)
+            n += 1
+    if not n:
+        return jsonify({"error": "文件都不在了，无法打包"}), 400
+    buf.seek(0)
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name="materials_%s.zip" % time.strftime("%Y%m%d_%H%M%S"))
+
+
 @app.route('/api/materials/delete', methods=['POST'])
 def api_materials_delete():
     """删除素材：只能删自己的（含历史未归属的）"""

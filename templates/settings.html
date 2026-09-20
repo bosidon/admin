@@ -126,17 +126,30 @@
 </div>
 
 <div class="card" style="max-width:600px;">
-    <h3 style="margin-bottom:16px;">📋 配图 Agent System Prompt</h3>
+    <h3 style="margin-bottom:16px;">🤖 Agent 提词</h3>
+
+    <div class="form-group">
+        <label class="form-label">选择 Agent</label>
+        <select class="form-input" id="agent-select" onchange="loadAgentPrompt()">
+            <option value="plan">配图 Agent</option>
+            <option value="storyboard">视频分镜 Agent</option>
+            <option value="lingxiu">文案 · 灵性书籍</option>
+            <option value="maya">文案 · 玛雅天赋</option>
+            <option value="tarot">文案 · 塔罗</option>
+            <option value="psych">文案 · 心理咨询</option>
+        </select>
+    </div>
 
     <div class="form-group">
         <label class="form-label">System Prompt</label>
-        <textarea class="form-input" id="plan-system-prompt" rows="20"
+        <textarea class="form-input" id="agent-prompt" rows="20"
             style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;resize:vertical;"></textarea>
+        <div id="agent-hint" style="font-size:12px;color:#64748b;margin-top:8px;line-height:1.7;"></div>
     </div>
 
     <div style="display:flex;gap:10px;align-items:center;">
-        <button class="btn btn-primary" onclick="savePrompts()">保存提示词</button>
-        <button class="btn btn-outline" onclick="resetPlanPrompt()">恢复内置默认</button>
+        <button class="btn btn-primary" onclick="saveAgentPrompt()">保存提示词</button>
+        <button class="btn btn-outline" id="agent-reset" onclick="resetAgentPrompt()">恢复内置默认</button>
     </div>
 </div>
 
@@ -359,8 +372,7 @@ async function loadSettings() {
     syncModelGroup();
     buildPresetOptions();
     syncPreset();
-    const pr = await api('/api/prompts/plan');
-    document.getElementById('plan-system-prompt').value = (pr && pr.content) || '';
+    await loadAgentPrompt();
     if (settings['image_key']) document.getElementById('image-key').value = settings['image_key'];
     if (settings['tts_key']) document.getElementById('tts-key').value = settings['tts_key'];
     if (settings['default_type']) document.getElementById('default-type').value = settings['default_type'];
@@ -383,22 +395,54 @@ async function saveSettings() {
     toast('配置保存成功');
 }
 
-async function savePrompts() {
-    const sys = document.getElementById('plan-system-prompt').value.trim();
-    if (!sys) { alert('System Prompt 不能为空（点「恢复内置默认」可找回）'); return; }
-    const miss = ['images', 'bg', 'aspect'].filter(k => sys.indexOf(k) < 0);
-    if (miss.length && !confirm('没检测到字段名：' + miss.join('、') +
-        '\n缺了这些，方案可能解析失败。仍要保存吗？')) return;
-    const r = await api('/api/prompts/plan', {method: 'POST', body: JSON.stringify({content: sys})});
+const AGENT_INFO = {
+    plan:       {name: '配图 Agent',      url: '/api/prompts/plan'},
+    storyboard: {name: '视频分镜 Agent',  url: '/api/prompts/storyboard', noreset: true},
+    lingxiu:    {name: '文案 · 灵性书籍', url: '/api/prompts/article?line=lingxiu', save: {line: 'lingxiu'}},
+    maya:       {name: '文案 · 玛雅天赋', url: '/api/prompts/article?line=maya',    save: {line: 'maya'}},
+    tarot:      {name: '文案 · 塔罗',     url: '/api/prompts/article?line=tarot',   save: {line: 'tarot'}},
+    psych:      {name: '文案 · 心理咨询', url: '/api/prompts/article?line=psych',   save: {line: 'psych'}}
+};
+
+async function loadAgentPrompt() {
+    const id = document.getElementById('agent-select').value;
+    const info = AGENT_INFO[id];
+    const r = await api(info.url);
+    document.getElementById('agent-prompt').value = (r && r.content) || '';
+    const bits = [];
+    if (r && r.path) bits.push('文件：' + r.path);
+    const ph = (r && r.placeholders) || [];
+    if (ph.length) bits.push('可用占位符：' + ph.map(function(p) { return '{' + '{' + p + '}' + '}'; }).join(' '));
+    if (info.noreset) bits.push('（此提词无内置默认，不支持一键恢复）');
+    document.getElementById('agent-hint').innerHTML = bits.join('<br>');
+    document.getElementById('agent-reset').style.display = info.noreset ? 'none' : '';
+}
+
+async function saveAgentPrompt() {
+    const id = document.getElementById('agent-select').value;
+    const info = AGENT_INFO[id];
+    const txt = document.getElementById('agent-prompt').value.trim();
+    if (!txt) { alert('内容不能为空（点「恢复内置默认」可找回）'); return; }
+    if (id === 'plan') {
+        const miss = ['images', 'bg', 'aspect'].filter(function(k) { return txt.indexOf(k) < 0; });
+        if (miss.length && !confirm('没检测到字段名：' + miss.join('、') +
+            '\n缺了这些，方案可能解析失败。仍要保存吗？')) return;
+    }
+    const body = info.save ? Object.assign({content: txt}, info.save) : {content: txt};
+    const r = await api(info.url, {method: 'POST', body: JSON.stringify(body)});
     if (!r || r.error) { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); return; }
     toast('提示词已保存');
 }
 
-async function resetPlanPrompt() {
-    if (!confirm('恢复内置默认 System Prompt？\n（会覆盖当前 prompts/image_agent.md 的内容）')) return;
-    const r = await api('/api/prompts/plan', {method: 'POST', body: JSON.stringify({reset: true})});
+async function resetAgentPrompt() {
+    const id = document.getElementById('agent-select').value;
+    const info = AGENT_INFO[id];
+    if (info.noreset) return;
+    if (!confirm('恢复内置默认？\n（会覆盖当前「' + info.name + '」的提词）')) return;
+    const body = info.save ? Object.assign({reset: true}, info.save) : {reset: true};
+    const r = await api(info.url, {method: 'POST', body: JSON.stringify(body)});
     if (!r || r.error) { toast('❌ ' + ((r && r.error) || '恢复失败'), 'error'); return; }
-    document.getElementById('plan-system-prompt').value = r.content || '';
+    document.getElementById('agent-prompt').value = r.content || '';
     toast('已恢复内置默认');
 }
 

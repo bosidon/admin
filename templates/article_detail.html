@@ -51,7 +51,7 @@ async function load() {
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 16px;">
             <div><div style="font-size:12px;color:var(--text2);">📱 平台</div><div style="font-weight:600;">${PLATFORM_MAP[a.platform]||a.platform||'-'}</div></div>
             <div><div style="font-size:12px;color:var(--text2);">📋 类型</div><div style="font-weight:600;">${TYPE_MAP[a.content_type]||a.content_type||'-'}</div></div>
-            <div><div style="font-size:12px;color:var(--text2);">📖 书目</div><div style="font-weight:600;">${a.book ? '<a href="https://lingxiu.xianbao.online/search?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;border-bottom:1px dashed var(--border);">'+a.book+'</a>' : '-'}</div></div>
+            <div><div style="font-size:12px;color:var(--text2);">📖 书目</div><div style="font-weight:600;">${a.book ? '<a href="https://read.xianbao.love/books?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;border-bottom:1px dashed var(--border);">'+a.book+'</a>' : '-'}</div></div>
             <div><div style="font-size:12px;color:var(--text2);">🎯 话题</div><div style="font-weight:600;">${a.topic || '-'}</div></div>
             <div><div style="font-size:12px;color:var(--text2);">📐 角度</div><div style="font-weight:600;">${a.angle || '-'}</div></div>
             <div><div style="font-size:12px;color:var(--text2);">🏗️ 结构</div><div style="font-weight:600;">${a.structure || '-'}</div></div>

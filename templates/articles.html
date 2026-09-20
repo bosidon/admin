@@ -71,7 +71,6 @@
 <script>
 let OPTS = null;
 let currentFilter = '';
-let ALL_TOPICS = [];
 
 const PLATFORM_MAP = {wechat:'公众号',xiaohongshu:'小红书',video_account:'视频号',douyin:'抖音',bilibili:'B站',kuaishou:'快手',podcast:'播客',zhihu:'知乎',toutiao:'头条'};
 const CONTENT_TYPE_MAP = {'article':'📄 图文文章','short_video':'🎬 短视频脚本','long_video':'📹 长视频脚本','speech':'🎤 口播稿'};
@@ -118,7 +117,7 @@ async function load() {
         return `<tr style="border-bottom:1px solid #f1f5f9;">
             <td style="padding:10px 16px;">${titleLink}${refBadge}</td>
             <td style="padding:10px 8px;"><span style="background:#ede9fe;color:#5b21b6;padding:2px 6px;border-radius:4px;font-size:12px;">${PLATFORM_MAP[a.platform]||a.platform||'-'}</span></td>
-            <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.book ? '<a href="https://lingxiu.xianbao.online/search?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;">'+a.book+'</a>' : '-'}</td>
+            <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.book ? '<a href="https://read.xianbao.love/books?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;">'+a.book+'</a>' : '-'}</td>
             <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.topic||'-'}</td>
             <td style="padding:10px 8px;font-size:12px;">${contentType}</td>
             <td style="padding:10px 8px;font-size:13px;text-align:right;">${a.word_count||0}</td>
@@ -240,20 +239,13 @@ function applyDefaults() {
 
 async function buildForm() {
     if (!OPTS) OPTS = await api('/api/options');
-    ALL_TOPICS = OPTS.topics || [];          // 书目-话题联动用（原在已删除的 showGenerate 里赋值）
     const line = LINES.find(l => l.id === LINE) || {};
     let html = '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;">';
-    if (LINE === 'lingxiu') {
-        html += boxHtml('📖 书目', selHtml('gen-book', [{id:'',name:'自动选择'}].concat(
-            (OPTS.books || []).map(b => ({id: b.name, name: b.name + (b.author ? ' · ' + b.author : '')}))), ''));
-        html += boxHtml('🎯 话题', '<select id="gen-topic" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>');
-    } else {
-        const kinds = (line.kinds || []).filter(k => k.id !== 'book');
-        html += boxHtml('选题类型', selHtml('gen-topic_kind', kinds, kinds[0] && kinds[0].id));
-        html += boxHtml('选题', '<div style="display:flex;gap:6px;">'
-            + '<select id="gen-topic_obj" style="flex:1;min-width:0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>'
-            + '<button class="btn btn-outline" onclick="randTopic()" title="换一个" style="flex:0 0 auto;padding:8px 10px;">🎲</button></div>');
-    }
+    const kinds = (line.kinds || []);
+    html += boxHtml('选题类型', selHtml('gen-topic_kind', kinds, kinds[0] && kinds[0].id));
+    html += boxHtml('选题', '<div style="display:flex;gap:6px;">'
+        + '<select id="gen-topic_obj" style="flex:1;min-width:0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>'
+        + '<button class="btn btn-outline" onclick="randTopic()" title="换一个" style="flex:0 0 auto;padding:8px 10px;">🎲</button></div>');
     html += boxHtml('平台', selHtml('gen-platform', (OPTS.platforms || []).map(p => ({id: p.id, name: p.name})), 'wechat'));
     html += boxHtml('形态', '<select id="gen-content_type" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>');
     html += boxHtml('语气', selHtml('gen-tone', [{id:'',name:'自动选择'}].concat(
@@ -272,15 +264,9 @@ async function buildForm() {
     const t = document.getElementById('gen-content_type');
     if (t) t.onchange = applyDefaults;
 
-    if (LINE === 'lingxiu') {
-        const b = document.getElementById('gen-book');
-        if (b) b.onchange = filterTopicsByBook;
-        filterTopicsByBook();
-    } else {
-        const k = document.getElementById('gen-topic_kind');
-        if (k) k.onchange = loadTopics;
-        await loadTopics();
-    }
+    const k = document.getElementById('gen-topic_kind');
+    if (k) k.onchange = loadTopics;
+    await loadTopics();
 }
 
 async function loadTopics() {
@@ -312,16 +298,6 @@ function showPreview() {
     el.textContent = cur ? (cur.preview || '') : '';
 }
 
-function filterTopicsByBook() {
-    const bookSel = document.getElementById('gen-book');
-    const topicSel = document.getElementById('gen-topic');
-    if (!bookSel || !topicSel) return;
-    const b = bookSel.value;
-    const list = b ? ALL_TOPICS.filter(t => t.book_name === b) : ALL_TOPICS.slice(0, 50);
-    topicSel.innerHTML = [{id:'',name:'自动选择'}].concat(list.map(t => ({id: t.name, name: t.category + '·' + t.name})))
-        .map(o => '<option value="' + o.id + '">' + o.name + '</option>').join('');
-}
-
 function showDraft(a) {
     DRAFT = a;
     document.getElementById('dr-title').value = a.title || '';
@@ -345,10 +321,8 @@ async function doGenerate() {
         if (val) params[k] = val;
     });
     params.line = LINE;
-    if (LINE !== 'lingxiu') {
-        params.topic_kind = v('gen-topic_kind');
-        params.topic_obj = v('gen-topic_obj');
-    }
+    params.topic_kind = v('gen-topic_kind');
+    params.topic_obj = v('gen-topic_obj');
     btn.disabled = true; btn.textContent = '⏳ 生成中…';
     st.textContent = '正在生成，约 20~40 秒…';
     try {

@@ -3,7 +3,7 @@
 """业务线（内容线）：选题来源 + 引流落点 + 文末引导语
 
 选题**全部读各子站现成资产**，不另建内容库：
-  · 灵性书籍 → lingxiu /var/www/lingxiu/data/xianbao.db（books/categories/themes，由 app.py 原有逻辑提供）
+  · 灵性书籍 → 阅读站 /var/www/lingxiu/data/xianbao.db（books 书目 / chapters 章节 / chapter_summaries 摘要）
   · 玛雅天赋 → /var/www/kin-guide/data/{challenges,seals_refined,daily_energy,kin-<n>}.json
   · 塔罗     → /var/www/tarot/backend/cards.json + /var/www/tarot/shared/spreads.json
   · 心理咨询 → /var/www/psych-test/data/psychological_assessment.db（assessments/questions）
@@ -20,6 +20,7 @@ KIN_DIR = Path("/var/www/kin-guide/data")
 TAROT_CARDS = Path("/var/www/tarot/backend/cards.json")
 TAROT_SPREADS = Path("/var/www/tarot/shared/spreads.json")
 PSYCH_DB = Path("/var/www/psych-test/data/psychological_assessment.db")
+LINGXIU_DB = Path("/var/www/lingxiu/data/xianbao.db")     # 阅读站（灵修）内容库
 KIN_CYCLE = 260
 
 # 业务线定义：home = 引流落点（子网站首页），guide = 文末引导语
@@ -27,7 +28,7 @@ LINES = [
     {"id": "lingxiu", "name": "灵性书籍", "icon": "📚",
      "home": "https://xianbao.love",
      "guide": "🌙 想了解更多心灵成长内容？",
-     "kinds": [{"id": "book", "name": "书目选题"}]},
+     "kinds": [{"id": "book", "name": "书目选题"}, {"id": "chapter", "name": "章节选题"}]},
     {"id": "maya", "name": "玛雅天赋", "icon": "🔮",
      "home": "https://maya.xianbao.love",
      "guide": "✨ 想知道你的星系印记？免费测一下 →",
@@ -87,6 +88,133 @@ def kin_of_date(y=None, m=None, d=None):
     y, m, d = y or today.year, m or today.month, d or today.day
     off = (datetime.date(y, m, d) - datetime.date(2001, 1, 1)).days
     return ((365 * (y - 1900) + 52 + off) % KIN_CYCLE) + 1
+
+
+def _lingxiu_conn():
+    """阅读站内容库（只读连接，绝不写）"""
+    c = sqlite3.connect("file:%s?mode=ro" % LINGXIU_DB, uri=True)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def _lingxiu_books():
+    """已发布书目 → 选题条目（name 带作者·分类，preview 取简介）"""
+    if not LINGXIU_DB.exists():
+        return []
+    try:
+        c = _lingxiu_conn()
+        cats = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM categories")}
+        rows = c.execute("SELECT id, title, subtitle, author, category_id, description FROM books "
+                         "WHERE status='published' ORDER BY sort_order, id").fetchall()
+        c.close()
+    except Exception:
+        return []
+    out = []
+    for b in rows:
+        name = "《%s》" % b["title"]
+        extra = " · ".join([x for x in (b["author"], cats.get(b["category_id"])) if x])
+        out.append({"id": name, "name": (name + " · " + extra) if extra else name,
+                    "preview": _pv(b["description"], 80)})
+    return out
+
+
+def _lingxiu_chapters():
+    """全部章节 → 选题条目（label = 《书》 · 章节标题，preview 取章节摘要首句）"""
+    if not LINGXIU_DB.exists():
+        return []
+    try:
+        c = _lingxiu_conn()
+        rows = c.execute(
+            "SELECT ch.id, ch.title, ch.word_count, b.title AS book_title, s.summary "
+            "FROM chapters ch JOIN books b ON b.id = ch.book_id "
+            "LEFT JOIN chapter_summaries s ON s.chapter_id = ch.id "
+            "WHERE b.status='published' "
+            "ORDER BY b.sort_order, b.id, ch.sort_order, ch.id").fetchall()
+        c.close()
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        label = "《%s》 · %s" % (r["book_title"], r["title"])
+        out.append({"id": label, "name": label, "preview": _pv(_clean_summary(r["summary"]), 40)})
+    return out
+
+
+def _clean_summary(t):
+    """章节摘要去掉 markdown 符号与 emoji，取正文首段"""
+    t = str(t or "").strip()
+    t = re.sub("^#+[ ]*", "", t)
+    t = re.sub("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", t)   # emoji / 变体符
+    t = re.sub("[*_`>]+", " ", t)
+    t = re.sub("-", " ", t)
+    return " ".join(t.split())
+
+
+def _lingxiu_material(kind, obj):
+    """灵性线素材：书的简介 + 章节摘要/要点（LLM 的唯一事实来源）"""
+    if not LINGXIU_DB.exists():
+        return ""
+    obj = str(obj or "").strip()
+    if not obj:
+        return ""
+    try:
+        c = _lingxiu_conn()
+        if kind == "book":
+            title = obj.strip("《》").split(" · ")[0].strip()
+            b = c.execute("SELECT id, title, subtitle, author, category_id, description FROM books "
+                          "WHERE title=? AND status='published'", (title,)).fetchone()
+            if not b:
+                c.close()
+                return ""
+            cat = c.execute("SELECT name FROM categories WHERE id=?", (b["category_id"],)).fetchone()
+            chs = c.execute(
+                "SELECT ch.title, ch.word_count, s.summary, s.key_points FROM chapters ch "
+                "LEFT JOIN chapter_summaries s ON s.chapter_id = ch.id "
+                "WHERE ch.book_id=? ORDER BY ch.sort_order, ch.id LIMIT 6", (b["id"],)).fetchall()
+            c.close()
+            parts = ["书目：《%s》%s" % (b["title"], ("｜" + b["subtitle"]) if b["subtitle"] else ""),
+                     "作者：%s　分类：%s" % (b["author"] or "—", (cat["name"] if cat else "—")),
+                     "简介：\n" + str(b["description"] or "")]
+            for ch in chs:
+                seg = "第 %s｜%s" % (ch["title"], _clean_summary(ch["summary"])[:600])
+                kp = str(ch["key_points"] or "").replace("|", "\n- ")
+                if kp:
+                    seg += "\n要点：\n- " + kp[:500]
+                parts.append(seg)
+            return "\n\n".join(parts)
+
+        if kind == "chapter":
+            m = re.match(r"《(.+?)》\s*·\s*(.+)$", obj)
+            btitle = (m.group(1) if m else obj.strip("《》")).strip()
+            ctitle = (m.group(2) if m else "").strip()
+            if ctitle:
+                row = c.execute(
+                    "SELECT ch.title, ch.content, ch.word_count, b.title AS bt, b.description, "
+                    "s.summary, s.key_points FROM chapters ch JOIN books b ON b.id=ch.book_id "
+                    "LEFT JOIN chapter_summaries s ON s.chapter_id=ch.id "
+                    "WHERE b.title=? AND ch.title=? LIMIT 1", (btitle, ctitle)).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT ch.title, ch.content, ch.word_count, b.title AS bt, b.description, "
+                    "s.summary, s.key_points FROM chapters ch JOIN books b ON b.id=ch.book_id "
+                    "LEFT JOIN chapter_summaries s ON s.chapter_id=ch.id "
+                    "WHERE b.title=? ORDER BY ch.sort_order LIMIT 1", (btitle,)).fetchone()
+            c.close()
+            if not row:
+                return ""
+            parts = ["书目：《%s》" % row["bt"], "章节：%s（约 %s 字）" % (row["title"], row["word_count"]),
+                     "书简介：\n" + str(row["description"] or "")]
+            if row["summary"]:
+                parts.append("本章摘要：\n" + _clean_summary(row["summary"])[:1800])
+            kp = str(row["key_points"] or "").replace("|", "\n- ")
+            if kp:
+                parts.append("本章要点：\n- " + kp[:1200])
+            if not row["summary"] and not kp:
+                parts.append("正文节选：\n" + str(row["content"] or "")[:1500])
+            return "\n\n".join(parts)
+    except Exception:
+        return ""
+    return ""
 
 
 def _maya_items(kind):
@@ -319,6 +447,12 @@ def _psych_material(kind, obj):
 
 # ---------------------------------------------------------------- 统一入口
 def topics(line_id, kind):
+    if line_id == "lingxiu":
+        if kind == "book":
+            return _cached("lingxiu:book", _lingxiu_books)
+        if kind == "chapter":
+            return _cached("lingxiu:chapter", _lingxiu_chapters, ttl=1800)
+        return []
     if line_id == "maya":
         return _cached("maya:%s" % kind, lambda: _maya_items(kind))
     if line_id == "tarot":
@@ -331,6 +465,8 @@ def topics(line_id, kind):
 def material(line_id, kind, obj):
     """该选题的原始素材全文（LLM 的唯一事实来源）"""
     try:
+        if line_id == "lingxiu":
+            return _lingxiu_material(kind, obj)
         if line_id == "maya":
             return _maya_material(kind, obj)
         if line_id == "tarot":

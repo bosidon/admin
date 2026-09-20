@@ -1151,6 +1151,33 @@ def api_get_video_plan(plan_id):
         return _g
     return jsonify(dict(row))
 
+@app.route('/api/video-plans/<int:plan_id>/storyboard', methods=['POST'])
+def api_gen_storyboard(plan_id):
+    db = get_content_db()
+    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row: return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g: return _g
+    art = db.execute("SELECT content_md FROM articles WHERE id=?", (row["article_id"],)).fetchone()
+    if not art or not (art["content_md"] or "").strip():
+        return jsonify({"error": "文案内容为空"}), 400
+    try:
+        from autogen import gen_storyboard, get_llm_config
+        result = gen_storyboard(art["content_md"], get_llm_config())
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+    shots = result.get("shots", [])
+    overview = result.get("overview", "")
+    total = result.get("total_duration_s") or sum(s.get("duration_s", 5) for s in shots)
+    lines = [overview] if overview else []
+    for sh in shots:
+        lines.append("\u3010" + sh.get("shot_type", "") + "\u3011" + sh.get("subtitle", ""))
+    db.execute('UPDATE video_plans SET storyboard=?, script=?, status="storyboard_done",'
+               'total_duration_s=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+               (json.dumps(shots, ensure_ascii=False), "\n".join(lines), total, plan_id))
+    db.commit(); db.close()
+    return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total})
+
 @app.route('/api/video-plans/<int:plan_id>', methods=['PUT'])
 def api_update_video_plan(plan_id):
     """保存脚本 / 分镜 / 状态"""

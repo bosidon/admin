@@ -1416,6 +1416,32 @@ def uid_ok(v):
     return re.sub(r"[^A-Za-z0-9\-_]", "_", str(v or ""))[:512]
 
 
+
+
+def gen_storyboard(article_content, llm_cfg):
+    """根据文案用 LLM 生成分镜脚本"""
+    import os
+    prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
+    prompt_md = open(prompts_dir + "/video_storyboard.md", encoding="utf-8").read()
+    user_msg = prompt_md.replace("{{CONTENT}}", article_content[:8000])
+    url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
+    if "/chat/completions" not in url:
+        url += "/chat/completions"
+    data, err = _llm_json(url, llm_cfg.get("llm_api_key", ""),
+                   llm_cfg.get("llm_model") or "deepseek-chat",
+                   [{"role": "system", "content": "你是一位专业短视频分镜导演。只输出 JSON，不要其他文字。"},
+                    {"role": "user", "content": user_msg}])
+    if err:
+        raise RuntimeError("LLM 调用失败: " + err[:200])
+    if not isinstance(data, dict) or "shots" not in data:
+        raise RuntimeError("LLM 返回格式错误: " + str(data)[:200])
+    for i, sh in enumerate(data["shots"]):
+        sh.setdefault("idx", i); sh.setdefault("duration_s", 5)
+        sh.setdefault("shot_type", "中景"); sh.setdefault("visual_prompt", "")
+        sh.setdefault("subtitle", ""); sh.setdefault("music_hint", "none")
+        sh.setdefault("template_hint", "U02")
+    return data
+
 def _llm_json(url, key, model, messages, tries=3, user_id=""):
     """调 LLM 并取出 JSON 对象 → (json|None, 错误文案)
 

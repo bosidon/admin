@@ -120,8 +120,21 @@ async function genScript() {
 }
 
 async function genStoryboard() {
-    if (!document.getElementById('script').value.trim()) { toast('请先生成或填写视频脚本', 'error'); return; }
-    toast('AI 生成分镜：将根据脚本生成分镜表（开发中，可手动添加镜头）', 'info');
+    if (!PLAN) { toast('计划未加载', 'error'); return; }
+    toast('🤖 AI 正在生成分镜...', 'info');
+    document.getElementById('plan-status').textContent = '生成中…';
+    const r = await api('/api/video-plans/' + PLAN_ID + '/storyboard', {method: 'POST'});
+    if (!r.ok) { toast('❌ ' + (r.error || '生成失败'), 'error'); document.getElementById('plan-status').textContent = PLAN.status || ''; return; }
+    SCENES = (r.shots || []).map(s => ({
+        visual: s.visual_prompt || '', line: s.subtitle || '',
+        duration: s.duration_s || 5, shot_type: s.shot_type || '',
+        music_hint: s.music_hint || '', template_hint: s.template_hint || 'U02'
+    }));
+    document.getElementById('script').value = (r.overview || '') + '\n\n' + SCENES.map(s => '【' + (s.shot_type || '') + '】' + s.line).join('\n');
+    document.getElementById('plan-status').textContent = 'storyboard_done';
+    renderScenes();
+    toast('✅ ' + SCENES.length + ' 个镜头（' + (r.total_duration_s || '—') + ' 秒）', 'success');
+    await saveAll();
 }
 
 load();

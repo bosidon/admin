@@ -646,13 +646,26 @@ def api_update_article_status(article_id):
 
 @app.route('/api/articles/<int:article_id>', methods=['DELETE'])
 def api_delete_article(article_id):
-    """删除文章（同时清理该文章生成的配图目录）"""
+    """删除文章 + 级联清理关联数据（视频计划/出图日志/任务/素材）+ 配图目录"""
     _g = _guard_article(article_id)
     if _g:
         return _g
+    # ① content.db：视频计划 + 出图日志 + 文案本体（同一事务）
     db = get_content_db()
+    n_video = db.execute('DELETE FROM video_plans WHERE article_id=?', (article_id,)).rowcount
+    n_log = db.execute('DELETE FROM illustration_logs WHERE article_id=?', (article_id,)).rowcount
     db.execute('DELETE FROM articles WHERE id=?', (article_id,))
     db.commit()
+    # ② database.db：任务记录 + 素材记录（素材文件随后与配图目录一起删）
+    n_job = n_mat = 0
+    try:
+        d2 = get_db()
+        n_job = d2.execute('DELETE FROM jobs WHERE article_id=?', (article_id,)).rowcount
+        n_mat = d2.execute('DELETE FROM materials WHERE article_id=?', (article_id,)).rowcount
+        d2.commit()
+    except Exception:
+        pass
+    # ③ 配图/素材产物目录 static/generated/<id>/
     removed = 0
     try:
         out_dir = GEN_DIR / str(article_id)
@@ -661,7 +674,8 @@ def api_delete_article(article_id):
             shutil.rmtree(str(out_dir))
     except Exception:
         pass
-    return jsonify({"ok": True, "images_removed": removed})
+    return jsonify({"ok": True, "images_removed": removed, "video_plans": n_video,
+                    "logs": n_log, "jobs": n_job, "materials": n_mat})
 
 # ============================================================
 # API - 内容选项 + AI生成

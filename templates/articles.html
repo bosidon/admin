@@ -147,7 +147,7 @@ function filterStatus(s) {
 }
 
 async function deleteArticle(id) {
-    if (!confirm('确定删除这篇内容？')) return;
+    if (!confirm('确定删除这篇内容？\n\n关联数据会一并删除：视频计划、出图日志、任务记录、素材记录，以及配图/素材文件。')) return;
     const r = await api('/api/articles/' + id, {method:'DELETE'});
     if (r.ok) { showToast('已删除', 'success'); load(); }
     else { showToast('删除失败', 'error'); }

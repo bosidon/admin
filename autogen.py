@@ -1905,10 +1905,11 @@ def run_material_job(job):
                         raise RuntimeError("已取消")
                     _log(jid, "%s %d/%d：%s" % (title, i + 1, len(rows), r.get("name") or ""))
                     main = comfy_upload(base, str(p))
-                    # 图生图：选多张时第 1 张是主体，其余当参考（保人物一致）
+                    # 图生图：本轮这一张当主体，其余张（最多 2 张）当参考 —— 参考图排除主体自己
                     imgs = [main]
                     if kind == "edit":
-                        for r2, p2 in zip(rows[1:3], srcs[1:3]):
+                        refs = [(r2, p2) for j, (r2, p2) in enumerate(zip(rows, srcs)) if j != i][:2]   # 总输入上限 3 张（1 主体 + 2 参考）
+                        for r2, p2 in refs:
                             imgs.append(comfy_upload(base, str(p2)))
                     name = mat.out_name(kind, r.get("file_path"), params)
                     wf = mat.build_wf(kind, imgs, params, cfg=cfg,

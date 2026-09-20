@@ -65,16 +65,21 @@ CUTOUT_MODELS = [
 CUTOUT_MODEL_NODE = {m["id"]: m["node"] for m in CUTOUT_MODELS}
 BACKGROUNDS = [{"id": "Alpha", "label": "透明背景"}, {"id": "Color", "label": "纯色背景"}]
 
+# 编辑 = 4 个功能（互斥）：换背景 / 换服饰 / 换角度 / 换风格
+# 后 3 个（含换风格本身）都可再叠加一个「画风」LoRA（见 EDIT_STYLES）
 EDIT_MODES = [
     {"id": "bg", "label": "换背景"},
-    {"id": "keep", "label": "保人物一致"},
-    {"id": "angle", "label": "多角度"},
+    {"id": "dress", "label": "换服饰"},
+    {"id": "angle", "label": "换角度"},
+    {"id": "style", "label": "换风格"},
 ]
 EDIT_PRESETS = {
     "bg": "把主体完整保留，替换背景为：{text}。保持主体光线、质感、比例不变。",
-    "keep": "严格保持主体（人物）长相、发型、服装与姿态完全一致，只按以下要求调整：{text}。",
+    "dress": "严格保持人物长相、发型、姿态与背景不变，只把服装换成：{text}。保持光线与画面质感不变。",
     "angle": "保持主体（人物）长相与服装完全一致，改为以下视角重新呈现：{text}。",
+    "style": "保持主体与构图不变，{text}",
 }
+EDIT_MODES_REQUIRE_STYLE = ("style",)      # 只有「换风格」必须选画风
 
 STITCH_MODES = [{"id": "grid3", "label": "九宫格 3×3"}, {"id": "column", "label": "长图竖拼"}]
 STITCH_RES = [1080, 1440, 2048]
@@ -96,13 +101,13 @@ EDIT_VAE_DEFAULT = "qwen_image_vae.safetensors"
 #   ❌ realalpha 转真人（素材基本都是真人所拍/AI 写实图 → 挂上无任何变化；它面向的是动画输入）
 #   ❌ pose 姿态跟随（无部位参考图时不生效）、putithere 物品放置（把场景抹成白底，非预期）
 # 想加回来：真机各出一张确认可用后再加，别只按文件名猜
+# 「画风」= 4 个实测可用的编辑类 LoRA（换风格时必选其一；换背景/换服饰/换角度时可选叠加一个）
+# （「无」「多角度」已按用户口径去掉：无 = 不挂 LoRA；多角度 = 功能 3，且是同一个 LoRA）
 EDIT_STYLES = [
-    {"id": "", "label": "无", "lora": "", "prompt": ""},
     {"id": "manga1", "label": "漫画·厚涂", "lora": "20 (1qwen漫画1).safetensors", "prompt": "把画面转成日式漫画风格"},
     {"id": "manga2", "label": "漫画·清线", "lora": "20qwen漫画2.safetensors", "prompt": "把画面转成日式漫画风格"},
     {"id": "chibi", "label": "Q版手办", "lora": "to-chibi_v1.safetensors", "prompt": "把主体变成可爱的Q版手办形象"},
     {"id": "qtoanime", "label": "转动画", "lora": "kontext-qtorealanime.safetensors", "prompt": "把画面转成日式动画风格"},
-    {"id": "angle", "label": "多角度", "lora": "qwen-image-edit-2511-multiple-angles-lora.safetensors", "prompt": "换成另一个视角重新呈现"},
 ]
 EDIT_STYLE_MAP = {s["id"]: s for s in EDIT_STYLES}
 
@@ -706,13 +711,11 @@ def make_prompt(action, params):
     st = EDIT_STYLE_MAP.get(params.get("style") or "") or {}
     extra = (st.get("prompt") or "").strip()
     tpl = EDIT_PRESETS.get(mode) or "{text}"
-    # 用户没填要求时：优先用风格指令占位，避免出现「自然协调；转成漫画风格」这种别扭句
-    if "{text}" in tpl:
-        p = tpl.replace("{text}", text or extra or "自然协调")
-    else:
-        p = tpl
+    # 「换风格」的正文就是画风指令；其余功能没填要求时用「自然协调」占位
+    fill = (extra or text) if mode in EDIT_MODES_REQUIRE_STYLE else (text or "自然协调")
+    p = tpl.replace("{text}", fill) if "{text}" in tpl else tpl
     if extra and extra not in p:
-        p = p + "；" + extra
+        p = p.rstrip("。；;. ") + "；" + extra     # 模板以「。」结尾 → 先去尾再拼，避免「。；」
     return p
 
 
@@ -722,6 +725,7 @@ def options():
         "cutout": {"models": CUTOUT_MODELS, "backgrounds": BACKGROUNDS,
                    "default": {"model": "RMBG-2.0", "background": "Alpha", "color": "#FFFFFF"}},
         "edit": {"modes": EDIT_MODES, "presets": EDIT_PRESETS, "styles": EDIT_STYLES,
+                 "style_required": list(EDIT_MODES_REQUIRE_STYLE),
                  "default": {"mode": "bg", "text": "", "style": ""}, "max_refs": 3},
         "stitch": {"modes": STITCH_MODES, "resolutions": STITCH_RES, "pads": STITCH_PADS,
                    "max_images": STITCH_MAX,
@@ -743,10 +747,14 @@ def validate(action, rows, params):
     elif action == "edit":
         if n < 1 or n > 3:
             return "图生图请选 1-3 张素材（第 1 张为主体，其余为参考）"
-        if (params.get("mode") or "bg") not in [m["id"] for m in EDIT_MODES]:
-            return "图生图模式不合法"
-        if (params.get("style") or "") not in EDIT_STYLE_MAP:
-            return "图生图风格不合法"
+        mode = params.get("mode") or "bg"
+        if mode not in [m["id"] for m in EDIT_MODES]:
+            return "编辑功能不合法"
+        style_id = params.get("style") or ""
+        if style_id and style_id not in EDIT_STYLE_MAP:
+            return "画风不存在"
+        if mode in EDIT_MODES_REQUIRE_STYLE and not style_id:
+            return "「换风格」请选择一个画风"
     elif action == "stitch":
         if n < 2:
             return "拼版至少选 2 张素材"

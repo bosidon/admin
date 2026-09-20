@@ -7,6 +7,8 @@
 <label class="btn btn-primary" style="cursor:pointer;margin:0;">⬆ 上传
     <input type="file" id="file" multiple accept="image/*,audio/*,video/*" style="display:none;" onchange="upload(this)">
 </label>
+<button class="btn btn-outline" id="btn-cutout" disabled onclick="openPanel('cutout')">✂️ 抠图所选</button>
+<button class="btn btn-outline" id="btn-edit" disabled onclick="openPanel('edit')">🎨 编辑所选</button>
 <button class="btn btn-outline" id="btn-stitch" disabled onclick="openPanel('stitch')">🧩 拼版所选</button>
 <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
 {% endblock %}
@@ -221,11 +223,8 @@ function card(m) {
         + '</div>'
         + '<div style="padding:9px 10px;">'
         + '<div title="' + esc(m.name) + '" style="font-size:12.5px;font-weight:500;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(m.name || '未命名') + '</div>'
-        + '<div style="font-size:11px;color:#94a3b8;' + (isImg ? 'margin-bottom:8px;' : '') + '">' + esc(LINE_LABEL[m.category] || m.category || m.type || '')
+        + '<div style="font-size:11px;color:#94a3b8;">' + esc(LINE_LABEL[m.category] || m.category || m.type || '')
         + ' · ' + esc((m.created_at || '').slice(0, 16)) + '</div>'
-        + (isImg ? '<div style="display:flex;gap:6px;">'
-                 + '<button class="btn btn-outline btn-sm" onclick="quick(\'cutout\',' + m.id + ')">✂️ 抠图</button>'
-                 + '<button class="btn btn-outline btn-sm" onclick="quick(\'edit\',' + m.id + ')">🎨 编辑</button></div>' : '')
         + '</div></div>';
 }
 
@@ -234,14 +233,19 @@ function toggle(id) {
     render(); syncSel();
 }
 
-function syncSel() {
-    const n = SEL.size, b = document.getElementById('btn-stitch');
-    b.disabled = n < 2;
-    b.textContent = n ? ('🧩 拼版所选（' + n + '）') : '🧩 拼版所选';
-    document.getElementById('sel-hint').textContent = n ? ('已选 ' + n + ' 张') : '勾选素材后可抠图 / 编辑 / 拼版';
+function syncSel() {                 // 顶部工具栏：勾选数不匹配就置灰（抠图 1 张 / 编辑 1-3 张 / 拼版 2-9 张）
+    const n = SEL.size;
+    const bc = document.getElementById('btn-cutout'), be = document.getElementById('btn-edit'),
+          bs = document.getElementById('btn-stitch');
+    bc.disabled = n !== 1;
+    be.disabled = n < 1 || n > 3;
+    bs.disabled = n < 2 || n > 9;
+    be.textContent = n ? ('🎨 编辑所选（' + n + '）') : '🎨 编辑所选';
+    bs.textContent = n ? ('🧩 拼版所选（' + n + '）') : '🧩 拼版所选';
+    document.getElementById('sel-hint').textContent = n
+        ? ('已选 ' + n + ' 张 · 1 张抠图 / 1-3 张编辑 / 2-9 张拼版')
+        : '勾选素材后，用顶部按钮抠图 / 编辑 / 拼版';
 }
-
-function quick(action, id) { SEL.clear(); SEL.add(id); syncSel(); render(); openPanel(action); }
 
 async function ensureOpts() { if (!OPTS.cutout) { OPTS = await api('/api/materials/options'); } }
 
@@ -267,15 +271,20 @@ async function openPanel(action) {
         h += '<div id="p-color-wrap" style="display:none;">' + row('底色',
             '<input type="color" id="p-color" value="#FFFFFF" style="width:56px;height:32px;border:1px solid #e2e8f0;border-radius:8px;">') + '</div>';
     } else if (action === 'edit') {
-        h += row('模式', '<div id="p-mode" style="display:flex;gap:8px;">'
-            + OPTS.edit.modes.map((m, i) => '<button class="btn ' + (i === 0 ? 'btn-primary' : 'btn-outline')
+        EDIT_MODE = (OPTS.edit.default || {}).mode || 'bg';
+        h += row('功能', '<div id="p-mode" style="display:flex;gap:8px;flex-wrap:wrap;">'
+            + OPTS.edit.modes.map(m => '<button class="btn ' + (m.id === EDIT_MODE ? 'btn-primary' : 'btn-outline')
                 + ' btn-sm" data-mode="' + esc(m.id) + '" onclick="pickMode(\'' + esc(m.id) + '\')">' + esc(m.label) + '</button>').join('')
             + '</div>');
-        h += row('风格化', '<select id="p-style" style="' + SEL_STYLE + '">'
-            + (OPTS.edit.styles || []).map(s => '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('')
-            + '</select>');
-        h += row('要求', '<textarea id="p-text" rows="3" placeholder="例：换成一个温暖的室内书房背景" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;resize:vertical;"></textarea>');
-        h += '<div style="font-size:11.5px;color:#94a3b8;">选 1 张 = 只改这张；选 2-3 张 = 第 1 张为主体、其余作参考（保人物一致用）</div>';
+        h += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">'
+            + '<div id="p-style-label" style="width:60px;font-size:12.5px;color:#475569;">画风</div>'
+            + '<div style="flex:1;"><select id="p-style" style="' + SEL_STYLE + '"></select></div></div>';
+        h += '<div id="p-style-note" style="font-size:11.5px;color:#94a3b8;margin:0 0 10px 72px;"></div>';
+        h += '<div id="p-text-row" style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">'
+            + '<div style="width:60px;font-size:12.5px;color:#475569;">要求</div>'
+            + '<div style="flex:1;"><textarea id="p-text" rows="3" style="width:100%;box-sizing:border-box;padding:8px 10px;'
+            + 'border:1px solid #e2e8f0;border-radius:8px;font-size:13px;resize:vertical;"></textarea></div></div>';
+        h += '<div style="font-size:11.5px;color:#94a3b8;">选 1 张 = 只改这张；选 2-3 张 = 每张各改一次，其余张作为参考（保人物一致用）</div>';
     } else {
         h += row('模式', '<select id="p-smode" style="' + SEL_STYLE + '">'
             + OPTS.stitch.modes.map(m => '<option value="' + esc(m.id) + '">' + esc(m.label) + '</option>').join('') + '</select>');
@@ -286,13 +295,48 @@ async function openPanel(action) {
         h += '<div style="font-size:11.5px;color:#94a3b8;">九宫格需要正好 9 张；长图竖拼最多 9 张</div>';
     }
     document.getElementById('panel-body').innerHTML = h;
+    if (action === 'edit') { syncEditRows(); }
     document.getElementById('panel').style.display = 'flex';
 }
 
+let EDIT_MODE = 'bg';
+const EDIT_PLACEHOLDER = {
+    bg: '例：温暖的室内书房，窗外有绿树，自然光从左侧照入',
+    dress: '例：换成白色棉质衬衫 + 米色针织外套',
+    angle: '例：左侧 45 度半身视角，略微俯拍',
+    style: ''
+};
+
+function styleOpts(mode) {          // 换风格 = 必选画风；其他功能 = 可叠加（多一个「无画风」）
+    const list = ((OPTS.edit || {}).styles || []).map(s => ({id: s.id, label: s.label}));
+    return (mode === 'style') ? list : [{id: '', label: '无画风'}].concat(list);
+}
+
+function syncEditRows() {
+    const sel = document.getElementById('p-style');
+    if (!sel) { return; }
+    const opts = styleOpts(EDIT_MODE), cur = sel.value;
+    sel.innerHTML = opts.map(o => '<option value="' + esc(o.id) + '">' + esc(o.label) + '</option>').join('');
+    sel.value = opts.some(o => o.id === cur) ? cur : opts[0].id;
+    const needStyle = EDIT_MODE === 'style';
+    const lab = document.getElementById('p-style-label');
+    if (lab) { lab.textContent = needStyle ? '画风' : '画风（可选）'; }
+    const note = document.getElementById('p-style-note');
+    if (note) {
+        note.textContent = needStyle ? '「换风格」必须选一个画风'
+            : ('可再叠加一个画风（不选 = 只改' + ({bg: '背景', dress: '服饰', angle: '角度'}[EDIT_MODE] || '') + '）');
+    }
+    const rowT = document.getElementById('p-text-row'), ta = document.getElementById('p-text');
+    if (rowT) { rowT.style.display = needStyle ? 'none' : ''; }
+    if (ta) { ta.placeholder = EDIT_PLACEHOLDER[EDIT_MODE] || ''; }
+}
+
 function pickMode(id) {
+    EDIT_MODE = id;
     document.querySelectorAll('#p-mode button').forEach(b => {
         b.className = 'btn ' + (b.dataset.mode === id ? 'btn-primary' : 'btn-outline') + ' btn-sm';
     });
+    syncEditRows();
 }
 function closePanel() { document.getElementById('panel').style.display = 'none'; }
 
@@ -305,6 +349,7 @@ async function submitPanel() {
         params.mode = (on && on.dataset.mode) || 'bg';
         params.style = val('p-style') || '';
         params.text = val('p-text');
+        if (params.mode === 'style' && !params.style) { toast('「换风格」请选择一个画风', 'error'); return; }
     } else {
         params.mode = val('p-smode'); params.res = parseInt(val('p-res'), 10); params.pad = parseInt(val('p-pad'), 10);
         if (params.mode === 'grid3' && ids.length !== 9) { toast('九宫格需要正好 9 张素材', 'error'); return; }

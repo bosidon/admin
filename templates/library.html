@@ -8,7 +8,7 @@
     <input type="file" id="file" multiple accept="image/*,audio/*,video/*" style="display:none;" onchange="upload(this)">
 </label>
 <button class="btn btn-outline" id="btn-cutout" disabled onclick="openPanel('cutout')">✂️ 抠图所选</button>
-<button class="btn btn-outline" id="btn-edit" disabled onclick="openPanel('edit')">🎨 编辑所选</button>
+<span id="edit-fns" style="display:flex;gap:6px;flex-wrap:wrap;"></span>
 <button class="btn btn-outline" id="btn-stitch" disabled onclick="openPanel('stitch')">🧩 拼版所选</button>
 <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
 {% endblock %}
@@ -84,7 +84,17 @@ async function load() {
     if (my !== SEQ) { return; }
     ITEMS = Array.isArray(rows) ? rows : [];
     SEL.clear();
+    await ensureOpts();
+    renderEditFns();
     render(); syncSel();
+}
+
+function renderEditFns() {               // 4 个编辑功能按钮（换背景/换服饰/换角度/换风格）
+    const el = document.getElementById('edit-fns');
+    if (!el || !OPTS.edit) { return; }
+    el.innerHTML = OPTS.edit.modes.map(m =>
+        '<button class="btn btn-outline" id="btn-edit-' + esc(m.id) + '" disabled'
+        + ' onclick="openPanel(\'edit\',\'' + esc(m.id) + '\')">' + esc(m.label) + '</button>').join('');
 }
 
 /* ---------- 两级归类：分类（文章配图 / 上传 / 编辑…）→ 文案子组 ---------- */
@@ -235,13 +245,14 @@ function toggle(id) {
 
 function syncSel() {                 // 顶部工具栏：勾选数不匹配就置灰（抠图 1 张 / 编辑 1-3 张 / 拼版 2-9 张）
     const n = SEL.size;
-    const bc = document.getElementById('btn-cutout'), be = document.getElementById('btn-edit'),
-          bs = document.getElementById('btn-stitch');
+    const bc = document.getElementById('btn-cutout'), bs = document.getElementById('btn-stitch');
     bc.disabled = n !== 1;
-    be.disabled = n < 1 || n > 3;
     bs.disabled = n < 2 || n > 9;
-    be.textContent = n ? ('🎨 编辑所选（' + n + '）') : '🎨 编辑所选';
     bs.textContent = n ? ('🧩 拼版所选（' + n + '）') : '🧩 拼版所选';
+    ((OPTS.edit || {}).modes || []).forEach(m => {          // 编辑 4 个功能：1-3 张可用
+        const b = document.getElementById('btn-edit-' + m.id);
+        if (b) { b.disabled = n < 1 || n > 3; }
+    });
     document.getElementById('sel-hint').textContent = n
         ? ('已选 ' + n + ' 张 · 1 张抠图 / 1-3 张编辑 / 2-9 张拼版')
         : '勾选素材后，用顶部按钮抠图 / 编辑 / 拼版';
@@ -256,12 +267,14 @@ function row(label, inner) {
 }
 const SEL_STYLE = 'padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;width:100%;';
 
-async function openPanel(action) {
+async function openPanel(action, mode) {
     await ensureOpts();
     PANEL_ACTION = action;
     const n = SEL.size;
+    const fnLabel = (action === 'edit')
+        ? (((OPTS.edit.modes || []).find(m => m.id === mode) || {}).label || '编辑') : '';
     document.getElementById('panel-title').textContent =
-        ({cutout:'✂️ 抠图', edit:'🎨 图生图', stitch:'🧩 拼版'}[action] || action) + ' · 已选 ' + n + ' 张';
+        ({cutout: '✂️ 抠图', edit: '🎨 ' + fnLabel, stitch: '🧩 拼版'}[action] || action) + ' · 已选 ' + n + ' 张';
     let h = '';
     if (action === 'cutout') {
         h += row('模型', '<select id="p-model" style="' + SEL_STYLE + '">'
@@ -271,11 +284,7 @@ async function openPanel(action) {
         h += '<div id="p-color-wrap" style="display:none;">' + row('底色',
             '<input type="color" id="p-color" value="#FFFFFF" style="width:56px;height:32px;border:1px solid #e2e8f0;border-radius:8px;">') + '</div>';
     } else if (action === 'edit') {
-        EDIT_MODE = (OPTS.edit.default || {}).mode || 'bg';
-        h += row('功能', '<div id="p-mode" style="display:flex;gap:8px;flex-wrap:wrap;">'
-            + OPTS.edit.modes.map(m => '<button class="btn ' + (m.id === EDIT_MODE ? 'btn-primary' : 'btn-outline')
-                + ' btn-sm" data-mode="' + esc(m.id) + '" onclick="pickMode(\'' + esc(m.id) + '\')">' + esc(m.label) + '</button>').join('')
-            + '</div>');
+        EDIT_MODE = mode || (OPTS.edit.default || {}).mode || 'bg';   // 功能由顶部按钮决定
         h += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">'
             + '<div id="p-style-label" style="width:60px;font-size:12.5px;color:#475569;">画风</div>'
             + '<div style="flex:1;"><select id="p-style" style="' + SEL_STYLE + '"></select></div></div>';
@@ -331,13 +340,6 @@ function syncEditRows() {
     if (ta) { ta.placeholder = EDIT_PLACEHOLDER[EDIT_MODE] || ''; }
 }
 
-function pickMode(id) {
-    EDIT_MODE = id;
-    document.querySelectorAll('#p-mode button').forEach(b => {
-        b.className = 'btn ' + (b.dataset.mode === id ? 'btn-primary' : 'btn-outline') + ' btn-sm';
-    });
-    syncEditRows();
-}
 function closePanel() { document.getElementById('panel').style.display = 'none'; }
 
 async function submitPanel() {
@@ -345,8 +347,7 @@ async function submitPanel() {
     if (action === 'cutout') {
         params.model = val('p-model'); params.background = val('p-bg'); params.color = val('p-color');
     } else if (action === 'edit') {
-        const on = document.querySelector('#p-mode button.btn-primary');
-        params.mode = (on && on.dataset.mode) || 'bg';
+        params.mode = EDIT_MODE || 'bg';
         params.style = val('p-style') || '';
         params.text = val('p-text');
         if (params.mode === 'style' && !params.style) { toast('「换风格」请选择一个画风', 'error'); return; }

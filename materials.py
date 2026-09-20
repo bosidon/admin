@@ -244,17 +244,22 @@ def _job_owner(article_id):
     return (None, "")
 
 
-def article_owner_uid(article_id):
-    """文案归属 uid（content.db articles.owner_id）；老数据无归属 → None"""
+def article_owner(article_id):
+    """(owner_id, owner) —— 文案归属（content.db articles）；老数据无归属 → (None, '')"""
     try:
         c = sqlite3.connect(CONTENT_DB, timeout=10)
-        r = c.execute("SELECT owner_id FROM articles WHERE id=?", (int(article_id),)).fetchone()
+        r = c.execute("SELECT owner_id, owner FROM articles WHERE id=?", (int(article_id),)).fetchone()
         c.close()
         if r:
-            return _norm_uid(r[0])
+            return (_norm_uid(r[0]), (r[1] or ""))
     except Exception:
         pass
-    return None
+    return (None, "")
+
+
+def article_owner_uid(article_id):
+    """文案归属 uid；老数据无归属 → None"""
+    return article_owner(article_id)[0]
 
 
 def can_view_url(url, uid):
@@ -304,9 +309,16 @@ def kind_of(filename):
 # ============================================================
 def upsert(file_path, mtype="image", name="", category="", source="ai", scope="private",
            owner_id=None, owner="", article_id=None, tags=""):
-    """按 file_path 幂等入库：已有则只更新可读信息（不新增行）"""
+    """按 file_path 幂等入库：已有则只更新可读信息（不新增行）
+
+    归属规则：**有文案的素材（配图产物 / 基于配图的加工产物）一律跟随文案归属**；
+    只有无文案的上传 / 独立加工才归操作人。这样素材库归属永远和文案一致。"""
     c = _conn()
     owner_id = _norm_uid(owner_id)
+    if article_id:                              # 跟随文案归属（改文案归属后可重新 sync 自愈）
+        _aoid, _aonm = article_owner(article_id)
+        if _aoid:
+            owner_id, owner = _aoid, _aonm
     row = c.execute("SELECT id FROM materials WHERE file_path=?", (file_path,)).fetchone()
     if row:
         c.execute("UPDATE materials SET type=?, name=?, category=?,"

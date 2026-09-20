@@ -801,7 +801,7 @@ def api_rewrite_article(article_id):
             resp = requests.post(llm['llm_base_url'],
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=dict({"model": llm['llm_model'], "messages": [{"role": "user", "content": prompt}]},
-                          **({"user_id": uid_ok("p" + str(src.get('promo_uid')))} if src.get('promo_uid') else {})),
+                          **({"user_id": uid_ok("p" + str(src.get('owner_id')))} if src.get('owner_id') else {})),
                 timeout=180)
         raw = resp.json()['choices'][0]['message']['content']
         import re
@@ -811,19 +811,19 @@ def api_rewrite_article(article_id):
         return jsonify({"error": "生成失败：%s" % e}), 500
 
     content_md = art.get('content', '')
-    promo_link = contentlines.promo_link(line, src.get('promo_uid'), src.get('promo_src'))
+    promo_link = contentlines.promo_link(line, src.get('owner_id'), src.get('promo_src'))
     if promo_link:
         content_md = content_md.rstrip() + '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
     wc = len(content_md.replace(' ', '').replace('\n', ''))
     cur = db.execute("INSERT INTO articles (title, platform, content_type, book, topic, angle,"
                      " structure, hook, tone, content_md, summary, tags, word_count,"
-                     " status, source, promo_uid, promo_src, promo_link, service_line,"
+                     " status, source, promo_src, promo_link, service_line,"
                      " owner_id, owner)"
-                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?, ?)",
+                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?)",
                      (art.get('title', '未命名'), platform, content_type, src.get('book'), src.get('topic'),
                       src.get('angle'), src.get('structure'), src.get('hook'), src.get('tone'),
                       content_md, art.get('summary', ''), art.get('tags', ''), wc,
-                      src.get('promo_uid'), src.get('promo_src'), promo_link or None, line,
+                      src.get('promo_src'), promo_link or None, line,
                       src.get('owner_id'), src.get('owner') or ''))
     db.commit()
     return jsonify({"ok": True, "id": cur.lastrowid, "title": art.get('title', '未命名'),
@@ -842,7 +842,8 @@ def api_generate_article():
     structure = data.get('structure', '')
     hook = data.get('hook', '')
     tone = data.get('tone', '')
-    promo_uid = data.get('promo_uid') or ''          # 推广人 uid
+    _u = current_user()                              # 文案归属人
+    promo_uid = (_u or {}).get('id')                 # 推广人 ID 就是用户 ID → 取归属人，不再单独填
     promo_src = data.get('promo_src') or ('c' + str(int(time.time()))[-6:])   # 内容来源码
     line = data.get('line') or 'lingxiu'             # 业务线（lingxiu/maya/tarot/psych）
     topic_kind = data.get('topic_kind') or ''        # 选题类型（如 challenge/seal/daily/kin）
@@ -988,13 +989,12 @@ def api_generate_article():
         word_count = len(content_md.replace(' ', '').replace('\n', ''))
 
         db = get_content_db()
-        _u = current_user()
         cursor = db.execute('''
             INSERT INTO articles (title, platform, content_type, book, topic, angle,
                                   structure, hook, tone, content_md, summary, tags,
-                                  word_count, status, source, promo_uid, promo_src, promo_link,
+                                  word_count, status, source, promo_src, promo_link,
                                   service_line, owner_id, owner)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?)
         ''', (
             article_data.get('title', '未命名'),
             platform, content_type,
@@ -1003,7 +1003,7 @@ def api_generate_article():
             article_data.get('summary', ''),
             article_data.get('tags', ''),
             word_count,
-            promo_uid or None, promo_src, promo_link or None,
+            promo_src, promo_link or None,
             line,
             (_u or {}).get('id'),
             user_label(_u),
@@ -1473,19 +1473,19 @@ def api_overlay_qr():
         return jsonify({"error": "缺少 article_id 或未选择图片"}), 400
     article_id = int(article_id)
     db = get_content_db()
-    art = db.execute('SELECT promo_uid, promo_src, promo_link, images_json '
+    art = db.execute('SELECT owner_id, promo_src, promo_link, images_json '
                      'FROM articles WHERE id=?', (article_id,)).fetchone()
     if not art:
         return jsonify({"error": "文案不存在"}), 404
     if art['promo_link']:
         link = art['promo_link']
-    elif art['promo_uid']:
+    elif art['owner_id']:
         link = 'https://xianbao.love/?ref=%s&src=%s' % (
-            art['promo_uid'], art['promo_src'] or ('c%d' % article_id))
+            art['owner_id'], art['promo_src'] or ('c%d' % article_id))
     else:
         link = None
     if not link:
-        return jsonify({"error": "该文案没有推广链接（请先在文案里填写推广人 ID）"}), 400
+        return jsonify({"error": "该文案没有推广链接（未设置归属人）"}), 400
     try:
         cur = json.loads(art['images_json'] or '[]')
         if not isinstance(cur, list):

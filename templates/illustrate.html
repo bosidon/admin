@@ -505,7 +505,7 @@ async function loadArt() {
     if (art) {
         document.getElementById('art-title').textContent = art.title || '未命名';
         document.getElementById('art-meta').textContent =
-            (art.platform || '') + ' · ' + (art.content_type || '') + ' · 推广人 ID: ' + (art.promo_uid || '未设置');
+            (art.platform || '') + ' · ' + (art.content_type || '') + (art.owner ? ' · 归属人: ' + art.owner : '');
     } else {
         document.getElementById('art-title').textContent = '文案不存在';
     }

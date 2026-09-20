@@ -1123,7 +1123,7 @@ def shutdown_instance():
 def _read_article_full(article_id):
     conn = _content_db()
     row = conn.execute(
-        "SELECT id, title, content_md, platform, content_type, promo_link, promo_uid, promo_src "
+        "SELECT id, title, content_md, platform, content_type, promo_link, owner_id, promo_src "
         "FROM articles WHERE id=?", (article_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -1132,9 +1132,9 @@ def _read_article_full(article_id):
 def _link_of(art, article_id):
     if art.get('promo_link'):
         return art['promo_link']
-    if art.get('promo_uid'):
+    if art.get('owner_id'):
         return 'https://xianbao.love/?ref=%s&src=%s' % (
-            art['promo_uid'], art.get('promo_src') or ('c%d' % article_id))
+            art['owner_id'], art.get('promo_src') or ('c%d' % article_id))
     return None
 
 
@@ -1474,7 +1474,7 @@ def gen_plan(art, llm_cfg, card_want=0, scene_count=0, style=""):
         j, err = _llm_json(url, key, model,
                            [{"role": "system", "content": sys_prompt},
                             {"role": "user", "content": user_msg}],
-                           user_id=("p%s" % (art.get("promo_uid") or "") if art.get("promo_uid") else ""))
+                           user_id=("p%s" % (art.get("owner_id") or "") if art.get("owner_id") else ""))
     if j is None:
         return None, err
 
@@ -1565,7 +1565,7 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
     if others:
         prompt += "\n其它条目（不要与它们重复）：" + others
     _art = _read_article_full(article_id) or {}
-    _uid = ("p%s" % _art.get("promo_uid")) if _art.get("promo_uid") else ""
+    _uid = ("p%s" % _art.get("owner_id")) if _art.get("owner_id") else ""
     with jobstore.LLM_GATE:                 # 同上：重写是同步接口，也要占 LLM 域名额
         j, err = _llm_json(url, key, model, [{"role": "user", "content": prompt}], user_id=_uid)
     if j is None:

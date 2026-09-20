@@ -86,7 +86,7 @@ async function loadHosts() {
         let sub = '';
         if (h.job) {
             const t = shortTitle(h.job.article_title, 20);
-            sub = '<div style="font-size:12px;color:var(--primary);margin-top:5px;">▶ 正在跑：'
+            sub = '<div style="font-size:12px;color:var(--primary);margin-top:5px;">▶️ 正在跑：'
                 + esc(h.job.kind_label) + (t ? '《' + esc(t) + '》' : '')
                 + ' · ' + esc(h.job.stage_label || h.job.status_label)
                 + ' ' + (h.job.total ? h.job.done + '/' + h.job.total : '') + '</div>';

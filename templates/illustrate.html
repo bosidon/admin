@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}配图 - 仙宝内容平台{% endblock %}
-{% block page_title %}🖼 配图{% endblock %}
+{% block page_title %}🖼️ 图文{% endblock %}
 
 {% block topbar_right %}
 <button class="btn btn-outline" onclick="location.href='/images'">← 返回</button>
@@ -38,7 +38,7 @@
     </div>
 
     <div id="plan-list-wrap" style="display:none;">
-        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🖼 配图清单
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🖼️ 配图清单
             <span id="list-count" style="color:#94a3b8;font-weight:400;"></span></div>
         <div id="plan-list"></div>
     </div>
@@ -336,7 +336,7 @@ function groupOf(u) {
 function isStamped(u) { return /_q\.png$/.test(u); }
 function isSelectable(u) { return groupOf(u) !== 'qr' && !isStamped(u); }
 const GROUPS = [
-    ['scene', '🖼 配图'],
+    ['scene', '🖼️ 配图'],
     ['qr',    '🔗 二维码'],
     ['other', '📦 其他'],
 ];

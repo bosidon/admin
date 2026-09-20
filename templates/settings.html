@@ -287,11 +287,11 @@ async function checkComfy() {
     try {
         j = await api('/api/comfy/check', {method: 'POST', body: JSON.stringify(comfyForm())});
     } catch (e) {
-        box.textContent = '⚠ 检测失败：' + e.message;
+        box.textContent = '⚠️ 检测失败：' + e.message;
         return;
     }
     if (!j || !j.ok) {
-        box.textContent = '⚠ ' + ((j && j.reason) || '检测失败');
+        box.textContent = '⚠️ ' + ((j && j.reason) || '检测失败');
         return;
     }
     const lines = [];
@@ -303,7 +303,7 @@ async function checkComfy() {
         lines.push((l.ok ? '✅' : '❌') + ' LoRA：' + l.name +
             (l.weight === 1 ? '' : ':' + l.weight) + (l.hint ? '  —— ' + l.hint : ''));
     });
-    (j.notes || []).forEach(function(n) { lines.push('⚠ ' + n); });
+    (j.notes || []).forEach(function(n) { lines.push('⚠️ ' + n); });
     const c = j.counts || {};
     lines.push('清单：底模 ' + (c.comfy_unet || 0) + ' · 编码器 ' + (c.comfy_clip || 0) +
         ' · VAE ' + (c.comfy_vae || 0) + ' · LoRA ' + (c.comfy_lora || 0) +

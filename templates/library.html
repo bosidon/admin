@@ -79,7 +79,7 @@ let ORDERED = [];          // 当前「可见」顺序（分类/分组后），�
 let TREE = [];             // 顶层分类（编辑 / 上传 / 文章配图 …）
 let NODES = {};            // key → 节点（分类 + 文案子组）
 const OPEN = new Map();    // 手动展开/收起（未记录 → 默认：编辑/抠图/拼版展开，上传/文章配图/文案子组折叠）
-const TYPE_ICON = {image:'🖼', audio:'🎵', video:'🎬'};
+const TYPE_ICON = {image:'🖼️', audio:'🎵', video:'🎬'};
 const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版', txt2img:'文生图'};
 const LINE_LABEL = {lingxiu:'灵性书籍', maya:'玛雅天赋', tarot:'塔罗', psych:'心理咨询'};
 
@@ -235,7 +235,7 @@ function card(m) {
     const thumb = isImg
         ? '<img src="' + esc(thumbUrl(m)) + '" loading="lazy" alt="" style="width:100%;height:132px;object-fit:cover;display:block;background:#f1f5f9;">'
         : '<div style="height:132px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#f8fafc;color:#94a3b8;">'
-          + '<div style="font-size:26px;">▶</div><div style="font-size:20px;">' + (TYPE_ICON[m.type] || '📄') + '</div></div>';
+          + '<div style="font-size:26px;">▶️</div><div style="font-size:20px;">' + (TYPE_ICON[m.type] || '📄') + '</div></div>';
     return '<div style="position:relative;border:' + (on ? '2px solid #6366f1' : '1px solid #e2e8f0') + ';border-radius:10px;overflow:hidden;background:#fff;">'
         + (isImg ? '<div style="position:absolute;top:6px;left:6px;z-index:3;"><input type="checkbox" ' + (on ? 'checked' : '')
           + ' onclick="event.stopPropagation()" onchange="toggle(' + m.id + ')" style="width:16px;height:16px;cursor:pointer;"></div>' : '')

@@ -47,6 +47,7 @@ from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      load_model_groups, load_model_config, adl_hosts,
                      style_groups, style_label_map, style_types, get_default_style, ASPECT_SIZE,
                      instance_uuids, parallel_limit, adl_power_off)
+import article_prompts
 import jobs as jobstore
 import lines as contentlines
 import materials as materialstore
@@ -791,38 +792,13 @@ def api_line_topics():
     items = contentlines.topics(line, kind)
     return jsonify({"ok": True, "line": line, "kind": kind, "count": len(items), "items": items})
 
-
-def _line_prompt(L, line, kind_id, topic_obj, material, plat_name, label, word_spec, fmt, tone):
-    """业务线选题 prompt：素材是唯一事实来源，术语必须与素材一致"""
-    kn = contentlines.kind_name(line, kind_id)
-    return f"""你是「仙宝心灵成长」的内容创作Agent，本次写「{L['name']}」业务线的引流内容。
-
-## 任务
-平台：{plat_name}　形态：{label}　字数：{word_spec}
-选题：{kn} —— {topic_obj or '自动选择'}
-语气：{tone or '温暖、真诚、有洞察'}
-输出格式：{fmt}
-
-## 选题素材（**唯一事实来源**）
-{material[:4500]}
-
-## 写作要求
-1. 只用素材里的术语与说法（如「印记/图腾/音阶/波符」这类原体系词汇），**不要换成星座、占星等其他体系的说法**；不要编造素材里没有的数据、年份、比例或案例
-2. 从读者真实困惑切入（"我为什么总是…"这类），不要写成百科词条
-3. 结尾给一个可执行的小练习或自我提问
-4. 不要输出任何网址或链接（系统会自动在文末追加推广链接）
-5. 标签 5-8 个
-6. 输出 JSON：{{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}}
-"""
-
-
 PLAT_LABEL = {'wechat': '公众号', 'xiaohongshu': '小红书', 'video_account': '视频号',
               'douyin': '抖音', 'bilibili': 'B站', 'kuaishou': '快手',
               'podcast': '播客', 'zhihu': '知乎', 'toutiao': '头条', 'moments': '朋友圈'}
 REWRITE_SPEC = {
     'article': '1000-2000字，Markdown 结构，开头3句抓住读者',
-    'short_video': '300-500字，分镜格式，每段标注【画面】【台词】【时长】',
-    'long_video': '1500-2500字，分镜格式，每段标注【画面】【台词】【时长】【转场】',
+    'short_video': '300-500字，台词脚本（分段写台词/旁白，不写画面分镜）',
+    'long_video': '1500-2500字，台词脚本（分段写台词/旁白，不写画面分镜）',
     'speech': '800-1200字，口语化，标注语气停顿和重音',
 }
 
@@ -966,8 +942,8 @@ def api_generate_article():
     }
     type_format = {
         'article':    'Markdown格式，分段清晰',
-        'short_video': '分镜格式，每段标注【画面】【台词】【时长】',
-        'long_video':  '分镜格式，每段标注【画面】【台词】【时长】【转场】',
+        'short_video': '台词脚本：分段写台词/旁白，不写画面、时长、转场',
+        'long_video':  '台词脚本：分段写台词/旁白，不写画面、时长、转场',
         'speech':     '口语化，标注语气停顿和重音',
     }
     # 平台覆盖：小红书按「笔记体」输出（原 xhs_note 的写法，已合并进图文文章）
@@ -986,41 +962,23 @@ def api_generate_article():
     label = type_label.get(content_type, type_label['article'])
 
     plat_name = PLAT_NAME.get(platform, platform)
-    prompt = f"""你是「仙宝心灵成长」的专职内容创作Agent。
-
-## 任务
-生成一篇「{plat_name}」平台的{label}。
-
-## 参数
-- 自媒体平台：{plat_name}
-- 内容类型：{label}
-- 书目：{book or '自动选择'}
-- 话题：{topic or '自动选择'}
-- 角度：{angle or '自动选择'}
-- 结构：{structure or '自动选择'}
-- 钩子：{hook or '自动选择'}
-- 语气：{tone or '自动选择'}
-- 字数要求：{word_spec}
-
-## 品牌指引（摘要）
-{guide[:2000]}
-
-## 输出要求
-1. 输出格式：{fmt}
-2. 必须遵守禁用词表
-3. 注入至少3项个人元素
-4. 结尾提供1-2个可操作练习
-5. 不要输出任何网址或链接（系统会自动在文末追加推广链接）
-6. 标签5-8个
-7. 输出JSON格式：{{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}}
-"""
-
-    # 业务线（玛雅/塔罗/心理咨询）：用该选题的原始素材重写 prompt
-    # （灵性书籍仍走上面的原有 prompt，一字不改）
+    # ↓ 组装占位符 → 渲染该业务线自己的提词（prompts/article_<line>.md，设置页可编辑，改完立即生效）
+    line_label = article_prompts.LINE_NAME.get(line, line)
+    kind_name, material = '', ''
     if line != 'lingxiu' and contentlines.line_of(line):
-        prompt = _line_prompt(contentlines.line_of(line), line, topic_kind, topic_obj,
-                              contentlines.material(line, topic_kind, topic_obj),
-                              plat_name, label, word_spec, fmt, tone)
+        kind_name = contentlines.kind_name(line, topic_kind) or ''
+        material = contentlines.material(line, topic_kind, topic_obj) or ''
+    if line == 'lingxiu':
+        topic_show = '、'.join([x for x in (book, topic) if x]) or '自动选择'
+    else:
+        topic_show = ' · '.join([x for x in (kind_name, topic_obj) if x]) or '自动选择'
+    prompt = article_prompts.render(line, {
+        '业务线': line_label, '平台': plat_name, '内容类型': label, '字数': word_spec,
+        '选题': topic_show, '语气': tone or '温暖、真诚、有洞察',
+        '角度': angle, '结构': structure, '钩子': hook, '输出格式': fmt,
+        '素材': material[:4500], '品牌指引': guide[:2000],
+        '书目': book, '话题': topic, '选题类型': kind_name, '选题对象': topic_obj,
+    })
 
     llm = get_llm_config()
     api_key = llm['llm_api_key']
@@ -1298,6 +1256,53 @@ def api_save_plan_prompt():
     if not ok:
         return jsonify({"error": err}), 400
     return jsonify({"ok": True, "content": load_plan_prompt_raw()})
+
+
+@app.route('/api/prompts/article', methods=['GET'])
+def api_get_article_prompt():
+    """文案 Agent 提词（按业务线）· ?line=lingxiu|maya|tarot|psych"""
+    line = (request.args.get('line') or 'lingxiu').strip()
+    if line not in article_prompts.LINES:
+        return jsonify({"error": "未知业务线"}), 400
+    return jsonify({"ok": True, "content": article_prompts.load_raw(line), **article_prompts.meta(line)})
+
+
+@app.route('/api/prompts/article', methods=['POST'])
+def api_save_article_prompt():
+    """保存/重置某业务线的文案提词 · body {line, content} 或 {line, reset:true}"""
+    data = request.json or {}
+    line = (data.get('line') or 'lingxiu').strip()
+    if line not in article_prompts.LINES:
+        return jsonify({"error": "未知业务线"}), 400
+    ok, err = article_prompts.reset(line) if data.get('reset') \
+        else article_prompts.save(line, data.get('content') or '')
+    if not ok:
+        return jsonify({"error": err}), 400
+    return jsonify({"ok": True, "content": article_prompts.load_raw(line), **article_prompts.meta(line)})
+
+
+@app.route('/api/prompts/storyboard', methods=['GET'])
+def api_get_storyboard_prompt():
+    """视频分镜 Agent 提词（prompts/video_storyboard.md）"""
+    p = Path(__file__).resolve().parent / 'prompts' / 'video_storyboard.md'
+    try:
+        return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip(),
+                        "path": "prompts/video_storyboard.md", "placeholders": []})
+    except Exception:
+        return jsonify({"ok": True, "content": "", "path": "prompts/video_storyboard.md", "placeholders": []})
+
+
+@app.route('/api/prompts/storyboard', methods=['POST'])
+def api_save_storyboard_prompt():
+    """保存视频分镜 Agent 提词 · body {content}"""
+    data = request.json or {}
+    p = Path(__file__).resolve().parent / 'prompts' / 'video_storyboard.md'
+    t = (data.get('content') or '').strip()
+    if not t:
+        return jsonify({"error": "内容不能为空"}), 400
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(t + "\n", encoding='utf-8')
+    return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip()})
 
 
 @app.route('/api/articles/<int:article_id>/illustrations/logs')

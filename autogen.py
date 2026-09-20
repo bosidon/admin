@@ -1673,7 +1673,7 @@ def _shutdown_if_idle(job_id, log):
         # 注意：必须连「正在跑」的一起数 —— 只数排队时，若同域有两个任务
         # （比如从脚本入队、域判定不一致），先跑完的那个会把机器关掉，
         # 正在等开机的另一个就直接失败（实测踩过）。
-        gpu_kinds = ("images", "cutout", "edit", "stitch")
+        gpu_kinds = ("images", "cutout", "edit", "stitch", "txt2img")   # 漏一个就会把还有任务的实例关掉
         n = sum(jobstore.queued_count(k) + jobstore.running_count(k) for k in gpu_kinds)
         if n > 1:
             log("还有 %d 个 GPU 任务未完成，实例保持运行" % (n - 1))
@@ -1938,6 +1938,58 @@ def run_material_job(job):
             _shutdown_if_idle(jid, lambda m: _log(jid, m))
 
 
+def run_txt2img_job(job):
+    """文生图：一句提词 → 1 张
+    出图链路复用「文章配图」的 comfy_generate（同实例 / 同底模 / 同 LoRA / 同采样参数 / 同负面词）"""
+    import hashlib
+    import materials as mat
+    jid = job["id"]
+    opts = job.get("payload") or {}
+    text = (opts.get("prompt") or "").strip()
+    style = (opts.get("style") or "").strip() or get_default_style()
+    aspect = opts.get("aspect") or "3:4"
+    w, h = ASPECT_SIZE.get(aspect, ASPECT_SIZE["3:4"])
+    if not text:
+        raise RuntimeError("提词不能为空")
+    cfg = get_comfy_config()
+    if not cfg.get("comfy_instance_uuid") or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置应用实例 UUID / Token，请去「设置」页填写")
+    short = text if len(text) <= 24 else text[:24] + "…"
+    _set(jid, total=1, done=0, style=style)
+    _log(jid, "文生图：%s（风格 %s · %s）" % (short, style_label_map().get(style, style) or "-", aspect))
+    with RUN_LOCK:
+        try:
+            _set(jid, stage="booting", host=cfg.get("comfy_instance_uuid") or "")
+            _ensure_instance(jid, lambda m: _log(jid, m))
+            _set(jid, stage="ready")
+            base = resolve_base_url(logger=lambda m: _log(jid, m))
+            if not base:
+                raise RuntimeError("拿不到 ComfyUI 地址")
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
+                raise RuntimeError("ComfyUI 300s 内未就绪")
+            _set(jid, stage="generating")
+            p = _with_style(_clean_aspect_words(text), style)      # 补画风英文词 + 去掉提词里的比例字样
+            _log(jid, "画面生成中（%s → %dx%d）…" % (aspect, w, h))
+            fn, sub, meta = comfy_generate(base, p, w, h, "t2i_%s" % jid[:6], cfg)
+            data = comfy_download(base, fn, sub)
+            # 文件名 = 提词+风格+比例的哈希 + 任务号 → 同一提词重跑不会覆盖旧图
+            hh = hashlib.md5(("%s|%s|%s" % (text, style, aspect)).encode("utf-8")).hexdigest()[:6]
+            name = "t2i_%s_%s.png" % (hh, jid[:4])
+            (mat.out_dir(0) / name).write_bytes(data)
+            url = "%s/materials/0/%s" % (mat.URL_PREFIX, name)
+            mat.upsert(url, "image", name=short, source="txt2img", article_id=None,
+                       owner_id=job.get("owner_id"), owner=job.get("owner") or "", tags="文生图")
+            _set(jid, done=1, images=[url])
+            _log_gen_meta(lambda m: _log(jid, m), 0, name, "t2i", meta, style)
+            _log(jid, "文生图完成 → " + name)
+        except Exception as e:
+            _log(jid, "❌ 文生图失败：%s" % str(e)[:220])
+            raise RuntimeError(str(e)[:300])
+        finally:
+            _shutdown_if_idle(jid, lambda m: _log(jid, m))
+
+
 def register_jobs():
     """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
     jobstore.DISPATCHER.register("images", run_images_job, domain="gpu")   # 显存域：一块 GPU 串行
@@ -1945,5 +1997,6 @@ def register_jobs():
     # 素材加工：都吃显存 → gpu 域（与出图同域，一块卡串行）
     for _k in ("cutout", "edit", "stitch"):
         jobstore.DISPATCHER.register(_k, run_material_job, domain="gpu")
+    jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()

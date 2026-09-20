@@ -45,7 +45,7 @@ from autogen import (start_generate, get_job, shutdown_instance, adl_status,
                      load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok,
                      get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config,
                      load_model_groups, load_model_config, adl_hosts,
-                     style_groups, style_label_map)
+                     style_groups, style_label_map, style_types, get_default_style, ASPECT_SIZE)
 import jobs as jobstore
 import lines as contentlines
 import materials as materialstore
@@ -1678,8 +1678,14 @@ def api_get_library():
 
 @app.route('/api/materials/options')
 def api_materials_options():
-    """加工面板选项（抠图模型/背景、编辑模式、拼版分辨率…）—— 服务端下发，前端不硬编码"""
-    return jsonify(materialstore.options())
+    """面板选项（抠图模型/背景、编辑功能/画风、拼版分辨率、文生图风格/比例）—— 服务端下发，前端不硬编码"""
+    o = materialstore.options()
+    o["txt2img"] = {                     # 文生图：风格分组 + 比例表（与「文章配图」同一份 styles.json / ASPECT_SIZE）
+        "styles": style_groups(),
+        "aspects": [{"id": k, "label": "%s（%d×%d）" % (k, v[0], v[1])} for k, v in ASPECT_SIZE.items()],
+        "default": {"style": get_default_style(), "aspect": "3:4"},
+    }
+    return jsonify(o)
 
 
 @app.route('/api/materials/thumb')
@@ -1720,6 +1726,32 @@ def api_materials_upload():
         except Exception as e:
             errors.append("%s：上传失败(%s)" % (fs.filename or '?', str(e)[:80]))
     return jsonify({"ok": True, "items": items, "errors": errors})
+
+
+@app.route('/api/materials/txt2img', methods=['POST'])
+def api_materials_txt2img():
+    """文生图：提词 + 风格 + 比例 → GPU 队列（出图链路与「文章配图」同一套）"""
+    u = current_user() or {}
+    body = request.get_json(silent=True) or {}
+    prompt = (body.get('prompt') or '').strip()
+    style = (body.get('style') or '').strip()
+    aspect = (body.get('aspect') or '').strip()
+    if not prompt:
+        return jsonify({"error": "请填写提词"}), 400
+    if len(prompt) > 500:
+        return jsonify({"error": "提词太长（最多 500 字）"}), 400
+    if style and style not in style_types():
+        return jsonify({"error": "风格不存在"}), 400
+    if aspect not in ASPECT_SIZE:
+        return jsonify({"error": "比例不存在"}), 400
+    cfg = get_comfy_config()
+    if not cfg.get('comfy_instance_uuid') or not cfg.get('comfy_api_token'):
+        return jsonify({"error": "未配置应用实例 UUID / Token，请去「设置」页填写"}), 400
+    payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect}
+    jid, reused = jobstore.DISPATCHER.enqueue('txt2img', None, payload, 1, priority=10,
+                                             owner=user_label(u), owner_id=u.get('id'))
+    return jsonify({"ok": True, "job_id": jid, "reused": reused,
+                    "queue_pos": jobstore.queue_pos(jid)})
 
 
 @app.route('/api/materials/download', methods=['POST'])

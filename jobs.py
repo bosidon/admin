@@ -31,10 +31,11 @@ _KINDS_DEFAULT_LIMIT = {"images": 1, "plan": 2, "rewrite": 2, "text": 2}
 # 导致「一块 GPU 串行」失效（实测出过：抠图和拼版同时在 GPU 上跑）。
 # 注意 dict 在模块级、位于 DISPATCHER 定义之前，所以用函数内合并而不是直接引用。
 _KIND_DOMAIN = {"images": "gpu", "cutout": "gpu", "edit": "gpu", "stitch": "gpu",
+                "txt2img": "gpu",
                 "plan": "llm", "rewrite": "llm", "text": "llm"}
 
 KIND_LABEL = {"images": "生成配图", "plan": "生成方案", "rewrite": "重写条目", "text": "生成文案",
-              "cutout": "素材抠图", "edit": "素材编辑", "stitch": "素材拼版"}
+              "cutout": "素材抠图", "edit": "素材编辑", "stitch": "素材拼版", "txt2img": "文生图"}
 STATUS_LABEL = {"queued": "排队中", "running": "进行中", "done": "已完成",
                 "failed": "失败", "canceled": "已取消", "interrupted": "被中断"}
 STAGE_LABEL = {"planning": "分析文案", "booting": "开机中", "ready": "等 ComfyUI",

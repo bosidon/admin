@@ -13,6 +13,7 @@
         <button class="btn btn-outline" id="btn-cutout" disabled onclick="openPanel('cutout')">✂️ 抠图</button>
         <span id="edit-fns" style="display:flex;gap:8px;flex-wrap:wrap;"></span>
         <button class="btn btn-outline" id="btn-stitch" disabled onclick="openPanel('stitch')">🧩 拼版</button>
+        <button class="btn btn-outline" onclick="openPanel('txt2img')">🖌 文生图</button>
     </span>
     <span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
         <label class="btn btn-primary" style="cursor:pointer;margin:0;">⬆ 上传
@@ -79,7 +80,7 @@ let TREE = [];             // 顶层分类（编辑 / 上传 / 文章配图 …�
 let NODES = {};            // key → 节点（分类 + 文案子组）
 const OPEN = new Map();    // 手动展开/收起（未记录 → 默认：编辑/抠图/拼版展开，上传/文章配图/文案子组折叠）
 const TYPE_ICON = {image:'🖼', audio:'🎵', video:'🎬'};
-const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版'};
+const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版', txt2img:'文生图'};
 const LINE_LABEL = {lingxiu:'灵性书籍', maya:'玛雅天赋', tarot:'塔罗', psych:'心理咨询'};
 
 function esc(s) {
@@ -110,6 +111,8 @@ function renderEditFns() {               // 4 个编辑功能按钮（换背景/
 
 /* ---------- 两级归类：分类（文章配图 / 上传 / 编辑…）→ 文案子组 ---------- */
 const SRC_TITLE = {upload: '上传', edit: '编辑', cutout: '抠图', stitch: '拼版'};   // 分类标题（顺序见 buildTree）
+const SRC_CAT = {edit: 'edit', txt2img: 'edit', upload: 'upload', cutout: 'cutout', stitch: 'stitch'};  // 来源 → 归类（文生图并入「编辑」）
+const SRC_ORDER = ['edit', 'upload', 'cutout', 'stitch'];
 const GRID_STYLE = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;';
 
 function mkNode(key, type, o) {          // 建节点并登记（全选/折叠都按 key 找）
@@ -125,8 +128,8 @@ function buildTree(rows) {
         if (aid) {                                  // 有文案 → 进「文章配图」（含抠图/编辑/拼版产物）
             if (!arts.has(aid)) { arts.set(aid, []); }
             arts.get(aid).push(m);
-        } else {                                    // 无文案 → 按来源分类
-            const k = m.source || 'other';
+        } else {                                    // 无文案 → 按来源归类（文生图并入「编辑」）
+            const k = SRC_CAT[m.source] || m.source || 'other';
             if (!bySrc.has(k)) { bySrc.set(k, []); }
             bySrc.get(k).push(m);
         }
@@ -134,7 +137,7 @@ function buildTree(rows) {
     NODES = {};
     const cats = [];
     // 分类顺序：编辑 → 上传 → 抠图 → 拼版（用户口径）；「文章配图」放其后
-    ['edit', 'upload', 'cutout', 'stitch'].forEach(k => {
+    SRC_ORDER.forEach(k => {
         if (bySrc.has(k)) { cats.push(mkNode('cat:' + k, 'cat', {title: SRC_TITLE[k] || k, items: bySrc.get(k)})); }
     });
     if (arts.size) {
@@ -148,7 +151,10 @@ function buildTree(rows) {
         subs.forEach(x => x.items.forEach(m => all.push(m)));
         cats.push(mkNode('cat:article', 'cat', {title: '文章配图', items: all, children: subs}));
     }
-    if (bySrc.has('other')) { cats.push(mkNode('cat:other', 'cat', {title: '未归类', items: bySrc.get('other')})); }
+    // 兜底：没在 SRC_ORDER 里列出的来源（含历史 other）各自成一类，避免被丢掉
+    [...bySrc.keys()].filter(k => SRC_ORDER.indexOf(k) < 0).forEach(k => {
+        cats.push(mkNode('cat:' + k, 'cat', {title: SRC_TITLE[k] || '未归类', items: bySrc.get(k)}));
+    });
     return cats;
 }
 
@@ -285,8 +291,9 @@ async function openPanel(action, mode) {
     const n = SEL.size;
     const fnLabel = (action === 'edit')
         ? (((OPTS.edit.modes || []).find(m => m.id === mode) || {}).label || '编辑') : '';
-    document.getElementById('panel-title').textContent =
-        ({cutout: '✂️ 抠图', edit: '🎨 ' + fnLabel, stitch: '🧩 拼版'}[action] || action) + ' · 已选 ' + n + ' 张';
+    document.getElementById('panel-title').textContent = (action === 'txt2img')
+        ? '🖌 文生图'
+        : (({cutout: '✂️ 抠图', edit: '🎨 ' + fnLabel, stitch: '🧩 拼版'}[action] || action) + ' · 已选 ' + n + ' 张');
     let h = '';
     if (action === 'cutout') {
         h += row('模型', '<select id="p-model" style="' + SEL_STYLE + '">'
@@ -306,6 +313,23 @@ async function openPanel(action, mode) {
             + '<div style="flex:1;"><textarea id="p-text" rows="3" style="width:100%;box-sizing:border-box;padding:8px 10px;'
             + 'border:1px solid #e2e8f0;border-radius:8px;font-size:13px;resize:vertical;"></textarea></div></div>';
         h += '<div style="font-size:11.5px;color:#94a3b8;">选 1 张 = 只改这张；选 2-3 张 = 每张各改一次，其余张作为参考（保人物一致用）</div>';
+    } else if (action === 'txt2img') {
+        const T = OPTS.txt2img || {};
+        const groups = T.styles || [], aspects = T.aspects || [];
+        const defA = (T.default || {}).aspect || '3:4';
+        h += '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:10px;">'
+            + '<div style="width:60px;font-size:12.5px;color:#475569;padding-top:8px;">提词</div>'
+            + '<div style="flex:1;"><textarea id="t2i-prompt" rows="4" placeholder="例：一只在窗台上打盹的橘猫，午后阳光洒在木地板上，浅景深" '
+            + 'style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;resize:vertical;"></textarea></div></div>';
+        h += row('风格', '<select id="t2i-style" style="' + SEL_STYLE + '">'
+            + groups.map(g => '<optgroup label="' + esc(g.name) + '">'
+                + (g.styles || []).map(st => '<option value="' + esc(st.id) + '"'
+                    + (st.id === (T.default || {}).style ? ' selected' : '') + '>' + esc(st.name) + '</option>').join('')
+                + '</optgroup>').join('') + '</select>');
+        h += row('比例', '<select id="t2i-aspect" style="' + SEL_STYLE + '">'
+            + aspects.map(a => '<option value="' + esc(a.id) + '"' + (a.id === defA ? ' selected' : '') + '>'
+                + esc(a.label) + '</option>').join('') + '</select>');
+        h += '<div style="font-size:11.5px;color:#94a3b8;">走「文章配图」同一套出图链路（同实例 / 底模 / 采样参数）；一次出 1 张，进度见任务看板</div>';
     } else {
         h += row('模式', '<select id="p-smode" style="' + SEL_STYLE + '">'
             + OPTS.stitch.modes.map(m => '<option value="' + esc(m.id) + '">' + esc(m.label) + '</option>').join('') + '</select>');
@@ -363,6 +387,11 @@ async function submitPanel() {
         params.style = val('p-style') || '';
         params.text = val('p-text');
         if (params.mode === 'style' && !params.style) { toast('「换风格」请选择一个画风', 'error'); return; }
+    } else if (action === 'txt2img') {
+        params.prompt = val('t2i-prompt');
+        params.style = val('t2i-style') || '';
+        params.aspect = val('t2i-aspect') || '';
+        if (!(params.prompt || '').trim()) { toast('请填写提词', 'error'); return; }
     } else {
         params.mode = val('p-smode'); params.res = parseInt(val('p-res'), 10); params.pad = parseInt(val('p-pad'), 10);
         if (params.mode === 'grid3' && ids.length !== 9) { toast('九宫格需要正好 9 张素材', 'error'); return; }
@@ -370,7 +399,11 @@ async function submitPanel() {
     }
     if (action === 'edit' && ids.length > 3) { toast('图生图最多 3 张素材', 'error'); return; }
     const tab = window.open('/jobs', '_blank');       // 入队前同步开标签页（避免被弹窗拦截）
-    const r = await api('/api/materials/process', {method: 'POST', body: JSON.stringify({action: action, ids: ids, params: params})});
+    const isT2I = (action === 'txt2img');
+    const r = await api(isT2I ? '/api/materials/txt2img' : '/api/materials/process',
+        {method: 'POST',
+         body: JSON.stringify(isT2I ? {prompt: params.prompt, style: params.style, aspect: params.aspect}
+                                    : {action: action, ids: ids, params: params})});
     if (!r.ok) { if (tab) { tab.close(); } toast(r.error || '入队失败', 'error'); return; }
     toast(r.reused ? '已有同样的任务在进行，进度见任务看板' : '已入队，进度见任务看板');
     closePanel(); SEL.clear(); syncSel(); render();

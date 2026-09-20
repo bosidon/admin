@@ -133,6 +133,7 @@
         <select class="form-input" id="agent-select" onchange="loadAgentPrompt()">
             <option value="plan">配图 Agent</option>
             <option value="storyboard">视频分镜 Agent</option>
+            <option value="rewrite">改写 Agent</option>
             <option value="lingxiu">文案 · 灵性书籍</option>
             <option value="maya">文案 · 玛雅天赋</option>
             <option value="tarot">文案 · 塔罗</option>
@@ -398,6 +399,7 @@ async function saveSettings() {
 const AGENT_INFO = {
     plan:       {name: '配图 Agent',      url: '/api/prompts/plan'},
     storyboard: {name: '视频分镜 Agent',  url: '/api/prompts/storyboard', noreset: true},
+    rewrite:    {name: '改写 Agent',      url: '/api/prompts/rewrite'},
     lingxiu:    {name: '文案 · 灵性书籍', url: '/api/prompts/article?line=lingxiu', save: {line: 'lingxiu'}},
     maya:       {name: '文案 · 玛雅天赋', url: '/api/prompts/article?line=maya',    save: {line: 'maya'}},
     tarot:      {name: '文案 · 塔罗',     url: '/api/prompts/article?line=tarot',   save: {line: 'tarot'}},

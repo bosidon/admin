@@ -792,6 +792,8 @@ def api_line_topics():
     items = contentlines.topics(line, kind)
     return jsonify({"ok": True, "line": line, "kind": kind, "count": len(items), "items": items})
 
+CTYPE_LABEL = {'article': '图文文章', 'short_video': '短视频脚本',
+               'long_video': '长视频脚本', 'speech': '口播稿'}
 PLAT_LABEL = {'wechat': '公众号', 'xiaohongshu': '小红书', 'video_account': '视频号',
               'douyin': '抖音', 'bilibili': 'B站', 'kuaishou': '快手',
               'podcast': '播客', 'zhihu': '知乎', 'toutiao': '头条', 'moments': '朋友圈'}
@@ -821,19 +823,13 @@ def api_rewrite_article(article_id):
     plat_name = PLAT_LABEL.get(platform, platform)
     spec = REWRITE_SPEC.get(content_type, REWRITE_SPEC['article'])
     body = (src.get('content_md') or '')[:6000]
-    prompt = f"""你是「仙宝心灵成长」的内容改写Agent。
-
-## 任务
-把下面这篇原文改写成「{plat_name}」平台的{content_type}：{spec}
-- 保留原文的核心观点、术语与事实，**不要新增原文没有的数据或案例**
-- 保留选题方向：{src.get('topic') or src.get('book') or '（原文自定）'}
-- 重新组织结构与节奏以适配目标平台，标题也要重写
-- 不要输出任何网址或链接（系统会自动在文末追加推广链接）
-- 输出 JSON：{{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}}
-
-## 原文
-{body}
-"""
+    prompt = article_prompts.render_rewrite({
+        '平台': plat_name,
+        '内容类型': CTYPE_LABEL.get(content_type, content_type),
+        '字数要求': spec,
+        '选题方向': src.get('topic') or src.get('book') or '（原文自定）',
+        '原文': body,
+    })
     llm = get_llm_config()
     api_key = llm.get('llm_api_key')
     if not api_key:
@@ -1279,6 +1275,25 @@ def api_save_article_prompt():
     if not ok:
         return jsonify({"error": err}), 400
     return jsonify({"ok": True, "content": article_prompts.load_raw(line), **article_prompts.meta(line)})
+
+
+@app.route('/api/prompts/rewrite', methods=['GET'])
+def api_get_rewrite_prompt():
+    """改写 Agent 提词（prompts/rewrite_agent.md）"""
+    return jsonify({"ok": True, "content": article_prompts.load_rewrite_raw(),
+                    **article_prompts.rewrite_meta()})
+
+
+@app.route('/api/prompts/rewrite', methods=['POST'])
+def api_save_rewrite_prompt():
+    """保存/重置改写 Agent 提词 · body {content} 或 {reset:true}"""
+    data = request.json or {}
+    ok, err = article_prompts.reset_rewrite() if data.get('reset') \
+        else article_prompts.save_rewrite(data.get('content') or '')
+    if not ok:
+        return jsonify({"error": err}), 400
+    return jsonify({"ok": True, "content": article_prompts.load_rewrite_raw(),
+                    **article_prompts.rewrite_meta()})
 
 
 @app.route('/api/prompts/storyboard', methods=['GET'])

@@ -128,3 +128,68 @@ if __name__ == "__main__":
         out = render(ln, vals)
         left = _PH_RE.findall(out)
         print("%-8s 渲染 %d 字 ｜ 未替换占位符: %s" % (ln, len(out), left if left else "无 ✅"))
+
+# ============ 改写 Agent（/api/articles/<id>/rewrite）============
+REWRITE_FILE = PROMPT_DIR / "rewrite_agent.md"
+REWRITE_PLACEHOLDERS = ["平台", "内容类型", "字数要求", "选题方向", "原文"]
+REWRITE_DEFAULT = """你是「仙宝心灵成长」的内容改写 Agent。
+
+## 任务
+把下面这篇原文改写成「{{平台}}」平台的{{内容类型}}：{{字数要求}}
+- 保留原文的核心观点、术语与事实，**不要新增原文没有的数据或案例**
+- 保留选题方向：{{选题方向}}
+- 重新组织结构与节奏以适配目标平台，标题也要重写
+- 不要输出任何网址或链接（系统会自动在文末追加推广链接）
+
+## 输出
+只输出 JSON，不要解释、不要代码块标记：
+{"title":"标题","content":"正文","summary":"120字摘要","tags":"标签1,标签2,..."}
+
+## 原文
+{{原文}}
+"""
+
+
+def load_rewrite_raw():
+    """改写 Agent 提词原文；缺失/为空 → 写回默认"""
+    try:
+        t = REWRITE_FILE.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    except Exception:
+        pass
+    save_rewrite(REWRITE_DEFAULT)
+    return REWRITE_DEFAULT.strip()
+
+
+def save_rewrite(text):
+    t = (text or "").strip()
+    if not t:
+        return False, "内容不能为空"
+    try:
+        PROMPT_DIR.mkdir(parents=True, exist_ok=True)
+        REWRITE_FILE.write_text(t + "\n", encoding="utf-8")
+        return True, None
+    except Exception as e:
+        return False, "写入失败：%s" % e
+
+
+def reset_rewrite():
+    return save_rewrite(REWRITE_DEFAULT)
+
+
+def render_rewrite(values):
+    """占位符替换（与文案提词同一套规则）"""
+    raw = load_rewrite_raw()
+
+    def sub(m):
+        v = values.get(m.group(1).strip())
+        v = "" if v is None else str(v).strip()
+        return v if v else "（无）"
+
+    return _PH_RE.sub(sub, raw)
+
+
+def rewrite_meta():
+    return {"line": "rewrite", "name": "改写 Agent", "path": "prompts/rewrite_agent.md",
+            "placeholders": REWRITE_PLACEHOLDERS}

@@ -62,9 +62,9 @@
 <script>
 let ITEMS = [], SEL = new Set(), OPTS = {}, PANEL_ACTION = '', SEQ = 0;
 let ORDERED = [];          // 当前「可见」顺序（分类/分组后），查看层的上一个/下一个按它走
-let TREE = [];             // 顶层分类（文章配图 / 上传 / 编辑 …）
+let TREE = [];             // 顶层分类（编辑 / 上传 / 文章配图 …）
 let NODES = {};            // key → 节点（分类 + 文案子组）
-const OPEN = new Map();    // 手动展开/收起（未记录 → 默认：分类展开、文案子组折叠）
+const OPEN = new Map();    // 手动展开/收起（未记录 → 默认：编辑/抠图/拼版展开，上传/文章配图/文案子组折叠）
 const TYPE_ICON = {image:'🖼', audio:'🎵', video:'🎬'};
 const SRC_LABEL = {ai:'配图', upload:'上传', cutout:'抠图', edit:'图生图', stitch:'拼版'};
 const LINE_LABEL = {lingxiu:'灵性书籍', maya:'玛雅天赋', tarot:'塔罗', psych:'心理咨询'};
@@ -86,7 +86,7 @@ async function load() {
 }
 
 /* ---------- 两级归类：分类（文章配图 / 上传 / 编辑…）→ 文案子组 ---------- */
-const SRC_TITLE = {upload: '上传', edit: '编辑', cutout: '抠图', stitch: '拼版'};
+const SRC_TITLE = {upload: '上传', edit: '编辑', cutout: '抠图', stitch: '拼版'};   // 分类标题（顺序见 buildTree）
 const GRID_STYLE = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;';
 
 function mkNode(key, type, o) {          // 建节点并登记（全选/折叠都按 key 找）
@@ -99,10 +99,10 @@ function buildTree(rows) {
     const arts = new Map(), bySrc = new Map();
     rows.forEach(m => {
         const aid = parseInt(m.article_id || 0, 10) || 0;
-        if (aid) {                                  // 有文案 → 一律进「文章配图」（含抠图/编辑/拼版产物）
+        if (aid) {                                  // 有文案 → 进「文章配图」（含抠图/编辑/拼版产物）
             if (!arts.has(aid)) { arts.set(aid, []); }
             arts.get(aid).push(m);
-        } else {                                    // 无文案 → 按来源分类（上传 / 编辑 / 抠图 / 拼版）
+        } else {                                    // 无文案 → 按来源分类
             const k = m.source || 'other';
             if (!bySrc.has(k)) { bySrc.set(k, []); }
             bySrc.get(k).push(m);
@@ -110,6 +110,10 @@ function buildTree(rows) {
     });
     NODES = {};
     const cats = [];
+    // 分类顺序：编辑 → 上传 → 抠图 → 拼版（用户口径）；「文章配图」放其后
+    ['edit', 'upload', 'cutout', 'stitch'].forEach(k => {
+        if (bySrc.has(k)) { cats.push(mkNode('cat:' + k, 'cat', {title: SRC_TITLE[k] || k, items: bySrc.get(k)})); }
+    });
     if (arts.size) {
         const subs = [...arts.entries()].map(([aid, items]) => mkNode('s:' + aid, 'group', {
             items: items,
@@ -121,15 +125,13 @@ function buildTree(rows) {
         subs.forEach(x => x.items.forEach(m => all.push(m)));
         cats.push(mkNode('cat:article', 'cat', {title: '文章配图', items: all, children: subs}));
     }
-    ['upload', 'edit', 'cutout', 'stitch'].forEach(k => {
-        if (bySrc.has(k)) { cats.push(mkNode('cat:' + k, 'cat', {title: SRC_TITLE[k] || k, items: bySrc.get(k)})); }
-    });
     if (bySrc.has('other')) { cats.push(mkNode('cat:other', 'cat', {title: '未归类', items: bySrc.get('other')})); }
     return cats;
 }
 
-function isOpen(n) {                     // 默认：分类展开、文案子组折叠
-    return OPEN.has(n.key) ? OPEN.get(n.key) : (n.type === 'cat');
+function isOpen(n) {                     // 默认：编辑（及抠图/拼版）展开；上传、文章配图、文案子组折叠
+    if (OPEN.has(n.key)) { return OPEN.get(n.key); }
+    return n.type === 'cat' && n.key !== 'cat:article' && n.key !== 'cat:upload';
 }
 
 function flatten(tree) {                 // 只收「当前可见」的卡片，查看层的上一个/下一个不跳进收起的分组

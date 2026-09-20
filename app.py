@@ -957,18 +957,17 @@ def api_generate_article():
     # ↓ 组装占位符 → 渲染该业务线自己的提词（prompts/article_<line>.md，设置页可编辑，改完立即生效）
     line_label = article_prompts.LINE_NAME.get(line, line)
     kind_name, material = '', ''
-    if contentlines.line_of(line) and (topic_kind or topic_obj):
-        kind_name = contentlines.kind_name(line, topic_kind) or ''
-        material = contentlines.material(line, topic_kind, topic_obj) or ''
-    if line == 'lingxiu' and topic_obj:                    # 灵性线：选题对象形如《书名》 · 章节
-        import re as _re
-        _m = _re.match(r'《(.+?)》', topic_obj)
-        if _m:
-            book = book or _m.group(1)                    # 回填书目列（保留列表展示）
-    if kind_name or topic_obj:
-        topic_show = ' · '.join([x for x in (kind_name, topic_obj) if x]) or '自动选择'
+    if line == 'lingxiu':                                  # 灵性线：书目 → 话题（素材取话题自带内容）
+        material = contentlines.material('lingxiu', 'topic' if topic_obj else 'book', topic_obj, book) or ''
+        topic_show = ' · '.join([x for x in (book, topic or topic_obj) if x]) or '自动选择'
     else:
-        topic_show = '、'.join([x for x in (book, topic) if x]) or '自动选择'
+        if contentlines.line_of(line) and (topic_kind or topic_obj):
+            kind_name = contentlines.kind_name(line, topic_kind) or ''
+            material = contentlines.material(line, topic_kind, topic_obj) or ''
+        if kind_name or topic_obj:
+            topic_show = ' · '.join([x for x in (kind_name, topic_obj) if x]) or '自动选择'
+        else:
+            topic_show = '、'.join([x for x in (book, topic) if x]) or '自动选择'
     prompt = article_prompts.render(line, {
         '业务线': line_label, '平台': plat_name, '内容类型': label, '字数': word_spec,
         '选题': topic_show, '语气': tone or '温暖、真诚、有洞察',

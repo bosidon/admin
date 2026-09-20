@@ -155,6 +155,7 @@ async function deleteArticle(id) {
 /* ============ 业务线 ============ */
 let LINE = 'lingxiu';
 let LINES = [];
+let LBOOKS = [];
 let TOPICS = [];
 let USED = new Set();
 let DRAFT = null;
@@ -239,11 +240,19 @@ function applyDefaults() {
 
 async function buildForm() {
     if (!OPTS) OPTS = await api('/api/options');
+    if (LINE === 'lingxiu' && !LBOOKS.length) {
+        const rb = await api('/api/line-topics?line=lingxiu&kind=book');
+        LBOOKS = (rb && rb.items) || [];
+    }
     const line = LINES.find(l => l.id === LINE) || {};
     let html = '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;">';
-    const kinds = (line.kinds || []);
-    html += boxHtml('选题类型', selHtml('gen-topic_kind', kinds, kinds[0] && kinds[0].id));
-    html += boxHtml('选题', '<div style="display:flex;gap:6px;">'
+    if (LINE === 'lingxiu') {
+        html += boxHtml('📖 书目', selHtml('gen-book', [{id:'',name:'全部书目'}].concat(LBOOKS), ''));
+    } else {
+        const kinds = (line.kinds || []);
+        html += boxHtml('选题类型', selHtml('gen-topic_kind', kinds, kinds[0] && kinds[0].id));
+    }
+    html += boxHtml(LINE === 'lingxiu' ? '🎯 话题' : '选题', '<div style="display:flex;gap:6px;">'
         + '<select id="gen-topic_obj" style="flex:1;min-width:0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;"></select>'
         + '<button class="btn btn-outline" onclick="randTopic()" title="换一个" style="flex:0 0 auto;padding:8px 10px;">🎲</button></div>');
     html += boxHtml('平台', selHtml('gen-platform', (OPTS.platforms || []).map(p => ({id: p.id, name: p.name})), 'wechat'));
@@ -264,13 +273,20 @@ async function buildForm() {
     const t = document.getElementById('gen-content_type');
     if (t) t.onchange = applyDefaults;
 
-    const k = document.getElementById('gen-topic_kind');
-    if (k) k.onchange = loadTopics;
-    await loadTopics();
+    if (LINE === 'lingxiu') {
+        const bs = document.getElementById('gen-book');
+        if (bs) bs.onchange = filterLingxiuTopics;
+        await loadTopics();
+        filterLingxiuTopics();
+    } else {
+        const k = document.getElementById('gen-topic_kind');
+        if (k) k.onchange = loadTopics;
+        await loadTopics();
+    }
 }
 
 async function loadTopics() {
-    const kind = v('gen-topic_kind');
+    const kind = v('gen-topic_kind') || (LINE === 'lingxiu' ? 'topic' : '');
     const r = await api('/api/line-topics?line=' + LINE + '&kind=' + encodeURIComponent(kind));
     TOPICS = (r && r.items) || [];
     const sel = document.getElementById('gen-topic_obj');
@@ -278,6 +294,20 @@ async function loadTopics() {
     sel.innerHTML = TOPICS.map(o => '<option value="' + String(o.id).replace(/"/g, '&quot;') + '">' + o.name + '</option>').join('');
     sel.onchange = showPreview;
     const pick = TOPICS.find(o => !USED.has(o.id)) || TOPICS[0];
+    if (pick) sel.value = String(pick.id);
+    showPreview();
+}
+
+function filterLingxiuTopics() {
+    const sel = document.getElementById('gen-topic_obj');
+    if (!sel) return;
+    const braw = v('gen-book');
+    const b = braw ? braw.replace(/^《/, '').replace(/》$/, '') : '';   // 书名去《》再比
+    const list = b ? TOPICS.filter(t => t.book_name === b) : TOPICS.slice(0, 60);
+    sel.innerHTML = list.map(o => '<option value="' + String(o.id).replace(/"/g, '&quot;') + '">'
+        + (b ? o.name : '《' + (o.book_name || '') + '》 ' + o.name) + '</option>').join('');
+    sel.onchange = showPreview;
+    const pick = list.find(o => !USED.has(o.id)) || list[0];
     if (pick) sel.value = String(pick.id);
     showPreview();
 }
@@ -321,8 +351,13 @@ async function doGenerate() {
         if (val) params[k] = val;
     });
     params.line = LINE;
-    params.topic_kind = v('gen-topic_kind');
-    params.topic_obj = v('gen-topic_obj');
+    if (LINE === 'lingxiu') {
+        params.book = v('gen-book');
+        params.topic = v('gen-topic_obj');
+    } else {
+        params.topic_kind = v('gen-topic_kind');
+        params.topic_obj = v('gen-topic_obj');
+    }
     btn.disabled = true; btn.textContent = '⏳ 生成中…';
     st.textContent = '正在生成，约 20~40 秒…';
     try {

@@ -28,7 +28,7 @@ LINES = [
     {"id": "lingxiu", "name": "灵性书籍", "icon": "📚",
      "home": "https://xianbao.love",
      "guide": "🌙 想了解更多心灵成长内容？",
-     "kinds": [{"id": "book", "name": "书目选题"}, {"id": "chapter", "name": "章节选题"}]},
+     "kinds": [{"id": "topic", "name": "话题选题"}]},
     {"id": "maya", "name": "玛雅天赋", "icon": "🔮",
      "home": "https://maya.xianbao.love",
      "guide": "✨ 想知道你的星系印记？免费测一下 →",
@@ -98,7 +98,7 @@ def _lingxiu_conn():
 
 
 def _lingxiu_books():
-    """已发布书目 → 选题条目（name 带作者·分类，preview 取简介）"""
+    """已发布书目（57 本）→ 书目下拉条目"""
     if not LINGXIU_DB.exists():
         return []
     try:
@@ -110,111 +110,105 @@ def _lingxiu_books():
     except Exception:
         return []
     out = []
-    for b in rows:
-        name = "《%s》" % b["title"]
-        extra = " · ".join([x for x in (b["author"], cats.get(b["category_id"])) if x])
+    for b_ in rows:
+        name = "《%s》" % b_["title"]
+        extra = " · ".join([x for x in (b_["author"], cats.get(b_["category_id"])) if x])
         out.append({"id": name, "name": (name + " · " + extra) if extra else name,
-                    "preview": _pv(b["description"], 80)})
+                    "preview": _pv(b_["description"], 80)})
     return out
 
 
-def _lingxiu_chapters():
-    """全部章节 → 选题条目（label = 《书》 · 章节标题，preview 取章节摘要首句）"""
+def _lingxiu_topics():
+    """全部话题（ai_deep_themes，1574 条）→ 话题下拉条目（带 book_name 供书目联动）"""
     if not LINGXIU_DB.exists():
         return []
     try:
         c = _lingxiu_conn()
         rows = c.execute(
-            "SELECT ch.id, ch.title, ch.word_count, b.title AS book_title, s.summary "
-            "FROM chapters ch JOIN books b ON b.id = ch.book_id "
-            "LEFT JOIN chapter_summaries s ON s.chapter_id = ch.id "
+            "SELECT t.title, t.summary, c.name AS cat, b.title AS book_title "
+            "FROM ai_deep_themes t "
+            "JOIN ai_deep_categories c ON c.id = t.category_id "
+            "JOIN books b ON b.id = c.book_id "
             "WHERE b.status='published' "
-            "ORDER BY b.sort_order, b.id, ch.sort_order, ch.id").fetchall()
+            "ORDER BY b.sort_order, b.id, c.name, t.title").fetchall()
         c.close()
     except Exception:
         return []
-    out = []
-    for r in rows:
-        label = "《%s》 · %s" % (r["book_title"], r["title"])
-        out.append({"id": label, "name": label, "preview": _pv(_clean_summary(r["summary"]), 40)})
-    return out
+    return [{"id": r["title"], "name": r["title"],
+             "preview": _pv(_clean_summary(r["summary"]), 60),
+             "book_name": r["book_title"], "category": r["cat"]} for r in rows]
 
 
 def _clean_summary(t):
-    """章节摘要去掉 markdown 符号与 emoji，取正文首段"""
+    """摘要去掉 markdown 符号与 emoji"""
     t = str(t or "").strip()
     t = re.sub("^#+[ ]*", "", t)
-    t = re.sub("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", t)   # emoji / 变体符
+    t = re.sub("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", t)
     t = re.sub("[*_`>]+", " ", t)
     t = re.sub("-", " ", t)
     return " ".join(t.split())
 
 
-def _lingxiu_material(kind, obj):
-    """灵性线素材：书的简介 + 章节摘要/要点（LLM 的唯一事实来源）"""
+def _lingxiu_material(kind, obj, book=None):
+    """灵性线素材：话题自带内容（摘要/概述/关键概念/核心内容）或书级素材
+
+    话题是阅读站原生资产（1574 条，summary 覆盖 100%、core_content 99.7%），
+    比章节摘要更适合当引流文案的唯一事实来源。
+    """
     if not LINGXIU_DB.exists():
         return ""
     obj = str(obj or "").strip()
-    if not obj:
-        return ""
+    book_title = str(book or "").strip().strip("《》").split(" · ")[0].strip()
     try:
         c = _lingxiu_conn()
-        if kind == "book":
-            title = obj.strip("《》").split(" · ")[0].strip()
-            b = c.execute("SELECT id, title, subtitle, author, category_id, description FROM books "
-                          "WHERE title=? AND status='published'", (title,)).fetchone()
-            if not b:
+        if obj:                                   # —— 话题粒度 ——
+            row = c.execute(
+                "SELECT t.title, t.summary, t.overview, t.key_concepts, t.core_content, "
+                "c.name AS cat, b.title AS bt FROM ai_deep_themes t "
+                "JOIN ai_deep_categories c ON c.id = t.category_id "
+                "JOIN books b ON b.id = c.book_id "
+                "WHERE t.title = ? AND (? = '' OR b.title = ?) LIMIT 1",
+                (obj, book_title, book_title)).fetchone()
+            if not row:
                 c.close()
                 return ""
-            cat = c.execute("SELECT name FROM categories WHERE id=?", (b["category_id"],)).fetchone()
-            chs = c.execute(
-                "SELECT ch.title, ch.word_count, s.summary, s.key_points FROM chapters ch "
-                "LEFT JOIN chapter_summaries s ON s.chapter_id = ch.id "
-                "WHERE ch.book_id=? ORDER BY ch.sort_order, ch.id LIMIT 6", (b["id"],)).fetchall()
             c.close()
-            parts = ["书目：《%s》%s" % (b["title"], ("｜" + b["subtitle"]) if b["subtitle"] else ""),
-                     "作者：%s　分类：%s" % (b["author"] or "—", (cat["name"] if cat else "—")),
-                     "简介：\n" + str(b["description"] or "")]
-            for ch in chs:
-                seg = "第 %s｜%s" % (ch["title"], _clean_summary(ch["summary"])[:600])
-                kp = str(ch["key_points"] or "").replace("|", "\n- ")
-                if kp:
-                    seg += "\n要点：\n- " + kp[:500]
-                parts.append(seg)
+            parts = ["书目：《%s》　分类：%s" % (row["bt"], row["cat"] or "—"),
+                     "话题：%s" % row["title"]]
+            if row["overview"]:
+                parts.append("概述：\n" + str(row["overview"]).strip())
+            if row["summary"]:
+                parts.append("摘要：\n" + str(row["summary"]).strip())
+            kc = str(row["key_concepts"] or "").strip()
+            if kc:
+                parts.append("关键概念：\n" + kc.replace("|", "\n- ").replace(",", "、"))
+            core = str(row["core_content"] or "").strip()
+            if core:
+                parts.append("核心内容：\n" + core[:2200])
             return "\n\n".join(parts)
 
-        if kind == "chapter":
-            m = re.match(r"《(.+?)》\s*·\s*(.+)$", obj)
-            btitle = (m.group(1) if m else obj.strip("《》")).strip()
-            ctitle = (m.group(2) if m else "").strip()
-            if ctitle:
-                row = c.execute(
-                    "SELECT ch.title, ch.content, ch.word_count, b.title AS bt, b.description, "
-                    "s.summary, s.key_points FROM chapters ch JOIN books b ON b.id=ch.book_id "
-                    "LEFT JOIN chapter_summaries s ON s.chapter_id=ch.id "
-                    "WHERE b.title=? AND ch.title=? LIMIT 1", (btitle, ctitle)).fetchone()
-            else:
-                row = c.execute(
-                    "SELECT ch.title, ch.content, ch.word_count, b.title AS bt, b.description, "
-                    "s.summary, s.key_points FROM chapters ch JOIN books b ON b.id=ch.book_id "
-                    "LEFT JOIN chapter_summaries s ON s.chapter_id=ch.id "
-                    "WHERE b.title=? ORDER BY ch.sort_order LIMIT 1", (btitle,)).fetchone()
+        # —— 只选了书目（没选话题）→ 书级素材 ——
+        b_ = c.execute("SELECT id, title, subtitle, author, category_id, description FROM books "
+                       "WHERE title = ? AND status='published'", (book_title,)).fetchone()
+        if not b_:
             c.close()
-            if not row:
-                return ""
-            parts = ["书目：《%s》" % row["bt"], "章节：%s（约 %s 字）" % (row["title"], row["word_count"]),
-                     "书简介：\n" + str(row["description"] or "")]
-            if row["summary"]:
-                parts.append("本章摘要：\n" + _clean_summary(row["summary"])[:1800])
-            kp = str(row["key_points"] or "").replace("|", "\n- ")
-            if kp:
-                parts.append("本章要点：\n- " + kp[:1200])
-            if not row["summary"] and not kp:
-                parts.append("正文节选：\n" + str(row["content"] or "")[:1500])
-            return "\n\n".join(parts)
+            return ""
+        cat = c.execute("SELECT name FROM categories WHERE id=?", (b_["category_id"],)).fetchone()
+        tps = c.execute(
+            "SELECT t.title, t.summary FROM ai_deep_themes t "
+            "JOIN ai_deep_categories c ON c.id = t.category_id "
+            "WHERE c.book_id = ? ORDER BY c.name, t.title LIMIT 14", (b_["id"],)).fetchall()
+        c.close()
+        parts = ["书目：《%s》%s" % (b_["title"], ("｜" + b_["subtitle"]) if b_["subtitle"] else ""),
+                 "作者：%s　分类：%s" % (b_["author"] or "—", cat["name"] if cat else "—"),
+                 "简介：\n" + str(b_["description"] or "")]
+        if tps:
+            parts.append("本书话题（供选择切入角度）：\n" + "\n".join(
+                "- %s：%s" % (t["title"], _clean_summary(t["summary"])[:120]) for t in tps))
+        return "\n\n".join(parts)
     except Exception:
         return ""
-    return ""
+
 
 
 def _maya_items(kind):
@@ -450,8 +444,8 @@ def topics(line_id, kind):
     if line_id == "lingxiu":
         if kind == "book":
             return _cached("lingxiu:book", _lingxiu_books)
-        if kind == "chapter":
-            return _cached("lingxiu:chapter", _lingxiu_chapters, ttl=1800)
+        if kind == "topic":
+            return _cached("lingxiu:topic", _lingxiu_topics, ttl=1800)
         return []
     if line_id == "maya":
         return _cached("maya:%s" % kind, lambda: _maya_items(kind))
@@ -462,11 +456,11 @@ def topics(line_id, kind):
     return []
 
 
-def material(line_id, kind, obj):
+def material(line_id, kind, obj, book=None):
     """该选题的原始素材全文（LLM 的唯一事实来源）"""
     try:
         if line_id == "lingxiu":
-            return _lingxiu_material(kind, obj)
+            return _lingxiu_material(kind, obj, book)
         if line_id == "maya":
             return _maya_material(kind, obj)
         if line_id == "tarot":

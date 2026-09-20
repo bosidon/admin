@@ -1134,7 +1134,7 @@ def _link_of(art, article_id):
         return art['promo_link']
     if art.get('owner_id'):
         return 'https://xianbao.love/?ref=%s&src=%s' % (
-            art['owner_id'], art.get('promo_src') or ('c%d' % article_id))
+            art['owner_id'], art.get('promo_src') or str(article_id))
     return None
 
 

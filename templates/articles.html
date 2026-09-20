@@ -376,7 +376,7 @@ async function saveDraft() {
 }
 
 function copyDraftLink() {
-    if (!DRAFT || !DRAFT.promo_link) { showToast('这篇没有推广链接（未设置归属人）', 'error'); return; }
+    if (!DRAFT || !DRAFT.promo_link) { showToast('这篇没有推广链接', 'error'); return; }
     navigator.clipboard.writeText(DRAFT.promo_link)
         .then(() => showToast('✅ 已复制：' + DRAFT.promo_link, 'success'))
         .catch(() => prompt('推广链接：', DRAFT.promo_link));

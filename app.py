@@ -811,10 +811,8 @@ def api_rewrite_article(article_id):
         return jsonify({"error": "生成失败：%s" % e}), 500
 
     content_md = art.get('content', '')
-    promo_link = contentlines.promo_link(line, src.get('owner_id'), src.get('promo_src'))
-    if promo_link:
-        content_md = content_md.rstrip() + '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
     wc = len(content_md.replace(' ', '').replace('\n', ''))
+    # 推广链接在入库拿到「新篇编号」后再拼（src = 文案编号），见下方两步写入
     cur = db.execute("INSERT INTO articles (title, platform, content_type, book, topic, angle,"
                      " structure, hook, tone, content_md, summary, tags, word_count,"
                      " status, source, promo_src, promo_link, service_line,"
@@ -823,10 +821,18 @@ def api_rewrite_article(article_id):
                      (art.get('title', '未命名'), platform, content_type, src.get('book'), src.get('topic'),
                       src.get('angle'), src.get('structure'), src.get('hook'), src.get('tone'),
                       content_md, art.get('summary', ''), art.get('tags', ''), wc,
-                      src.get('promo_src'), promo_link or None, line,
+                      '', None, line,
                       src.get('owner_id'), src.get('owner') or ''))
+    new_id = cur.lastrowid
+    promo_src = str(new_id)                                   # src = 新篇编号
+    promo_link = contentlines.promo_link(line, src.get('owner_id'), promo_src)
+    if promo_link:
+        content_md = content_md.rstrip() + '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
+        wc = len(content_md.replace(' ', '').replace('\n', ''))
+    db.execute('UPDATE articles SET content_md=?, word_count=?, promo_src=?, promo_link=? WHERE id=?',
+               (content_md, wc, promo_src, promo_link or None, new_id))
     db.commit()
-    return jsonify({"ok": True, "id": cur.lastrowid, "title": art.get('title', '未命名'),
+    return jsonify({"ok": True, "id": new_id, "title": art.get('title', '未命名'),
                     "word_count": wc, "from": article_id})
 
 
@@ -844,7 +850,7 @@ def api_generate_article():
     tone = data.get('tone', '')
     _u = current_user()                              # 文案归属人
     promo_uid = (_u or {}).get('id')                 # 推广人 ID 就是用户 ID → 取归属人，不再单独填
-    promo_src = data.get('promo_src') or ('c' + str(int(time.time()))[-6:])   # 内容来源码
+    # promo_src（来源码）= 文案编号：入库拿到 id 后再赋值（两步写入，见下方）
     line = data.get('line') or 'lingxiu'             # 业务线（lingxiu/maya/tarot/psych）
     topic_kind = data.get('topic_kind') or ''        # 选题类型（如 challenge/seal/daily/kin）
     topic_obj = data.get('topic_obj') or ''          # 选题对象（如「红龙 · 源动力」）
@@ -975,13 +981,7 @@ def api_generate_article():
             article_data = {'title': '未命名', 'content': raw, 'summary': '', 'tags': ''}
 
         content_md = article_data.get('content', raw)
-
-        # ===== 自动嵌入推广链接（按业务线落点：子站首页 + 归因参数）=====
-        promo_link = contentlines.promo_link(line, promo_uid, promo_src)
-        if promo_link:
-            guide_line = '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
-            if promo_link not in content_md:
-                content_md = content_md.rstrip() + guide_line
+        # 推广链接在入库拿到「文案编号」后再拼（src = 文案编号），见下方两步写入
 
         if line != 'lingxiu':          # 业务线文章：话题列存选题对象
             book, topic = '', (topic_obj or topic)
@@ -1003,11 +1003,22 @@ def api_generate_article():
             article_data.get('summary', ''),
             article_data.get('tags', ''),
             word_count,
-            promo_src, promo_link or None,
+            '', None,                    # promo_src / promo_link：拿到文案编号后回填
             line,
             (_u or {}).get('id'),
             user_label(_u),
         ))
+        new_id = cursor.lastrowid
+        # ===== 两步写入：src = 文案编号；链接 = 业务线落点 + 归属人 + 编号 =====
+        promo_src = str(new_id)
+        promo_link = contentlines.promo_link(line, promo_uid, promo_src)
+        if promo_link:
+            guide_line = '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
+            if promo_link not in content_md:
+                content_md = content_md.rstrip() + guide_line
+                word_count = len(content_md.replace(' ', '').replace('\n', ''))
+        db.execute('UPDATE articles SET content_md=?, word_count=?, promo_src=?, promo_link=? WHERE id=?',
+                   (content_md, word_count, promo_src, promo_link or None, new_id))
         db.commit()
 
         return jsonify({
@@ -1481,11 +1492,11 @@ def api_overlay_qr():
         link = art['promo_link']
     elif art['owner_id']:
         link = 'https://xianbao.love/?ref=%s&src=%s' % (
-            art['owner_id'], art['promo_src'] or ('c%d' % article_id))
+            art['owner_id'], art['promo_src'] or str(article_id))
     else:
         link = None
     if not link:
-        return jsonify({"error": "该文案没有推广链接（未设置归属人）"}), 400
+        return jsonify({"error": "该文案没有推广链接"}), 400
     try:
         cur = json.loads(art['images_json'] or '[]')
         if not isinstance(cur, list):

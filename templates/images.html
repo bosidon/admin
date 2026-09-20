@@ -23,11 +23,11 @@ const CTYPE_MAP = {article:'图文文章', short_video:'短视频脚本', long_v
 
 async function load() {
     const all = await api('/api/articles');
-    const list = (all || []).filter(a => a.status === 'approved' || a.status === 'published');
+    const list = (all || []).filter(a => (a.status === 'approved' || a.status === 'published') && a.content_type === 'article');
     const el = document.getElementById('copy-list');
     if (!Array.isArray(list) || !list.length) {
         el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
-            + '📭 暂无「已审核 / 已发布」的文案 —— 请先到 <a href="/articles" style="color:#7c3aed;">✍️ 文案</a> 生成并审核</div>';
+            + '📭 暂无「已审核」的图文文案 —— 请先到 <a href="/articles" style="color:#7c3aed;">✍️ 文案</a> 生成并审核</div>';
         return;
     }
     el.innerHTML = list.map(a => {

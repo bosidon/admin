@@ -122,10 +122,11 @@
         <div class="logo">📝 仙宝内容平台</div>
         <div class="nav">
             <a href="/articles" class="{% if '/articles' in request.path %}active{% endif %}">✍️ 文案</a>
-            <a href="/images" class="{% if '/images' in request.path %}active{% endif %}">🖼 配图</a>
+            <a href="/images" class="{% if '/images' in request.path %}active{% endif %}">🖼 图文</a>
+            <a href="/speech" class="{% if '/speech' in request.path %}active{% endif %}">🎤 口播</a>
+            <a href="/video" class="{% if '/video' in request.path %}active{% endif %}">🎬 视频</a>
+            <a href="/library" class="{% if request.path == '/library' %}active{% endif %}">📦 素材</a>
             <a href="/jobs" class="{% if request.path == '/jobs' %}active{% endif %}">📊 任务</a>
-            <a href="/video" class="{% if '/video' in request.path %}active{% endif %}">🎬 视频制作</a>
-            <a href="/library" class="{% if request.path == '/library' %}active{% endif %}">📦 素材库</a>
             <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">⚙️ 设置</a>
         </div>
         <div class="nav" style="position:absolute;bottom:14px;left:12px;right:12px;border-top:1px solid rgba(255,255,255,0.1);padding-top:10px;">

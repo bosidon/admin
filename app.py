@@ -499,6 +499,11 @@ def images_page():
     """配图（阶段 2）"""
     return render_template('images.html')
 
+@app.route('/speech')
+def speech_stage_page():
+    """口播制作（阶段 3）"""
+    return render_template('speech_stage.html')
+
 @app.route('/video')
 def video_stage_page():
     """视频制作（阶段 3）"""

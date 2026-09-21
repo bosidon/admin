@@ -115,6 +115,14 @@
         .timeline::before { content:''; position:absolute; left:8px; top:0; bottom:0; width:2px; background:var(--border); }
         .timeline-item { position:relative; margin-bottom:16px; }
         .timeline-item::before { content:''; position:absolute; left:-20px; top:4px; width:12px; height:12px; background:var(--primary); border-radius:50%; }
+
+        /* 侧栏底部「账号 / 退出」菜单向上展开 —— 原 top:100% 向下展开会超出视口底部，退出项点不到 */
+        .xianbao-auth-user .xianbao-auth-dd {
+            top: auto !important;
+            bottom: 100% !important;
+            margin-top: 0 !important;
+            margin-bottom: 6px !important;
+        }
     </style>
 </head>
 <body>

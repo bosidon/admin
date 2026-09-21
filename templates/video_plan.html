@@ -31,6 +31,15 @@
             style="width:100%;padding:12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;line-height:1.7;font-family:inherit;resize:vertical;"></textarea>
     </div>
 
+    <!-- ①.5 素材包（角色一致性） -->
+    <div style="margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <label style="font-weight:600;font-size:14px;">①.5 素材包（人物 / 场景 / 道具，保证全片一致）</label>
+            <button class="btn btn-outline btn-sm" onclick="saveRoleIds()">💾 保存素材包</button>
+        </div>
+        <div id="role-pack"></div>
+    </div>
+
     <!-- ② 分镜表 -->
     <div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -46,12 +55,22 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">镜号</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;">画面</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;">台词/字幕</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;">素材</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
                 </tr>
             </thead>
             <tbody id="sb-body"></tbody>
         </table>
+    </div>
+
+    <!-- ③ 素材需求（asset_requirements / asset_prompts） -->
+    <div style="margin-top:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <label style="font-weight:600;font-size:14px;">③ 素材需求</label>
+            <button class="btn btn-outline btn-sm" id="asset-gen-btn" disabled title="P1 上线" onclick="genAssets()">🤖 AI 生成</button>
+        </div>
+        <div id="asset-req"></div>
     </div>
 </div>
 {% endblock %}
@@ -61,17 +80,26 @@
 const PLAN_ID = {{ plan_id }};
 let PLAN = null;
 let SCENES = [];
+// ===== 素材包 / 素材需求 =====
+const KIND_CN = { persona: '人物', scene: '场景', prop: '道具' };
+const ROLE_KINDS = ['persona', 'scene', 'prop'];
+let ROLES = { persona: [], scene: [], prop: [] };
+let ROLE_IDS = [];
+let REQS = [];
+let PROMPTS = [];
+let PROMPT_FLAT = [];
 
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="5" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;">${i+1}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="visual" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.visual||''}</textarea></td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="line" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.line||''}</textarea></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;">${assetCell(s)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
@@ -86,6 +114,149 @@ function renderScenes() {
 function addScene() { SCENES.push({visual:'', line:'', duration:5}); renderScenes(); }
 function delScene(i) { SCENES.splice(i,1); renderScenes(); }
 
+// ==================== 素材包（role_ids） ====================
+function roleById(id) {
+    for (const k of ROLE_KINDS) {
+        const r = (ROLES[k] || []).find(x => x.id === id);
+        if (r) return r;
+    }
+    return null;
+}
+
+function assetCell(s) {
+    const items = [];
+    (s.characters || []).forEach(c => items.push(['persona', c]));
+    if (s.scene) items.push(['scene', s.scene]);
+    (s.props || []).forEach(p => items.push(['prop', p]));
+    if (!items.length) return '<span style="color:#cbd5e1;">—</span>';
+    return items.map(function (it) {
+        const k = it[0], n = it[1];
+        const hit = (ROLES[k] || []).some(r => r.name === n);
+        return '<div style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+            + (hit ? 'color:#0f766e;' : 'color:#d97706;') + '" title="' + n + '">'
+            + (hit ? '' : '⚠️ ') + n + '</div>';
+    }).join('');
+}
+
+function renderRolePack() {
+    const box = document.getElementById('role-pack');
+    if (!box) return;
+    box.innerHTML = ROLE_KINDS.map(function (k) {
+        const picked = ROLE_IDS.map(roleById).filter(r => r && r.kind === k);
+        const chips = picked.map(function (r) {
+            return '<span style="display:inline-flex;gap:6px;align-items:center;border:1px solid #e2e8f0;border-radius:8px;padding:3px 8px;font-size:12px;background:#f8fafc;">'
+                + (r.front && r.front.file_path ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(r.front.file_path) + '" style="width:22px;height:22px;object-fit:cover;border-radius:4px;">' : '')
+                + '<span>' + (r.name || '') + '</span>'
+                + '<span onclick="removeRole(' + r.id + ')" style="cursor:pointer;color:#94a3b8;">✕</span></span>';
+        }).join('');
+        return '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">'
+            + '<span style="width:44px;font-size:13px;color:#64748b;">' + KIND_CN[k] + '</span>'
+            + (chips || '<span style="font-size:12px;color:#cbd5e1;">未选</span>')
+            + '<button class="btn btn-outline btn-sm" onclick="pickRole(\'' + k + '\')">＋从库选</button>'
+            + '</div>';
+    }).join('');
+}
+
+async function loadRoles() {
+    const all = await api('/api/roles', { method: 'GET' });
+    const arr = Array.isArray(all) ? all : [];
+    ROLES = { persona: [], scene: [], prop: [] };
+    arr.forEach(r => { (ROLES[r.kind] = ROLES[r.kind] || []).push(r); });
+}
+
+async function pickRole(kind) {
+    const list = await api('/api/roles?kind=' + kind, { method: 'GET' });
+    ROLES[kind] = Array.isArray(list) ? list : [];
+    const body = ROLES[kind].length ? ROLES[kind].map(function (r) {
+        return '<div onclick="chooseRole(' + r.id + ')" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;margin-bottom:6px;">'
+            + (r.front && r.front.file_path ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(r.front.file_path) + '" style="width:44px;height:44px;object-fit:cover;border-radius:8px;">' : '<span style="font-size:22px;">🖼</span>')
+            + '<div style="flex:1;min-width:0;"><div style="font-size:13px;">' + (r.name || ('#' + r.id)) + '</div>'
+            + '<div style="font-size:11px;color:#94a3b8;">' + (r.note || '') + '</div></div>'
+            + '</div>';
+    }).join('') : '<div style="padding:24px;color:#94a3b8;text-align:center;">该类型暂无角色 —— 请到「素材库」新建</div>';
+    openModal('从库选' + (KIND_CN[kind] || ''), body, function () {});
+}
+
+function chooseRole(id) {
+    if (ROLE_IDS.indexOf(id) < 0) ROLE_IDS.push(id);
+    closeModal();
+    renderRolePack();
+}
+
+function removeRole(id) {
+    ROLE_IDS = ROLE_IDS.filter(x => x !== id);
+    renderRolePack();
+}
+
+async function saveRoleIds() {
+    const r = await api('/api/video-plans/' + PLAN_ID, {
+        method: 'PUT', body: JSON.stringify({ role_ids: JSON.stringify(ROLE_IDS) })
+    });
+    if (r && r.ok) { toast('素材包已保存 ✓'); }
+    else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
+    return r;
+}
+
+// ==================== 素材需求（asset_requirements / asset_prompts） ====================
+function renderReqs() {
+    const box = document.getElementById('asset-req');
+    if (!box) return;
+    PROMPT_FLAT = [];
+    if (!REQS.length) {
+        box.innerHTML = '<div style="padding:16px;color:#94a3b8;font-size:12px;">生成分镜后在此显示素材需求</div>';
+        return;
+    }
+    const USED = [];
+    box.innerHTML = REQS.map(function (q) {
+        const exists = !!q.exists;
+        const pm = PROMPTS.filter(p => (p.kind || '') === (q.kind || '') && p.name === q.name);
+        pm.forEach(p => { if (USED.indexOf(p) < 0) USED.push(p); });
+        const btns = pm.map(promptHtml).join('');
+        return '<div style="border:1px solid ' + (exists ? '#e2e8f0' : '#fcd34d') + ';background:' + (exists ? '#fff' : '#fffbeb') + ';border-radius:10px;padding:10px;margin-bottom:8px;">'
+            + '<div style="font-size:13px;"><b>' + (KIND_CN[q.kind] || q.kind || '') + ' · ' + (q.name || '') + '</b> '
+            + (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 已有</span>' : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>')
+            + '<span style="color:#94a3b8;font-size:11px;"> · 出现在镜头 '
+            + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
+            + btns + '</div>';
+    }).join('');
+    // LLM 可能给 req 与 prompt 用不同名字：未匹配上的提词单独列出，避免被吞掉
+    const rest = PROMPTS.filter(p => USED.indexOf(p) < 0);
+    if (rest.length) {
+        box.innerHTML += '<div style="border:1px dashed #cbd5e1;border-radius:10px;padding:10px;margin-bottom:8px;">'
+            + '<div style="font-size:12px;font-weight:600;color:#475569;">其他出图提词（未按名称匹配到具体需求）</div>'
+            + rest.map(promptHtml).join('') + '</div>';
+    }
+}
+
+function promptHtml(p) {
+    const i1 = PROMPT_FLAT.push(p.prompt || '') - 1;
+    const i2 = PROMPT_FLAT.push(p.prompt_en || '') - 1;
+    return '<div style="margin-top:6px;background:#f8fafc;border-radius:8px;padding:8px;font-size:12px;">'
+        + '<div><b>中文提词</b>：' + (p.prompt || '') + ' <button class="btn btn-outline btn-sm" onclick="copyIdx(' + i1 + ')">复制</button></div>'
+        + '<div style="margin-top:4px;color:#475569;"><b>EN</b>：' + (p.prompt_en || '') + ' <button class="btn btn-outline btn-sm" onclick="copyIdx(' + i2 + ')">复制</button></div>'
+        + '<div style="margin-top:4px;color:#94a3b8;">' + (KIND_CN[p.kind] || p.kind || '') + ' · ' + (p.name || '') + ' · aspect ' + (p.aspect || '-') + ' · slot ' + (p.slot || '-') + '</div>'
+        + '</div>';
+}
+
+function copyIdx(i) { copyText(PROMPT_FLAT[i] || ''); }
+
+function copyText(t) {
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t); }
+        else { throw new Error('no clipboard'); }
+    } catch (e) {
+        const ta = document.createElement('textarea');
+        ta.value = t;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e2) {}
+        document.body.removeChild(ta);
+    }
+    toast('已复制 ✓');
+}
+
+function genAssets() { toast('AI 生成素材：P1 上线', 'info'); }
+
 async function load() {
     const d = await api('/api/video-plans/' + PLAN_ID, {method:'GET'});
     if (d.error) { toast('❌ ' + d.error, 'error'); return; }
@@ -95,6 +266,11 @@ async function load() {
     document.getElementById('script').value = d.script || '';
     try { SCENES = JSON.parse(d.storyboard || '[]'); } catch(e) { SCENES = []; }
     if (!Array.isArray(SCENES)) SCENES = [];
+    try { ROLE_IDS = JSON.parse(d.role_ids || '[]'); } catch(e) { ROLE_IDS = []; }
+    if (!Array.isArray(ROLE_IDS)) ROLE_IDS = [];
+    await loadRoles();
+    renderRolePack();
+    renderReqs();
     renderScenes();
     // 加载原始文案
     const arts = await api('/api/articles');
@@ -123,16 +299,23 @@ async function genStoryboard() {
     if (!PLAN) { toast('计划未加载', 'error'); return; }
     toast('🤖 AI 正在生成分镜...', 'info');
     document.getElementById('plan-status').textContent = '生成中…';
+    await saveRoleIds();                                  // 调用前先把素材包 role_ids 落库
     const r = await api('/api/video-plans/' + PLAN_ID + '/storyboard', {method: 'POST'});
     if (!r.ok) { toast('❌ ' + (r.error || '生成失败'), 'error'); document.getElementById('plan-status').textContent = PLAN.status || ''; return; }
+    REQS = Array.isArray(r.asset_requirements) ? r.asset_requirements : [];
+    PROMPTS = Array.isArray(r.asset_prompts) ? r.asset_prompts : [];
+    await loadRoles();
     SCENES = (r.shots || []).map(s => ({
         visual: s.visual_prompt || '', line: s.subtitle || '',
         duration: s.duration_s || 5, shot_type: s.shot_type || '',
+        characters: s.characters || [], scene: s.scene || '', props: s.props || [],
+        shot_face: s.shot_face || '',
         music_hint: s.music_hint || '', template_hint: s.template_hint || 'U02'
     }));
     document.getElementById('script').value = (r.overview || '') + '\n\n' + SCENES.map(s => '【' + (s.shot_type || '') + '】' + s.line).join('\n');
     document.getElementById('plan-status').textContent = 'storyboard_done';
     renderScenes();
+    renderReqs();
     toast('✅ ' + SCENES.length + ' 个镜头（' + (r.total_duration_s || '—') + ' 秒）', 'success');
     await saveAll();
 }

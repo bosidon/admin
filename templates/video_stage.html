@@ -153,7 +153,7 @@ async function saveSetup() {
 }
 let PER_NAME = {}, PER_LIST = [];
 async function loadPerNames() {
-    const r = await api('/api/personas');
+    const r = await api('/api/roles?kind=persona');
     PER_LIST = Array.isArray(r) ? r : [];
     PER_NAME = {};
     PER_LIST.forEach(p => { PER_NAME[p.id] = p.name; });

@@ -463,9 +463,10 @@ def init_content_db():
             created_at DATETIME DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_illu_logs_article ON illustration_logs(article_id);
-        CREATE TABLE IF NOT EXISTS personas (
+        CREATE TABLE IF NOT EXISTS roles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_id INTEGER,
+            kind VARCHAR(16) DEFAULT 'persona',
             name VARCHAR(80) NOT NULL,
             front_material_id INTEGER,
             side_material_id INTEGER,
@@ -473,11 +474,11 @@ def init_content_db():
             extra_images TEXT DEFAULT '[]',
             voice_material_id INTEGER,
             tags VARCHAR(120) DEFAULT '',
-            note VARCHAR(200) DEFAULT '',
+            note VARCHAR(300) DEFAULT '',
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_personas_owner_name ON personas(owner_id, name);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_owner_name ON roles(owner_id, name);
     ''')
     # Auto-migrate: 补 unet / lora / denoise 列（CREATE TABLE IF NOT EXISTS 对已存在的表是空操作）
     lcols = [r[1] for r in conn.execute("PRAGMA table_info(illustration_logs)").fetchall()]
@@ -511,6 +512,7 @@ def _ensure_video_cols():
     cols = {r[1] for r in db.execute("PRAGMA table_info(video_plans)")}
     for name, ddl in (("persona_material_id", "INTEGER"),
                       ("persona_id", "INTEGER"), ("voice_material_id", "INTEGER"),
+                      ("role_ids", "TEXT"),
                       ("aspect", "TEXT DEFAULT '9:16'"), ("duration_target", "INTEGER DEFAULT 15")):
         if cols and name not in cols:
             db.execute("ALTER TABLE video_plans ADD COLUMN %s %s" % (name, ddl))
@@ -521,8 +523,24 @@ def _ensure_video_cols():
     db.commit()
     db.close()
 
+def _drop_empty_personas():
+    """personas 表已由 roles 取代：仅在「表存在且 0 行」时删除（幂等；有数据则保留不动）"""
+    db = sqlite3.connect(CONTENT_DATABASE)   # 导入期调用，不能用依赖 Flask 上下文的 get_content_db()
+    try:
+        has = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='personas'").fetchone()
+        if has:
+            n = db.execute("SELECT count(*) FROM personas").fetchone()[0]
+            if n == 0:
+                db.execute("DROP TABLE personas")
+                db.commit()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
 init_content_db()
 _ensure_video_cols()
+_drop_empty_personas()
 
 # ============================================================
 # 模板全局函数
@@ -1427,11 +1445,14 @@ def api_update_video_plan(plan_id):
     return jsonify({"ok": True})
 
 # ============================================================
-# API - 人物形象（姓名 + 正面/侧面/背面照 + 默认声音）
-# 图片/音频本体存素材库（database.db），personas 在 content.db -> Python 侧组装，不做跨库 JOIN
+# API - 素材角色 roles（人物 / 场景 / 道具，用 kind 区分）
+# 图片/音频本体存素材库（database.db），roles 在 content.db -> Python 侧组装，不做跨库 JOIN
 # ============================================================
 
-def _persona_materials(mids):
+ROLE_KINDS = ("persona", "scene", "prop")
+KIND_CN = {"persona": "人物", "scene": "场景", "prop": "道具"}
+
+def _role_materials(mids):
     ids = [int(x) for x in mids if x]
     if not ids:
         return {}
@@ -1444,9 +1465,10 @@ def _persona_materials(mids):
     conn.close()
     return out
 
-def _persona_row(d, mats):
+def _role_row(d, mats):
     return {
-        "id": d["id"], "name": d["name"], "tags": d["tags"] or "", "note": d["note"] or "",
+        "id": d["id"], "kind": d["kind"] or "persona", "name": d["name"],
+        "tags": d["tags"] or "", "note": d["note"] or "",
         "front": mats.get(d["front_material_id"]), "side": mats.get(d["side_material_id"]),
         "back": mats.get(d["back_material_id"]), "voice": mats.get(d["voice_material_id"]),
         "front_material_id": d["front_material_id"], "side_material_id": d["side_material_id"],
@@ -1454,102 +1476,144 @@ def _persona_row(d, mats):
         "owner_id": d["owner_id"], "created_at": d["created_at"],
     }
 
-@app.route('/api/personas')
-def api_list_personas():
-    """人物形象列表（非 admin 只看自己的）"""
+def _roles_of(ids):
+    """按 id 列表查 roles 表 + 组装素材信息（供素材包 / 分镜提词用），保持传入顺序"""
+    try:
+        ids = [int(x) for x in (ids or []) if x]
+    except Exception:
+        return []
+    if not ids:
+        return []
+    db = get_content_db()
+    rows = db.execute("SELECT * FROM roles WHERE id IN (%s)" % ",".join("?" * len(ids)), ids).fetchall()
+    by_id = {r["id"]: dict(r) for r in rows}
+    ds = [by_id[i] for i in ids if i in by_id]
+    mids = []
+    for d in ds:
+        mids += [d.get("front_material_id"), d.get("side_material_id"),
+                 d.get("back_material_id"), d.get("voice_material_id")]
+    matmap = _role_materials(mids)
+    return [_role_row(d, matmap) for d in ds]
+
+@app.route('/api/roles')
+def api_list_roles():
+    """素材角色列表（?kind=persona|scene|prop 过滤；非 admin 只看自己的）"""
     u = current_user()
     if not u:
         return jsonify({"error": "未登录"}), 401
+    kind = (request.args.get("kind") or "").strip()
+    if kind and kind not in ROLE_KINDS:
+        return jsonify({"error": "非法类型：%s" % kind}), 400
     db = get_content_db()
-    if _is_admin(u):
-        rows = db.execute("SELECT * FROM personas ORDER BY id DESC").fetchall()
-    else:
-        rows = db.execute("SELECT * FROM personas WHERE owner_id=? ORDER BY id DESC", (u["id"],)).fetchall()
+    where, args = [], []
+    if kind:
+        where.append("kind=?")
+        args.append(kind)
+    if not _is_admin(u):
+        where.append("owner_id=?")
+        args.append(u["id"])
+    sql = "SELECT * FROM roles"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    rows = db.execute(sql + " ORDER BY id DESC", args).fetchall()
     ds = [dict(r) for r in rows]
     mids = []
     for d in ds:
         mids += [d.get("front_material_id"), d.get("side_material_id"),
                  d.get("back_material_id"), d.get("voice_material_id")]
-    matmap = _persona_materials(mids)
-    return jsonify([_persona_row(d, matmap) for d in ds])
+    matmap = _role_materials(mids)
+    return jsonify([_role_row(d, matmap) for d in ds])
 
-@app.route('/api/personas', methods=['POST'])
-def api_create_persona():
-    """新建人物形象 {name, front_material_id, side_material_id?, back_material_id?, voice_material_id?, tags?, note?}"""
+@app.route('/api/roles', methods=['POST'])
+def api_create_role():
+    """新建素材角色 {kind, name, front_material_id, side/back/voice_material_id?, tags?, note?}"""
     u = current_user()
     if not u:
         return jsonify({"error": "未登录"}), 401
     d = request.get_json(silent=True) or {}
+    kind = (d.get("kind") or "persona").strip()
+    if kind not in ROLE_KINDS:
+        return jsonify({"error": "非法类型：%s" % kind}), 400
     name = (d.get("name") or "").strip()
     if not name:
-        return jsonify({"error": "请填写姓名"}), 400
+        return jsonify({"error": "请填写名称"}), 400
     if not d.get("front_material_id"):
-        return jsonify({"error": "请选择正面照"}), 400
+        return jsonify({"error": "请选择主图"}), 400
     db = get_content_db()
-    if db.execute("SELECT id FROM personas WHERE owner_id=? AND name=?", (u["id"], name)).fetchone():
-        return jsonify({"error": "已有同名形象：%s" % name}), 400
+    if db.execute("SELECT id FROM roles WHERE owner_id=? AND name=?", (u["id"], name)).fetchone():
+        return jsonify({"error": "已有同名角色：%s" % name}), 400
     try:
-        db.execute("INSERT INTO personas (owner_id, name, front_material_id, side_material_id,"
-                   " back_material_id, voice_material_id, tags, note) VALUES (?,?,?,?,?,?,?,?)",
-                   (u["id"], name[:80], d.get("front_material_id"), d.get("side_material_id"),
+        db.execute("INSERT INTO roles (owner_id, kind, name, front_material_id, side_material_id,"
+                   " back_material_id, voice_material_id, tags, note) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (u["id"], kind, name[:80], d.get("front_material_id"), d.get("side_material_id"),
                     d.get("back_material_id"), d.get("voice_material_id"),
-                    (d.get("tags") or "")[:120], (d.get("note") or "")[:200]))
+                    (d.get("tags") or "")[:120], (d.get("note") or "")[:300]))
         db.commit()
     except sqlite3.IntegrityError:
-        return jsonify({"error": "已有同名形象：%s" % name}), 400
+        return jsonify({"error": "已有同名角色：%s" % name}), 400
     return jsonify({"ok": True, "id": db.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]})
 
-@app.route('/api/personas/<int:pid>', methods=['POST'])
-def api_update_persona(pid):
-    """修改人物形象（只改传入的字段）"""
+@app.route('/api/roles/<int:rid>', methods=['POST'])
+def api_update_role(rid):
+    """修改素材角色（只改传入的字段）"""
     u = current_user()
     if not u:
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT * FROM personas WHERE id=?", (pid,)).fetchone()
+    row = db.execute("SELECT * FROM roles WHERE id=?", (rid,)).fetchone()
     if not row:
         return jsonify({"error": "不存在"}), 404
     if not _is_admin(u) and row["owner_id"] != u["id"]:
         return jsonify({"error": "无权操作"}), 403
     d = request.get_json(silent=True) or {}
+    if "kind" in d and (d.get("kind") or "") not in ROLE_KINDS:
+        return jsonify({"error": "非法类型：%s" % d.get("kind")}), 400
     sets, vals = [], []
-    for f in ("name", "front_material_id", "side_material_id", "back_material_id",
+    for f in ("kind", "name", "front_material_id", "side_material_id", "back_material_id",
               "voice_material_id", "tags", "note"):
         if f in d:
             v = d[f]
             if f == "name":
                 v = (v or "").strip()
                 if not v:
-                    return jsonify({"error": "姓名不能为空"}), 400
+                    return jsonify({"error": "名称不能为空"}), 400
                 v = v[:80]
             sets.append(f + "=?")
             vals.append(v)
     if not sets:
         return jsonify({"error": "无更新字段"}), 400
     sets.append("updated_at=datetime('now','localtime')")
-    vals.append(pid)
+    vals.append(rid)
     try:
-        db.execute("UPDATE personas SET " + ", ".join(sets) + " WHERE id=?", vals)
+        db.execute("UPDATE roles SET " + ", ".join(sets) + " WHERE id=?", vals)
         db.commit()
     except sqlite3.IntegrityError:
-        return jsonify({"error": "已有同名形象"}), 400
+        return jsonify({"error": "已有同名角色"}), 400
     return jsonify({"ok": True})
 
-@app.route('/api/personas/<int:pid>/delete', methods=['POST'])
-def api_delete_persona(pid):
-    """删除人物形象（只删记录，素材保留在素材库）"""
+@app.route('/api/roles/<int:rid>/delete', methods=['POST'])
+def api_delete_role(rid):
+    """删除素材角色（弱引用不级联；返回被多少个视频计划引用 used_by）"""
     u = current_user()
     if not u:
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT owner_id FROM personas WHERE id=?", (pid,)).fetchone()
+    row = db.execute("SELECT owner_id FROM roles WHERE id=?", (rid,)).fetchone()
     if not row:
         return jsonify({"error": "不存在"}), 404
     if not _is_admin(u) and row["owner_id"] != u["id"]:
         return jsonify({"error": "无权操作"}), 403
-    db.execute("DELETE FROM personas WHERE id=?", (pid,))
+    used = 0
+    for r in db.execute("SELECT role_ids FROM video_plans WHERE role_ids IS NOT NULL AND role_ids!=''").fetchall():
+        try:
+            if rid in [int(x) for x in json.loads(r["role_ids"] or "[]")]:
+                used += 1
+        except Exception:
+            continue
+    db.execute("DELETE FROM roles WHERE id=?", (rid,))
     db.commit()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "used_by": used})
+
 
 @app.route('/video-plan/<int:plan_id>')
 def video_plan_page(plan_id):

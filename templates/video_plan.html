@@ -49,16 +49,8 @@
             style="width:100%;padding:12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;line-height:1.7;font-family:inherit;resize:vertical;"></textarea>
     </div>
 
-    <!-- Tab 素材：①.5 素材包（角色一致性） -->
-    <div id="blk-rolepack" class="tab-pane" style="margin-bottom:20px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <label style="font-weight:600;font-size:14px;">①.5 素材包（人物 / 场景 / 道具，保证全片一致）</label>
-            <button class="btn btn-outline btn-sm" onclick="saveRoleIds()">💾 保存素材包</button>
-        </div>
-        <div id="role-pack"></div>
-    </div>
-
-    <!-- Tab 分镜：② 分镜表 -->
+    <!-- Tab 素材：素材列表（剧本需要的素材） -->
+        <!-- Tab 分镜：② 分镜表 -->
     <div id="blk-shots" class="tab-pane">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">② 分镜表（画面 / 台词 / 时长）</label>
@@ -85,7 +77,7 @@
     <!-- Tab 素材：③ 素材需求（asset_requirements / asset_prompts） -->
     <div id="blk-reqs" class="tab-pane" style="margin-top:20px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <label style="font-weight:600;font-size:14px;">③ 素材需求</label>
+            <label style="font-weight:600;font-size:14px;">素材列表（列出剧本需要的素材）</label>
             <button class="btn btn-outline btn-sm" id="asset-gen-btn" onclick="genAssets()">🧩 生成素材需求</button>
         </div>
         <div id="asset-req"></div>
@@ -109,7 +101,7 @@ let PROMPT_FLAT = [];
 let SCRIPT_OBJ = null;
 
 // ==================== 3 个独立 Tab（剧本 / 素材 / 分镜；只切换显示，不动块内容） ====================
-const TAB_PANES = { script: ['blk-script'], assets: ['blk-rolepack', 'blk-reqs'], shots: ['blk-shots'] };
+const TAB_PANES = { script: ['blk-script'], assets: ['blk-reqs'], shots: ['blk-shots'] };
 function switchTab(name) {
     Object.keys(TAB_PANES).forEach(function (k) {
         const on = (k === name);
@@ -171,24 +163,7 @@ function assetCell(s) {
     }).join('');
 }
 
-function renderRolePack() {
-    const box = document.getElementById('role-pack');
-    if (!box) return;
-    box.innerHTML = ROLE_KINDS.map(function (k) {
-        const picked = ROLE_IDS.map(roleById).filter(r => r && r.kind === k);
-        const chips = picked.map(function (r) {
-            return '<span style="display:inline-flex;gap:6px;align-items:center;border:1px solid #e2e8f0;border-radius:8px;padding:3px 8px;font-size:12px;background:#f8fafc;">'
-                + (r.front && r.front.file_path ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(r.front.file_path) + '" style="width:22px;height:22px;object-fit:cover;border-radius:4px;">' : '')
-                + '<span>' + (r.name || '') + '</span>'
-                + '<span onclick="removeRole(' + r.id + ')" style="cursor:pointer;color:#94a3b8;">✕</span></span>';
-        }).join('');
-        return '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">'
-            + '<span style="width:44px;font-size:13px;color:#64748b;">' + KIND_CN[k] + '</span>'
-            + (chips || '<span style="font-size:12px;color:#cbd5e1;">未选</span>')
-            + '<button class="btn btn-outline btn-sm" onclick="pickRole(\'' + k + '\')">＋从库选</button>'
-            + '</div>';
-    }).join('');
-}
+function renderRolePack() { try { renderReqs(); } catch (e) {} }
 
 async function loadRoles() {
     const all = await api('/api/roles', { method: 'GET' });
@@ -225,7 +200,7 @@ async function saveRoleIds() {
     const r = await api('/api/video-plans/' + PLAN_ID, {
         method: 'PUT', body: JSON.stringify({ role_ids: JSON.stringify(ROLE_IDS) })
     });
-    if (r && r.ok) { toast('素材包已保存 ✓'); }
+    if (r && r.ok) { toast('已加入本片素材 ✓'); }
     else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
     return r;
 }
@@ -249,6 +224,7 @@ function renderReqs() {
             + '<div style="font-size:13px;"><b>' + (KIND_CN[q.kind] || q.kind || '') + ' · ' + (q.name || '') + '</b> '
             + (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 已有' + (q.matched_role_name ? '：' + q.matched_role_name : '') + '</span>'
                       : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>')
+            + ((q.matched_role_id && ROLE_IDS.indexOf(q.matched_role_id) >= 0) ? ' <span style="color:#0f766e;font-size:11px;">✓ 已进本片</span>' : '')
             + (q.matched_role_id ? ' <button class="btn btn-outline btn-sm" onclick="useRoleOnce(' + q.matched_role_id + ')">用库里的</button>' : '')
             + '<span style="color:#94a3b8;font-size:11px;"> · 出现在镜头 '
             + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
@@ -313,7 +289,7 @@ async function useRoleOnce(id) {
     if (typeof addRole === 'function') { addRole(id); }
     else if (ROLE_IDS.indexOf(id) < 0) { ROLE_IDS.push(id); }
     await saveRoleIds();
-    toast('已加入素材包 ✓');
+    toast('已加入本片素材 ✓');
 }
 
 async function load() {

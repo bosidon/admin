@@ -330,14 +330,14 @@ def upsert(file_path, mtype="image", name="", category="", source="ai", scope="p
                   " article_id=COALESCE(?, article_id),"
                   " owner_id=COALESCE(?, owner_id),"
                   " owner=CASE WHEN ? <> '' THEN ? ELSE owner END,"
-                  " tags=? WHERE id=?",
+                  " tags=?, created_at=datetime('now','localtime') WHERE id=?",
                   (mtype, name or "", category or "", article_id, owner_id,
                    owner or "", owner or "", tags or "", row["id"]))
         mid = row["id"]
     else:
         cur = c.execute("INSERT INTO materials (article_id,type,name,category,file_path,"
-                        "source,scope,status,tags,owner_id,owner) "
-                        "VALUES (?,?,?,?,?,?,?,'approved',?,?,?)",
+                        "source,scope,status,tags,owner_id,owner,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,'approved',?,?,?,datetime('now','localtime'))",
                         (article_id, mtype, name or "", category or "", file_path,
                          source or "ai", scope or "private", tags or "", owner_id, owner or ""))
         mid = cur.lastrowid

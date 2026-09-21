@@ -1225,7 +1225,7 @@ def _merge_images(article_id, new_urls, drop_prefix=None):
     for u in new_urls:
         if u not in cur:
             cur.append(u)
-    conn.execute("UPDATE articles SET images_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    conn.execute("UPDATE articles SET images_json=?, updated_at=datetime('now','localtime') WHERE id=?",
                  (json.dumps(cur, ensure_ascii=False), article_id))
     conn.commit()
     conn.close()
@@ -1240,8 +1240,8 @@ def _save_gen_log(article_id, name, kind, meta, style=""):
                      (article_id, name))
         conn.execute(
             "INSERT INTO illustration_logs (article_id, name, kind, prompt, neg, style, "
-            "seed, steps, cfg, sampler, scheduler, width, height, unet, lora, denoise) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "seed, steps, cfg, sampler, scheduler, width, height, unet, lora, denoise, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))",
             (article_id, name, kind, meta.get("prompt", ""), meta.get("neg", ""), style,
              meta.get("seed"), meta.get("steps"), meta.get("cfg"),
              meta.get("sampler"), meta.get("scheduler"),
@@ -1678,7 +1678,7 @@ def save_plan(article_id, plan):
     else:                                              # 极旧调用方（纯 quotes/scenes）
         p = plan
     conn = _content_db()
-    conn.execute("UPDATE articles SET image_script=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    conn.execute("UPDATE articles SET image_script=?, updated_at=datetime('now','localtime') WHERE id=?",
                  (json.dumps(p, ensure_ascii=False), article_id))
     conn.commit()
     conn.close()

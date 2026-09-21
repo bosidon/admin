@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS materials (
     scope       TEXT DEFAULT 'private',
     status      TEXT DEFAULT 'approved',
     tags        TEXT,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at  DATETIME DEFAULT (datetime('now','localtime')),
     owner_id    INTEGER,
     owner       TEXT DEFAULT ''
 );

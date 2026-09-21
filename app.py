@@ -439,7 +439,7 @@ def init_content_db():
             status VARCHAR(20) DEFAULT 'pending',
             source VARCHAR(20) DEFAULT 'ai',
             file_path VARCHAR(500),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME
         );
     ''')
@@ -460,7 +460,7 @@ def init_content_db():
             scheduler VARCHAR(40) DEFAULT '',
             width INTEGER,
             height INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_illu_logs_article ON illustration_logs(article_id);
     ''')
@@ -600,8 +600,8 @@ def api_create_article():
     cursor = db.execute('''
         INSERT INTO articles (title, book, topic, angle, structure, hook, tone,
                               content_md, content_html, summary, tags, word_count,
-                              status, source, file_path, owner_id, owner)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              status, source, file_path, owner_id, owner, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
     ''', (
         data.get('title', '无标题'),
         data.get('book', ''),
@@ -687,8 +687,8 @@ def api_import_articles():
         cur = db.execute(
             """INSERT INTO articles (title, book, topic, content_md, summary, tags, word_count,
                                     status, source, platform, content_type, service_line,
-                                    owner_id, owner, promo_src, promo_link)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?, ?, '', NULL)""",
+                                    owner_id, owner, promo_src, promo_link, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?, ?, '', NULL, datetime('now','localtime'))""",
             (title, book, topic, content_md, summary, tags, wc, status,
              platform, ctype, line, promo_uid, user_label(_u)))
         aid = cur.lastrowid
@@ -732,7 +732,7 @@ def api_update_article(article_id):
     if 'content_md' in data:
         sets.append('word_count=?')
         vals.append(len(data['content_md'].replace(' ', '').replace('\n', '')))
-    sets.append('updated_at=CURRENT_TIMESTAMP')
+    sets.append("updated_at=datetime('now','localtime')")
     vals.append(article_id)
     db.execute(f'UPDATE articles SET {", ".join(sets)} WHERE id=?', vals)
     db.commit()
@@ -749,7 +749,7 @@ def api_update_article_status(article_id):
     if status not in ('pending', 'approved', 'rejected', 'published'):
         return jsonify({"error": "invalid status"}), 400
     db = get_content_db()
-    db.execute('UPDATE articles SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', (status, article_id))
+    db.execute("UPDATE articles SET status=?, updated_at=datetime('now','localtime') WHERE id=?", (status, article_id))
     db.commit()
     return jsonify({"ok": True})
 
@@ -1049,8 +1049,8 @@ def api_rewrite_article(article_id):
     cur = db.execute("INSERT INTO articles (title, platform, content_type, book, topic, angle,"
                      " structure, hook, tone, content_md, summary, tags, word_count,"
                      " status, source, promo_src, promo_link, service_line,"
-                     " owner_id, owner)"
-                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?)",
+                     " owner_id, owner, created_at)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?, datetime('now','localtime'))",
                      (art.get('title', '未命名'), platform, content_type, src.get('book'), src.get('topic'),
                       src.get('angle'), src.get('structure'), src.get('hook'), src.get('tone'),
                       content_md, art.get('summary', ''), art.get('tags', ''), wc,
@@ -1224,8 +1224,8 @@ def api_generate_article():
             INSERT INTO articles (title, platform, content_type, book, topic, angle,
                                   structure, hook, tone, content_md, summary, tags,
                                   word_count, status, source, promo_src, promo_link,
-                                  service_line, owner_id, owner)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?)
+                                  service_line, owner_id, owner, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'ai', ?, ?, ?, ?, ?, datetime('now','localtime'))
         ''', (
             article_data.get('title', '未命名'),
             platform, content_type,
@@ -1325,7 +1325,7 @@ def api_create_video_plan():
     if existing:
         return jsonify({"ok": True, "id": existing['id'], "existed": True})
     cur = db.execute(
-        'INSERT INTO video_plans (article_id, title, status) VALUES (?, ?, ?)',
+        "INSERT INTO video_plans (article_id, title, status, created_at) VALUES (?, ?, ?, datetime('now','localtime'))",
         (article_id, data.get('title', ''), 'draft')
     )
     db.commit()
@@ -1364,7 +1364,7 @@ def api_gen_storyboard(plan_id):
     for sh in shots:
         lines.append("\u3010" + sh.get("shot_type", "") + "\u3011" + sh.get("subtitle", ""))
     db.execute('UPDATE video_plans SET storyboard=?, script=?, status="storyboard_done",'
-               'total_duration_s=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+               "total_duration_s=?, updated_at=datetime('now','localtime') WHERE id=?",
                (json.dumps(shots, ensure_ascii=False), "\n".join(lines), total, plan_id))
     db.commit(); db.close()
     return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total})
@@ -1387,7 +1387,7 @@ def api_update_video_plan(plan_id):
             vals.append(data[f])
     if not sets:
         return jsonify({"error": "无更新字段"}), 400
-    sets.append('updated_at=CURRENT_TIMESTAMP')
+    sets.append("updated_at=datetime('now','localtime')")
     vals.append(plan_id)
     db.execute('UPDATE video_plans SET ' + ', '.join(sets) + ' WHERE id=?', vals)
     db.commit()
@@ -1896,7 +1896,7 @@ def api_overlay_qr():
         for u in done:
             if u not in cur:
                 cur.append(u)
-        db.execute('UPDATE articles SET images_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute("UPDATE articles SET images_json=?, updated_at=datetime('now','localtime') WHERE id=?",
                    (json.dumps(cur, ensure_ascii=False), article_id))
         db.commit()
     return jsonify({"ok": True, "count": len(done), "images": done, "skipped": skipped})
@@ -1940,7 +1940,7 @@ def api_delete_image():
     except Exception:
         pass
     cur = [u for u in cur if u != url]
-    db.execute('UPDATE articles SET images_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+    db.execute("UPDATE articles SET images_json=?, updated_at=datetime('now','localtime') WHERE id=?",
                (json.dumps(cur, ensure_ascii=False), article_id))
     db.commit()
     return jsonify({"ok": True, "deleted": deleted, "name": name, "count": len(cur)})

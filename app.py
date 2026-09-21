@@ -4,6 +4,7 @@
 端口: 3010
 核心功能: 视频内容生产流水线（编剧→分镜→资产→视频生成）
 """
+import re
 import os
 import time
 import json
@@ -602,6 +603,93 @@ def api_create_article():
     ))
     db.commit()
     return jsonify({"ok": True, "id": cursor.lastrowid})
+
+def _derive_title(content_md):
+    """从正文猜标题：首个 # 标题 / 首个非空行（≤40 字）"""
+    for raw in str(content_md or "").split("\n"):
+        t = raw.strip()
+        if not t:
+            continue
+        t = re.sub(r"^#+\s*", "", t)
+        t = re.sub(r"^[*_>`\-\s]+", "", t).strip()
+        if t:
+            return t[:40]
+    return "无标题"
+
+
+def _derive_summary(content_md, n=120):
+    """摘要：正文去掉标记后截前 n 字（零成本）"""
+    t = re.sub(r"[#*_>`\n\r]+", " ", str(content_md or ""))
+    return " ".join(t.split())[:n]
+
+
+
+
+@app.route('/api/articles/import', methods=['POST'])
+def api_import_articles():
+    """导入文案（粘贴 / 文件解析后的多篇）
+
+    body: {items:[{title?, content_md, summary?, tags?, book?, topic?}],
+           service_line, platform, content_type, add_link, status}
+    规则：标题重复（同业务线）跳过；source=import；add_link 为真时追加推广链接（src=文案编号）
+    """
+    data = request.json or {}
+    items = data.get('items') or []
+    line = (data.get('service_line') or '').strip() or 'lingxiu'
+    platform = (data.get('platform') or 'wechat').strip()
+    ctype = (data.get('content_type') or 'article').strip()
+    add_link = bool(data.get('add_link', True))
+    status = 'approved' if (data.get('status') or 'pending') == 'approved' else 'pending'
+    if not items:
+        return jsonify({"error": "没有可导入的内容"}), 400
+    if len(items) > 50:
+        return jsonify({"error": "单次最多导入 50 篇，请分批"}), 400
+
+    db = get_content_db()
+    _u = current_user()
+    promo_uid = (_u or {}).get('id')
+    imported, skipped = [], []
+    for it in items:
+        content_md = str(it.get('content_md') or '').strip()
+        if not content_md:
+            skipped.append({"title": str(it.get('title') or '')[:40], "reason": "正文为空"})
+            continue
+        title = str(it.get('title') or '').strip()[:80] or _derive_title(content_md)
+        dup = db.execute("SELECT id FROM articles WHERE service_line=? AND title=?", (line, title)).fetchone()
+        if dup:
+            skipped.append({"title": title, "reason": "已存在 #%s" % dup["id"]})
+            continue
+        summary = str(it.get('summary') or '').strip() or _derive_summary(content_md)
+        tags = str(it.get('tags') or '').strip()
+        book = str(it.get('book') or '').strip()
+        topic = str(it.get('topic') or '').strip()
+        wc = len(content_md.replace(' ', '').replace('\n', ''))
+        cur = db.execute(
+            """INSERT INTO articles (title, book, topic, content_md, summary, tags, word_count,
+                                    status, source, platform, content_type, service_line,
+                                    owner_id, owner, promo_src, promo_link)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?, ?, '', NULL)""",
+            (title, book, topic, content_md, summary, tags, wc, status,
+             platform, ctype, line, promo_uid, user_label(_u)))
+        aid = cur.lastrowid
+        if add_link:
+            promo_src = str(aid)
+            promo_link = contentlines.promo_link(line, promo_uid, promo_src)
+            if promo_link:
+                block = '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
+                if line == 'lingxiu' and book:
+                    bid = contentlines.lingxiu_book_id(book)
+                    if bid:
+                        block += '\n📖 想看《%s》的深度解读 → https://read.xianbao.love/books/%d/aideep-v2' % (
+                            book.strip('《》'), bid)
+                content_md = content_md.rstrip() + block
+                wc = len(content_md.replace(' ', '').replace('\n', ''))
+            db.execute("UPDATE articles SET content_md=?, word_count=?, promo_src=?, promo_link=? WHERE id=?",
+                       (content_md, wc, promo_src, promo_link or None, aid))
+        imported.append({"id": aid, "title": title, "word_count": wc})
+    db.commit()
+    return jsonify({"ok": True, "count": len(imported), "imported": imported, "skipped": skipped})
+
 
 @app.route('/api/articles/<int:article_id>', methods=['PUT'])
 def api_update_article(article_id):

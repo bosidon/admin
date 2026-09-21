@@ -625,8 +625,8 @@ const KIND_CN = { persona: '人物', scene: '场景', prop: '道具' };
 // 槽位标签按 kind 变：人物=正面/侧面/背面；场景=全景/近景/细节；道具=主图/细节/其他
 const SLOT_LABELS = {
     persona: { front: '正面', side: '侧面', back: '背面' },
-    scene: { front: '全景', side: '近景', back: '细节' },
-    prop: { front: '主图', side: '细节', back: '其他' }
+    scene: { front: '全景', side: '中景', back: '细节' },
+    prop: { front: '主图', side: '细节', back: '多角度' }
 };
 
 function switchView(v) {
@@ -654,7 +654,7 @@ async function loadPersonas() {
         const tri = [['front', L.front], ['side', L.side], ['back', L.back]].map(([f, t]) =>
             p[f] ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(p[f].file_path) + '" title="' + t + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;">'
                : '<div title="' + t + '未设" style="width:64px;height:64px;border-radius:8px;background:#f1f5f9;color:#94a3b8;font-size:11px;display:flex;align-items:center;justify-content:center;">' + t + '未设</div>').join('');
-        const voice = (p.voice && p.voice.file_path)
+        const voice = (CUR_KIND === 'persona' && p.voice && p.voice.file_path)
             ? '<audio controls src="' + p.voice.file_path + '" style="width:100%;height:30px;"></audio>'
             : '<div style="font-size:11px;color:#94a3b8;">未设默认声音</div>';
         return '<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px;">'
@@ -699,6 +699,11 @@ function applySlotLabels() {
     document.getElementById('pf-front-title').textContent = L.front;
     document.getElementById('pf-side-title').textContent = L.side;
     document.getElementById('pf-back-title').textContent = L.back;
+    const ph = { persona: '如：国风·青年·女', scene: '如：清晨·室内·暖光', prop: '如：木质·复古' }[k];
+    const ti = document.getElementById('pfTags');
+    if (ti) ti.placeholder = ph || '';
+    const vr = document.getElementById('pf-voice-row');
+    if (vr) vr.style.display = (k === 'persona') ? '' : 'none';
 }
 
 async function pickForSlot(slot) {
@@ -812,7 +817,7 @@ load();
                 <button id="pf-back" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('back')">选择</button>
             </div>
         </div>
-        <div style="margin-bottom:12px;">
+        <div id="pf-voice-row" style="margin-bottom:12px;">
             <div style="font-size:13px;margin-bottom:6px;">默认声音</div>
             <div style="display:flex;gap:10px;align-items:center;">
                 <span style="width:56px;height:56px;border-radius:8px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:22px;">🎙</span>

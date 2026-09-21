@@ -2,6 +2,7 @@
 {% block title %}文案制作 - 仙宝内容平台{% endblock %}
 {% block page_title %}✍️ 文案制作{% endblock %}
 {% block topbar_right %}
+<button class="btn btn-primary" onclick="openGen()">✨ 生成文案</button>
 <button class="btn btn-outline" onclick="openImport()">📥 导入</button>
 <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
 {% endblock %}
@@ -13,13 +14,20 @@
     <span id="line-home" style="margin-left:auto;font-size:12px;color:#94a3b8;"></span>
 </div>
 
-<!-- 制作 -->
-<div class="card">
+<!-- 生成文案（弹出窗体） -->
+<div id="gen-modal" onclick="if(event.target===this)closeGen()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:998;padding:20px;overflow:auto;">
+  <div class="card" style="max-width:880px;margin:32px auto;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
+        <b style="font-size:16px;">✨ 生成文案</b>
+        <span id="gen-line-hint" style="font-size:12px;color:#94a3b8;"></span>
+        <button class="btn btn-sm btn-outline" style="margin-left:auto;" onclick="closeGen()">✕ 关闭</button>
+    </div>
     <div id="gen-form"></div>
     <div style="display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px;">
         <span id="gen-status" style="font-size:12px;color:#94a3b8;"></span>
         <button class="btn btn-primary" id="gen-btn" onclick="doGenerate()">✨ 生成文案</button>
     </div>
+  </div>
 </div>
 
 <!-- 成稿 -->
@@ -77,13 +85,18 @@
     <button class="btn btn-outline btn-sm filter-btn" onclick="filterStatus('pending')">⏳ 待审</button>
     <button class="btn btn-outline btn-sm filter-btn" onclick="filterStatus('approved')">✅ 已通过</button>
     <button class="btn btn-outline btn-sm filter-btn" onclick="filterStatus('published')">📤 已发布</button>
+    <span id="bulk-bar" style="margin-left:auto;display:none;align-items:center;gap:8px;">
+        <span style="font-size:12px;color:#94a3b8;">已选 <b id="bulk-n">0</b> 条</span>
+        <button class="btn btn-danger btn-sm" onclick="bulkDelete()">🗑 删除选中</button>
+    </span>
 </div>
 
 <div class="card" style="padding:0;overflow:hidden;">
     <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <thead>
             <tr style="background:#f8fafc;border-bottom:1px solid var(--border);text-align:left;">
-                <th style="padding:12px 16px;font-weight:600;width:30%;">标题</th>
+                <th style="padding:12px 8px;font-weight:600;width:36px;"><input type="checkbox" id="ck-all" onclick="toggleAllRows(this)" title="全选"></th>
+                <th style="padding:12px 8px;font-weight:600;width:28%;">标题</th>
                 <th style="padding:12px 8px;font-weight:600;width:10%;">平台</th>
                 <th style="padding:12px 8px;font-weight:600;width:10%;">书目</th>
                 <th style="padding:12px 8px;font-weight:600;width:12%;">话题</th>
@@ -95,7 +108,7 @@
             </tr>
         </thead>
         <tbody id="article-tbody">
-            <tr><td colspan="9" style="text-align:center;padding:40px;color:#94a3b8;">加载中...</td></tr>
+            <tr><td colspan="10" style="text-align:center;padding:40px;color:#94a3b8;">加载中...</td></tr>
         </tbody>
     </table>
 </div>
@@ -131,7 +144,7 @@ async function load() {
     USED = new Set(articles.map(a => a.topic).filter(Boolean));
     const tbody = document.getElementById('article-tbody');
     if (!articles.length) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#94a3b8;">📭 暂无内容</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:40px;color:#94a3b8;">📭 暂无内容</td></tr>';
         return;
     }
     tbody.innerHTML = articles.map(a => {
@@ -150,6 +163,7 @@ async function load() {
         const delBtn = ` <button class="btn btn-danger btn-sm" onclick="deleteArticle(${a.id})" title="删除">🗑️</button>`;
 
         return `<tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 8px;"><input type="checkbox" class="row-ck" value="${a.id}" onchange="updateBulkBar()"></td>
             <td style="padding:10px 16px;">${titleLink}${refBadge}</td>
             <td style="padding:10px 8px;"><span style="background:#ede9fe;color:#5b21b6;padding:2px 6px;border-radius:4px;font-size:12px;">${PLATFORM_MAP[a.platform]||a.platform||'-'}</span></td>
             <td style="padding:10px 8px;font-size:13px;color:#64748b;">${a.book ? '<a href="https://read.xianbao.love/books?q='+encodeURIComponent(a.book)+'" target="_blank" style="color:inherit;text-decoration:none;">'+a.book+'</a>' : '-'}</td>
@@ -161,6 +175,7 @@ async function load() {
             <td style="padding:10px 16px;text-align:center;white-space:nowrap;">${actions} ${statusActions} ${delBtn}</td>
         </tr>`;
     }).join('');
+    updateBulkBar();
 }
 
 document.addEventListener('click', function(e) {
@@ -177,6 +192,50 @@ function filterStatus(s) {
     currentFilter = s;
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     event.target.classList.add('active');
+    load();
+}
+
+function openGen() {
+    document.getElementById('gen-modal').style.display = 'block';
+    const h = document.getElementById('gen-line-hint');
+    if (h) h.textContent = '业务线：' + (LINE || 'lingxiu');
+    buildForm();
+}
+
+function closeGen() {
+    document.getElementById('gen-modal').style.display = 'none';
+}
+
+function toggleAllRows(cb) {
+    document.querySelectorAll('#article-tbody .row-ck').forEach(x => { x.checked = cb.checked; });
+    updateBulkBar();
+}
+
+function updateBulkBar() {
+    const cks = [...document.querySelectorAll('#article-tbody .row-ck')];
+    const n = cks.filter(x => x.checked).length;
+    const bar = document.getElementById('bulk-bar');
+    const cnt = document.getElementById('bulk-n');
+    if (cnt) cnt.textContent = n;
+    if (bar) bar.style.display = n ? 'flex' : 'none';
+    const all = document.getElementById('ck-all');
+    if (all) all.checked = cks.length > 0 && n === cks.length;
+}
+
+async function bulkDelete() {
+    const ids = [...document.querySelectorAll('#article-tbody .row-ck:checked')].map(x => Number(x.value));
+    if (!ids.length) return;
+    if (!confirm('确定删除选中的 ' + ids.length + ' 条内容？\n\n关联数据会一并删除：视频计划、出图日志、任务记录、素材记录，以及配图/素材文件。\n此操作不可撤销。')) return;
+    let ok = 0, fail = 0;
+    const cnt = document.getElementById('bulk-n');
+    for (let i = 0; i < ids.length; i++) {
+        try {
+            const r = await api('/api/articles/' + ids[i], { method: 'DELETE' });
+            if (r && r.ok) ok++; else fail++;
+        } catch (e) { fail++; }
+        if (cnt) cnt.textContent = (i + 1) + '/' + ids.length;
+    }
+    showToast('✅ 已删除 ' + ok + ' 条' + (fail ? '，失败 ' + fail + ' 条' : ''), fail ? 'error' : 'success');
     load();
 }
 
@@ -521,6 +580,7 @@ async function doGenerate() {
         const r = await api('/api/articles/generate', {method: 'POST', body: JSON.stringify(params)});
         if (r && r.ok) {
             st.textContent = '';
+            closeGen();
             showToast('✅ 生成成功：' + r.title, 'success');
             if (r.warnings && r.warnings.length) {
                 st.innerHTML = '<span style="color:#b45309;">⚠ 敏感词提醒：' + r.warnings.join('、')

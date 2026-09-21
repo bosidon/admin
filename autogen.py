@@ -1451,6 +1451,56 @@ def gen_storyboard(article_content, llm_cfg, assets=None):
         sh.setdefault("template_hint", "U02")
     return data
 
+def gen_script(article_content, llm_cfg, duration_target=None):
+    """根据文案用 LLM 生成剧本 JSON（characters / scenes / props / beats）
+    目标时长通过提词占位符 {{DURATION}} 传入（默认 60 秒）"""
+    import os
+    prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
+    prompt_md = open(prompts_dir + "/video_script.md", encoding="utf-8").read()
+    _mk = "\n---USER---\n"
+    if _mk in prompt_md:
+        _sp, _up = prompt_md.split(_mk, 1)
+    else:
+        _sp, _up = "", prompt_md
+    system_msg = _sp.strip() or "你是一位专业短视频编剧。只输出 JSON，不要其他文字。"
+    try:
+        _dur = int(duration_target or 0)
+    except Exception:
+        _dur = 0
+    if _dur <= 0:
+        _dur = 60
+    user_msg = _up.replace("{{DURATION}}", str(_dur))
+    user_msg = user_msg.replace("{{CONTENT}}", (article_content or "")[:8000])
+    url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
+    if "/chat/completions" not in url:
+        url += "/chat/completions"
+    data, err = _llm_json(url, llm_cfg.get("llm_api_key", ""),
+                          llm_cfg.get("llm_model") or "deepseek-chat",
+                          [{"role": "system", "content": system_msg},
+                           {"role": "user", "content": user_msg}])
+    if err:
+        raise RuntimeError("LLM 调用失败: " + err[:200])
+    if not isinstance(data, dict):
+        raise RuntimeError("LLM 返回格式错误: " + str(data)[:200])
+    for _k in ("characters", "scenes", "props", "beats"):
+        if not isinstance(data.get(_k), list):
+            data[_k] = []
+    if not data.get("beats"):
+        raise RuntimeError("LLM 返回缺少 beats: " + str(data)[:200])
+    for _i, _b in enumerate(data["beats"]):
+        if isinstance(_b, dict):
+            _b.setdefault("i", _i)
+            _b.setdefault("seconds", 5)
+            _b.setdefault("line", "")
+            _b.setdefault("mood", "calm")
+    data.setdefault("title", "")
+    data.setdefault("logline", "")
+    if not data.get("total_duration_s"):
+        data["total_duration_s"] = sum(
+            float(_b.get("seconds") or 0) for _b in data["beats"] if isinstance(_b, dict)) or _dur
+    return data
+
+
 def _llm_json(url, key, model, messages, tries=3, user_id=""):
     """调 LLM 并取出 JSON 对象 → (json|None, 错误文案)
 

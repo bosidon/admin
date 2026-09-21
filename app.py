@@ -1439,16 +1439,51 @@ def api_gen_storyboard(plan_id):
         lines.append("\u3010" + sh.get("shot_type", "") + "\u3011" + sh.get("subtitle", ""))
     _reqs = result.get("asset_requirements") or []
     _prompts = result.get("asset_prompts") or []
-    db.execute('UPDATE video_plans SET storyboard=?, script=?, status="storyboard_done",'
-               "total_duration_s=?, asset_reqs=?, asset_prompts=?,"
-               "updated_at=datetime('now','localtime') WHERE id=?",
-               (json.dumps(shots, ensure_ascii=False), "\n".join(lines), total,
-                json.dumps(_reqs, ensure_ascii=False), json.dumps(_prompts, ensure_ascii=False),
-                plan_id))
+    # script 列归「剧本」管（/api/video-plans/<id>/script）；已是剧本 JSON 时不覆盖
+    _cur_script = (row["script"] or "") if "script" in row.keys() else ""
+    _cols, _vals = [], []
+    if not _cur_script.strip().startswith("{"):
+        _cols.append("script=?")
+        _vals.append("\n".join(lines))
+    _cols += ["storyboard=?", "status='storyboard_done'", "total_duration_s=?",
+              "asset_reqs=?", "asset_prompts=?", "updated_at=datetime('now','localtime')"]
+    _vals += [json.dumps(shots, ensure_ascii=False), total,
+              json.dumps(_reqs, ensure_ascii=False), json.dumps(_prompts, ensure_ascii=False)]
+    _vals.append(plan_id)
+    db.execute('UPDATE video_plans SET ' + ", ".join(_cols) + " WHERE id=?", _vals)
     db.commit(); db.close()
     return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total,
                     "asset_requirements": _reqs,
                     "asset_prompts": _prompts})
+
+@app.route('/api/video-plans/<int:plan_id>/script', methods=['POST'])
+def api_gen_script(plan_id):
+    """AI 生成剧本（characters/scenes/props/beats）→ 落库 video_plans.script + status=scripted"""
+    if not current_user():
+        return jsonify({"error": "未登录"}), 401
+    db = get_content_db()
+    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g:
+        return _g
+    art = db.execute("SELECT content_md FROM articles WHERE id=?", (row["article_id"],)).fetchone()
+    if not art or not (art["content_md"] or "").strip():
+        return jsonify({"error": "文案内容为空"}), 400
+    _dur = row["duration_target"] if "duration_target" in row.keys() else None
+    try:
+        from autogen import gen_script, get_llm_config
+        script = gen_script(art["content_md"], get_llm_config(), duration_target=_dur)
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500      # 失败不写库
+    _st = (row["status"] or "draft")
+    _new_st = _st if _st in ("scripted", "storyboard_done") else "scripted"   # status 只前进不倒退
+    db.execute("UPDATE video_plans SET script=?, status=?,"
+               "updated_at=datetime('now','localtime') WHERE id=?",
+               (json.dumps(script, ensure_ascii=False), _new_st, plan_id))
+    db.commit(); db.close()
+    return jsonify({"ok": True, "script": script})
 
 @app.route('/api/video-plans/<int:plan_id>', methods=['PUT'])
 def api_update_video_plan(plan_id):

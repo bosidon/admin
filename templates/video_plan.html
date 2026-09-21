@@ -21,18 +21,36 @@
         <div id="src-content" style="margin-top:10px;padding:14px;background:#f8fafc;border-radius:8px;font-size:13px;line-height:1.8;white-space:pre-wrap;max-height:300px;overflow:auto;"></div>
     </details>
 
-    <!-- ① 视频脚本 -->
-    <div style="margin-bottom:20px;">
+    <!-- 3 个独立 Tab：剧本 / 素材 / 分镜（只做显示/隐藏；现有块仅加 id+class，不复制不重写） -->
+    <style>
+      .plan-tabs{display:flex;gap:6px;border-bottom:2px solid #e2e8f0;margin-bottom:18px;}
+      .plan-tab{padding:8px 18px;border:none;background:transparent;font-size:14px;color:#64748b;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;font-family:inherit;}
+      .plan-tab.active{color:#6d28d9;font-weight:600;border-bottom-color:#6d28d9;}
+      .tab-pane{display:none;}
+      .tab-pane.active{display:block;}
+    </style>
+    <div class="plan-tabs">
+        <button class="plan-tab active" id="ptab-script" onclick="switchTab('script')">📝 剧本</button>
+        <button class="plan-tab" id="ptab-assets" onclick="switchTab('assets')">🎨 素材</button>
+        <button class="plan-tab" id="ptab-shots" onclick="switchTab('shots')">🎬 分镜</button>
+    </div>
+
+    <!-- Tab 剧本：① 视频脚本（保留 #script textarea 可手改 + 新增可读展示区 #script-view） -->
+    <div id="blk-script" class="tab-pane active" style="margin-bottom:20px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <label style="font-weight:600;font-size:14px;">① 视频脚本</label>
-            <button class="btn btn-primary btn-sm" onclick="genScript()">🤖 AI 生成脚本</button>
+            <label style="font-weight:600;font-size:14px;">① 剧本（人物 / 场景 / 道具 / 分节）</label>
+            <div>
+                <button class="btn btn-primary btn-sm" id="gen-script-btn" onclick="genScript()">🤖 AI 生成剧本</button>
+                <button class="btn btn-outline btn-sm" id="save-script-btn" onclick="saveScript()">💾 保存剧本</button>
+            </div>
         </div>
-        <textarea id="script" rows="10" placeholder="视频开场 → 内容主体 → 行动引导（可手写或 AI 生成）"
+        <div id="script-view" style="margin-bottom:10px;padding:14px;background:#f8fafc;border-radius:8px;font-size:13px;line-height:1.8;"></div>
+        <textarea id="script" rows="10" placeholder="剧本 JSON（可手改后点「💾 保存剧本」）"
             style="width:100%;padding:12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;line-height:1.7;font-family:inherit;resize:vertical;"></textarea>
     </div>
 
-    <!-- ①.5 素材包（角色一致性） -->
-    <div style="margin-bottom:20px;">
+    <!-- Tab 素材：①.5 素材包（角色一致性） -->
+    <div id="blk-rolepack" class="tab-pane" style="margin-bottom:20px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">①.5 素材包（人物 / 场景 / 道具，保证全片一致）</label>
             <button class="btn btn-outline btn-sm" onclick="saveRoleIds()">💾 保存素材包</button>
@@ -40,8 +58,8 @@
         <div id="role-pack"></div>
     </div>
 
-    <!-- ② 分镜表 -->
-    <div>
+    <!-- Tab 分镜：② 分镜表 -->
+    <div id="blk-shots" class="tab-pane">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">② 分镜表（画面 / 台词 / 时长）</label>
             <div>
@@ -64,8 +82,8 @@
         </table>
     </div>
 
-    <!-- ③ 素材需求（asset_requirements / asset_prompts） -->
-    <div style="margin-top:20px;">
+    <!-- Tab 素材：③ 素材需求（asset_requirements / asset_prompts） -->
+    <div id="blk-reqs" class="tab-pane" style="margin-top:20px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">③ 素材需求</label>
             <button class="btn btn-outline btn-sm" id="asset-gen-btn" disabled title="P1 上线" onclick="genAssets()">🤖 AI 生成</button>
@@ -88,6 +106,21 @@ let ROLE_IDS = [];
 let REQS = [];
 let PROMPTS = [];
 let PROMPT_FLAT = [];
+let SCRIPT_OBJ = null;
+
+// ==================== 3 个独立 Tab（剧本 / 素材 / 分镜；只切换显示，不动块内容） ====================
+const TAB_PANES = { script: ['blk-script'], assets: ['blk-rolepack', 'blk-reqs'], shots: ['blk-shots'] };
+function switchTab(name) {
+    Object.keys(TAB_PANES).forEach(function (k) {
+        const on = (k === name);
+        const btn = document.getElementById('ptab-' + k);
+        if (btn) { if (on) { btn.classList.add('active'); } else { btn.classList.remove('active'); } }
+        TAB_PANES[k].forEach(function (id) {
+            const el = document.getElementById(id);
+            if (el) { if (on) { el.classList.add('active'); } else { el.classList.remove('active'); } }
+        });
+    });
+}
 
 function renderScenes() {
     const tb = document.getElementById('sb-body');
@@ -264,6 +297,9 @@ async function load() {
     document.getElementById('plan-title').textContent = d.title || '未命名视频';
     document.getElementById('plan-status').textContent = d.status || 'draft';
     document.getElementById('script').value = d.script || '';
+    try { SCRIPT_OBJ = JSON.parse(d.script || ''); } catch(e) { SCRIPT_OBJ = null; }
+    if (!SCRIPT_OBJ || typeof SCRIPT_OBJ !== 'object' || Array.isArray(SCRIPT_OBJ)) { SCRIPT_OBJ = null; }
+    renderScript(SCRIPT_OBJ);
     try { SCENES = JSON.parse(d.storyboard || '[]'); } catch(e) { SCENES = []; }
     if (!Array.isArray(SCENES)) SCENES = [];
     try { ROLE_IDS = JSON.parse(d.role_ids || '[]'); } catch(e) { ROLE_IDS = []; }
@@ -275,6 +311,7 @@ async function load() {
     renderRolePack();
     renderReqs();
     renderScenes();
+    switchTab('script');                                 // 默认打开 Tab = 剧本
     // 加载原始文案
     const arts = await api('/api/articles');
     const art = (arts || []).find(a => a.id === d.article_id);
@@ -294,8 +331,86 @@ async function saveAll() {
     else { toast('❌ ' + (r.error||'保存失败'), 'error'); }
 }
 
+// 剧本 JSON -> 可读文本（人物/场景/道具/分节）
+function renderScript(obj) {
+    const box = document.getElementById('script-view');
+    if (!box) return;
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+        box.innerHTML = '<span style="color:#94a3b8;font-size:12px;">尚无剧本 —— 点「🤖 AI 生成剧本」生成，'
+            + '或直接在下方 JSON 里手写后点「💾 保存剧本」</span>';
+        return;
+    }
+    const esc = function (s) {
+        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    };
+    const listOf = function (arr, label) {
+        if (!Array.isArray(arr) || !arr.length) return '';
+        return '<div style="margin-top:8px;"><b>' + label + '（' + arr.length + '）</b>'
+            + arr.map(function (x) {
+                return '<div style="margin:4px 0 0 12px;">· <b>' + esc(x && x.name) + '</b>'
+                    + '<span style="color:#64748b;"> — ' + esc(x && x.desc) + '</span></div>';
+            }).join('') + '</div>';
+    };
+    let html = '<div style="font-size:15px;font-weight:700;">' + esc(obj.title || '（未命名剧本）') + '</div>';
+    if (obj.logline) { html += '<div style="color:#475569;margin-top:3px;">' + esc(obj.logline) + '</div>'; }
+    html += '<div style="color:#94a3b8;font-size:12px;margin-top:3px;">总时长 ' + esc(obj.total_duration_s || '—')
+        + ' 秒 · ' + ((Array.isArray(obj.beats) ? obj.beats : []).length) + ' 个分节</div>';
+    html += listOf(obj.characters, '人物');
+    html += listOf(obj.scenes, '场景');
+    html += listOf(obj.props, '道具');
+    const beats = Array.isArray(obj.beats) ? obj.beats : [];
+    if (beats.length) {
+        html += '<div style="margin-top:10px;"><b>分节（' + beats.length + '）</b>'
+            + '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;">'
+            + '<thead><tr style="background:#eef2ff;">'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;width:38px;">#</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;width:64px;">时长</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;width:72px;">情绪</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;">旁白/台词</th></tr></thead><tbody>'
+            + beats.map(function (b, i) {
+                return '<tr><td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + (i + 1) + '</td>'
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.seconds) + 's</td>'
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.mood) + '</td>'
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;">' + esc(b && b.line) + '</td></tr>';
+            }).join('') + '</tbody></table></div>';
+    }
+    box.innerHTML = html;
+}
+
 async function genScript() {
-    toast('AI 生成脚本：会把文案转为视频脚本（开发中，可先手动编辑）', 'info');
+    if (!PLAN) { toast('计划未加载', 'error'); return; }
+    const btn = document.getElementById('gen-script-btn');
+    if (btn) { btn.disabled = true; }
+    toast('🤖 AI 正在生成剧本...', 'info');
+    document.getElementById('plan-status').textContent = '生成中…';
+    let r = null;
+    try {
+        r = await api('/api/video-plans/' + PLAN_ID + '/script', { method: 'POST' });
+    } catch (e) { r = { error: String(e) }; }
+    if (btn) { btn.disabled = false; }
+    if (!r || !r.ok || !r.script) {
+        toast('❌ ' + ((r && r.error) || '生成失败'), 'error');
+        document.getElementById('plan-status').textContent = (PLAN.status || '');
+        return;
+    }
+    SCRIPT_OBJ = r.script;
+    document.getElementById('script').value = JSON.stringify(SCRIPT_OBJ, null, 2);
+    renderScript(SCRIPT_OBJ);
+    await load();                                        // 回读服务端，确认落库 + 状态同步
+    toast('✅ 剧本已生成并保存（' + ((SCRIPT_OBJ.beats || []).length) + ' 个分节）', 'success');
+}
+
+async function saveScript() {
+    const raw = (document.getElementById('script').value || '').trim();
+    let obj = null;
+    try { obj = JSON.parse(raw); }
+    catch (e) { toast('❌ 剧本 JSON 解析失败：' + e.message, 'error'); return; }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) { toast('❌ 剧本必须是 JSON 对象', 'error'); return; }
+    const r = await api('/api/video-plans/' + PLAN_ID, {
+        method: 'PUT', body: JSON.stringify({ script: raw })
+    });
+    if (r && r.ok) { SCRIPT_OBJ = obj; renderScript(obj); toast('✅ 剧本已保存', 'success'); }
+    else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
 }
 
 async function genStoryboard() {
@@ -315,7 +430,9 @@ async function genStoryboard() {
         shot_face: s.shot_face || '',
         music_hint: s.music_hint || '', template_hint: s.template_hint || 'U02'
     }));
-    document.getElementById('script').value = (r.overview || '') + '\n\n' + SCENES.map(s => '【' + (s.shot_type || '') + '】' + s.line).join('\n');
+    const _sbScriptText = (r.overview || '') + '\n\n' + SCENES.map(s => '【' + (s.shot_type || '') + '】' + s.line).join('\n');
+    // 已有剧本 JSON 时不覆盖剧本（剧本归 /script 接口 与「保存剧本」管）
+    if (!SCRIPT_OBJ) { document.getElementById('script').value = _sbScriptText; }
     document.getElementById('plan-status').textContent = 'storyboard_done';
     renderScenes();
     renderReqs();

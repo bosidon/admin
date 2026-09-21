@@ -97,7 +97,8 @@ def init():
                      ("want_cards", "INTEGER DEFAULT 0"), ("want_scenes", "INTEGER DEFAULT 0"),
                      ("started_at", "TEXT"), ("domain", "TEXT DEFAULT 'llm'"),
                      ("priority", "INTEGER DEFAULT 0"),
-                     ("host", "TEXT DEFAULT ''"), ("owner_id", "TEXT DEFAULT ''")):
+                     ("host", "TEXT DEFAULT ''"), ("owner_id", "TEXT DEFAULT ''"),
+                     ("ready_at", "TEXT")):          # 实例/ComfyUI 就绪时刻（精确用时起点）
         if col not in cols:
             c.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (col, ddl))
     c.commit()
@@ -106,6 +107,43 @@ def init():
 
 def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def set_ready(job_id):
+    """实例/ComfyUI 就绪、真正开始干活的时间 → 精确用时起点（开机等待不计入）"""
+    c = _conn()
+    try:
+        with _LOCK:
+            c.execute("UPDATE jobs SET ready_at=? WHERE id=? AND IFNULL(ready_at,'')=''",
+                      (_now(), job_id))
+            c.commit()
+    finally:
+        c.close()
+
+
+def gpu_active_count():
+    """GPU 域「排队 + 运行中」任务数（空闲关机判定用）"""
+    c = _conn()
+    try:
+        r = c.execute("SELECT COUNT(*) n FROM jobs WHERE domain='gpu' "
+                      "AND status IN ('queued','running')").fetchone()
+        return int((r["n"] if r else 0) or 0)
+    finally:
+        c.close()
+
+
+def last_gpu_activity():
+    """最后一次 GPU 任务结束时间（epoch 秒）；无记录返回 None"""
+    c = _conn()
+    try:
+        r = c.execute("SELECT MAX(COALESCE(finished_at, started_at, created_at)) t "
+                      "FROM jobs WHERE domain='gpu'").fetchone()
+        t = (r["t"] if r else "") or ""
+        return time.mktime(time.strptime(t, "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return None
+    finally:
+        c.close()
 
 
 def _row(r):
@@ -464,8 +502,9 @@ def stats_today(owner_id=None):
     return out
 
 
-# 用时统计口径：finished_at - started_at（含开机 + 等 ComfyUI 就绪的完整占用）
-_SEC = "((julianday(finished_at) - julianday(started_at)) * 86400)"
+# 用时统计口径：ready_at → finished_at —— **不含开机等待与等 ComfyUI 就绪的时间**；
+# 老数据没有 ready_at 时回退 started_at（口径同旧版）
+_SEC = "((julianday(finished_at) - julianday(COALESCE(NULLIF(ready_at,''), started_at, finished_at))) * 86400)"
 
 def _terminal_where(owner_id=None):
     w = ("status IN (%s) AND IFNULL(started_at,'')<>'' AND IFNULL(finished_at,'')<>''"

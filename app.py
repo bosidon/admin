@@ -384,13 +384,13 @@ def _denied_page():
 
 
 def _job_duration(j):
-    """耗时（秒）：started_at → finished_at（未完则算到现在）"""
+    """耗时（秒）：ready_at → finished_at —— 不含开机等待（老数据回退 started_at）"""
     def _p(s):
         try:
             return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
         except Exception:
             return None
-    a = _p(j.get("started_at") or "")
+    a = _p(j.get("ready_at") or "") or _p(j.get("started_at") or "")
     if not a:
         return 0
     b = _p(j.get("finished_at") or "") or datetime.now()
@@ -1707,7 +1707,7 @@ def api_jobs():
         j["article_title"] = titles.get(j.get("article_id"), "")
         j["can_cancel"] = _can_cancel(j, me_id, me_name)
         j["duration"] = _job_duration(j)
-    # 用时统计（已完成）：口径 finished-started，含开机等待；范围跟随当前可见范围，不受 limit 限制
+    # 用时统计（已完成）：口径 ready→finished，不含开机等待；范围跟随当前可见范围，不受 limit 限制
     if _adm:
         t_owner = owner_id if not aid else None
     else:

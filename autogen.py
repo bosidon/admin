@@ -49,6 +49,7 @@ DEFAULTS = {
     "comfy_denoise": "1.0",
     "comfy_lora": "",
     "comfy_auto_shutdown": "1",
+    "comfy_idle_shutdown_min": "5",   # 任务完成后空闲多少分钟自动关机（0 = 立即关）
     "comfy_instances": "",          # 实例池：每行一台 `uuid|备注`，顺序=优先级；为空则回落 comfy_instance_uuid
 }
 
@@ -781,7 +782,8 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300):
                 try:
                     jobstore.update(job_id, stage="booting", host=x["uuid"])
                     _ensure_instance(x["uuid"], job_id, log,
-                                     timeout=(boot_timeout if not left else min(120, boot_timeout)))
+                                     timeout=(boot_timeout if not left else min(120, boot_timeout)),
+                                     stock_tries=(10 if not left else 1))   # 还有候选 → 无库存立刻换台
                     return x["uuid"], lk
                 except Exception as e:
                     log("实例 %s 不可用（%s）%s" % (x["uuid"], str(e)[:70],
@@ -1876,8 +1878,13 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
 # ============================================================
 # 任务执行体（由 jobs.DISPATCHER 调度；状态/日志全部落 jobs 表）
 # ============================================================
-def _ensure_instance(instance_uuid, job_id, log, timeout=300):
-    """确保指定实例 running（已在运行则跳过），返回是否本次开机"""
+def _ensure_instance(instance_uuid, job_id, log, timeout=300, stock_tries=1):
+    """确保指定实例 running（已在运行则跳过），返回是否本次开机
+
+    stock_tries：「无库存 / 稍等」这类可重试拒绝的最多尝试次数。
+    池里还有别的机器时调用方传 1 → 一次被拒立刻抛错，让调用方换下一台
+    （避免在一台没货的机器上白等 2 分钟）；最后一台才慢慢重试到超时。
+    """
     st = adl_status(instance_uuid).get("data") or ""
     if st == "running":
         log("实例已在运行，跳过开机")
@@ -1885,7 +1892,8 @@ def _ensure_instance(instance_uuid, job_id, log, timeout=300):
     log("启动实例…（当前状态 %s）" % (st or "未知"))
     # ⚠️ 开机常被「当前算力规格暂无库存，请修改配置或稍等再试」拒绝 → 每 30s 重试，最长 5 分钟
     # （实测重试即可抢到；不是配置错误，所以只有这类文案才重试，其它错误立刻失败）
-    res, t0 = {}, time.time()
+    res, t0, tries = {}, time.time(), 0
+    _max_tries = max(1, int(stock_tries))
     while time.time() - t0 < timeout:
         if jobstore.canceled(job_id):
             raise RuntimeError("已取消")
@@ -1894,7 +1902,10 @@ def _ensure_instance(instance_uuid, job_id, log, timeout=300):
             break
         msg = str(res.get("msg") or res.get("code") or "")
         if ("库存" in msg) or ("稍等" in msg):
-            log("开机被拒：%s —— 30s 后重试" % msg)
+            tries += 1
+            if tries >= _max_tries:
+                raise RuntimeError("开机失败：%s" % msg)      # 立刻上报 → 调用方换下一台
+            log("开机被拒：%s —— 30s 后重试（第 %d/%d 次）" % (msg, tries + 1, _max_tries))
             time.sleep(30)
             continue
         raise RuntimeError("开机失败：%s" % msg)
@@ -1911,27 +1922,72 @@ def _ensure_instance(instance_uuid, job_id, log, timeout=300):
     raise RuntimeError("等待实例 running 超时")
 
 
-def _shutdown_if_idle(job_id, instance_uuid, log):
-    """收尾：还有排队任务（可能要用这台）就保持运行，否则关掉本次用的这台实例"""
+def _idle_limit_min():
+    """空闲关机分钟数（0 = 立即关；设置缺失默认 5）"""
     try:
-        if get_comfy_config().get("comfy_auto_shutdown", "1") != "1":
-            log("自动关机已关闭，实例保持运行")
-            return
-        gpu_kinds = ("images", "cutout", "edit", "stitch", "txt2img")   # 漏一个就会把还有任务的实例关掉
-        pending = sum(jobstore.queued_count(k) for k in gpu_kinds)
-        if pending > 0:
-            log("还有 %d 个排队任务，实例 %s 保持运行" % (pending, instance_uuid))
-            return
-        log("队列已空，关闭实例 %s…" % instance_uuid)
-        r = adl_power_off(instance_uuid)
-        code = str(r.get("code") or r)
-        msg = str(r.get("msg") or "")
-        if code == "Success" or "BadRequest" in code:      # 本来就没开机 → 也算完成（幂等）
-            log("关机完成")
-        else:
-            log("关机结果：" + (code + " " + msg)[:100])
+        v = int(float(get_comfy_config().get("comfy_idle_shutdown_min") or 5))
+    except Exception:
+        v = 5
+    return max(0, v)
+
+
+def idle_shutdown_check(log=None, force=False):
+    """空闲关机：队列空 且 距最后一次 GPU 任务结束已超过设定空闲分钟 → 关掉池内运行中的实例
+
+    force=True 忽略空闲时长（测试/手动用）。返回 (是否有关机动作, 说明)。
+    修掉的旧漏洞：原实现只在「任务收尾那一刻」判断，若此后没有新任务就永远不关。
+    """
+    log = log or (lambda m: None)
+    try:
+        if str(get_comfy_config().get("comfy_auto_shutdown", "1")) != "1":
+            return False, "自动关机已关闭"
+        if jobstore.gpu_active_count() > 0:
+            return False, "还有 GPU 任务（排队/运行中）"
+        idle_min = 0 if force else _idle_limit_min()
+        last = jobstore.last_gpu_activity()
+        idle_s = int(time.time() - last) if last else 0
+        if not force and last and idle_s < idle_min * 60:
+            return False, "空闲仅 %ds（< %d 分钟）" % (idle_s, idle_min)
+        results = []
+        for x in instance_pool():
+            u = x["uuid"]
+            try:
+                if (adl_status(u).get("data") or "") != "running":
+                    continue
+                r = adl_power_off(u)
+                results.append("%s:%s" % (u, str(r.get("code") or r)[:40]))
+            except Exception as e:
+                results.append("%s:异常(%s)" % (u, str(e)[:40]))
+        if results:
+            log("空闲 %d 分钟，自动关机 → %s" % (idle_min, "；".join(results)))
+            return True, "已关机：" + "；".join(results)
+        return False, "无需关机（池内实例均未运行）"
     except Exception as e:
-        log("关机异常：" + str(e)[:200])
+        return False, "检查异常：" + str(e)[:120]
+
+
+def start_idle_watchdog(interval=60):
+    """后台看门狗：每 interval 秒检查一次空闲关机（守护线程，随进程退出）"""
+    def _loop():
+        while True:
+            try:
+                idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
+            except Exception:
+                pass
+            time.sleep(interval)
+    t = threading.Thread(target=_loop, daemon=True, name="idle-shutdown")
+    t.start()
+    return t
+
+
+def _shutdown_if_idle(job_id, instance_uuid, log):
+    """任务收尾：交给统一的空闲判定（0 分钟 = 立即关；>0 则由看门狗到点关）"""
+    _m = _idle_limit_min()
+    log("任务结束，检查空闲关机（空闲 %d 分钟）…" % _m)
+    _ok, _why = idle_shutdown_check(log=log)
+    if not _ok:
+        log("本次未关机：%s" % _why)
+
 
 
 def run_plan_job(job):
@@ -2028,6 +2084,7 @@ def run_images_job(job):
             _log(jid, "ComfyUI 地址：" + base)
             if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
                 raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)          # 精确用时起点：开机等待不计入
             _log(jid, "ComfyUI 已就绪")
             _set(jid, stage="generating")
 
@@ -2125,6 +2182,7 @@ def run_material_job(job):
             _log(jid, "ComfyUI 地址：" + base)
             if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
                 raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)          # 精确用时起点：开机等待不计入
             _set(jid, stage="generating")
             aid = (rows[0].get("article_id") if rows else None) or 0
             outdir = mat.out_dir(aid)
@@ -2210,6 +2268,7 @@ def run_txt2img_job(job):
             _log(jid, "ComfyUI 地址：" + base)
             if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
                 raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)          # 精确用时起点：开机等待不计入
             _set(jid, stage="generating")
             p = _with_style(_clean_aspect_words(text), style)      # 补画风英文词 + 去掉提词里的比例字样
             _log(jid, "画面生成中（%s → %dx%d）…" % (aspect, w, h))
@@ -2242,3 +2301,4 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
+    start_idle_watchdog()               # 空闲关机看门狗（每 60s 检查一次）

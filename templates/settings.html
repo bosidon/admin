@@ -111,7 +111,10 @@
 
     <div class="form-group">
         <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-            <input type="checkbox" id="comfy-auto-shutdown" style="width:auto;"> 任务结束后自动关机（省钱）
+            <input type="checkbox" id="comfy-auto-shutdown" style="width:auto;"> 任务结束后空闲
+            <input type="number" id="comfy-idle-min" min="0" step="1" value="5"
+                style="width:64px;padding:3px 6px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+            分钟自动关机（省钱；0 = 任务一完成就关）
         </label>
     </div>
 
@@ -209,7 +212,8 @@ async function saveComfy(msg) {
         comfy_sampler: document.getElementById('comfy-sampler').value.trim(),
         comfy_scheduler: document.getElementById('comfy-scheduler').value.trim(),
         comfy_denoise: document.getElementById('comfy-denoise').value.trim(),
-        comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0'
+        comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0',
+        comfy_idle_shutdown_min: String(Math.max(0, parseInt(document.getElementById('comfy-idle-min').value || '0', 10) || 0))
     };
     await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
     toast(msg || '生图配置已保存');
@@ -352,6 +356,7 @@ async function loadSettings() {
     document.getElementById('comfy-scheduler').value = settings['comfy_scheduler'] || 'simple';
     document.getElementById('comfy-denoise').value = settings['comfy_denoise'] || '1.0';
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
+    document.getElementById('comfy-idle-min').value = settings['comfy_idle_shutdown_min'] || '5';
     try {
         const mc = await api('/api/models/groups');
         MODEL_GROUPS = (mc && mc.groups) || [];

@@ -794,6 +794,91 @@ def api_line_topics():
 
 CTYPE_LABEL = {'article': '图文文章', 'short_video': '短视频脚本',
                'long_video': '长视频脚本', 'speech': '口播稿'}
+_PLAT_NOTE = {
+    'wechat': '公众号长文：可保留原体系术语，读者愿意读长文；段落短、需要小标题节奏；不要出现任何链接',
+    'xiaohongshu': '小红书笔记：短句分段、多用 emoji、不要 Markdown 标题层级；**不要出现体系术语与灵性/医疗敏感词**，改写成读者能感知的体感（孤独、格格不入、疲惫、渴望）',
+    'video_account': '视频号：口语化、可直接念出来；不要体系术语与敏感词',
+    'douyin': '抖音：前 3 秒必须有钩子；口语化短句；不要体系术语与敏感词',
+    'bilibili': 'B站：可以讲深，但体系术语出现时要即时解释；避开医疗与绝对化用语',
+    'kuaishou': '快手：贴近生活场景、口语化；不要体系术语与敏感词',
+    'zhihu': '知乎：理性、有论据，说明概念来源；不用绝对化用语',
+    'toutiao': '头条：开头先给结论；尽量规避敏感词',
+    'podcast': '播客：口播友好、有停顿节奏；不要体系术语',
+    'moments': '朋友圈：短、克制、不要说教、不要链接',
+}
+_STRICT_PLAT = ('xiaohongshu', 'douyin', 'video_account', 'kuaishou', 'moments', 'toutiao')
+
+
+
+def _guess_title(raw):
+    """从原始输出里猜标题（兜底用）"""
+    m = re.search(r'"title"\s*:\s*"([^"]{2,60})"', str(raw or ""))
+    if m:
+        return m.group(1)
+    first = (str(raw or "").strip().split("\n") or [""])[0]
+    return first[:40].strip('# *「」"')
+
+
+def _strip_json_shell(raw):
+    """兜底正文：去掉 JSON 外壳与代码块标记，尽量留下可读正文"""
+    t = str(raw or "").strip()
+    t = re.sub(r'^```[a-z]*|```$', '', t, flags=re.M).strip()
+    m = re.search(r'"content"\s*:\s*"([\s\S]*?)"\s*(?:,\s*"|\})', t)
+    if m:
+        return m.group(1).replace('\\n', '\n').replace('\\"', '"').strip()
+    return t
+
+def platform_note(line_id, platform, risk=None):
+    """平台与合规要求（喂给提词 {{平台规范}}）"""
+    note = _PLAT_NOTE.get(platform) or _PLAT_NOTE['wechat']
+    groups = ['医疗健康', '绝对化用语', '平台违禁']
+    if platform in _STRICT_PLAT:
+        groups = ['体系术语', '灵性体系'] + groups
+    try:
+        w = contentlines.sensitive_words()
+    except Exception:
+        w = {}
+    words = []
+    for g in groups:
+        for x in w.get(g, []):
+            if x not in words:
+                words.append(x)
+    if words:
+        note += '。**必须规避的词**：' + '、'.join(words[:40])
+    if risk:
+        note += '。本条选题素材里已出现：%s —— 请用体感表述替代，不要照抄这些词' % '、'.join(risk)
+    return note
+
+
+def _risk_words(line_id, material, topic_obj, platform=None):
+    """扫描文本命中的敏感词（灵性/医疗/绝对化三组），用于提词提醒与生成后告警"""
+    try:
+        w = contentlines.sensitive_words()
+    except Exception:
+        return []
+    blob = str(material or '') + ' ' + str(topic_obj or '')
+    hit = []
+    for g in ('灵性体系', '医疗健康', '绝对化用语'):
+        for x in w.get(g, []):
+            if x in blob and x not in hit:
+                hit.append(x)
+    return hit[:6]
+
+
+def scan_content(content):
+    """生成后扫描成稿：命中词 → 返回告警列表（不自动改稿）"""
+    try:
+        w = contentlines.sensitive_words()
+    except Exception:
+        return []
+    out = []
+    for g in ('灵性体系', '医疗健康', '绝对化用语', '平台违禁'):
+        for x in w.get(g, []):
+            if x in str(content or ''):
+                out.append('%s（%s）' % (x, g))
+    return out[:8]
+
+
 PLAT_LABEL = {'wechat': '公众号', 'xiaohongshu': '小红书', 'video_account': '视频号',
               'douyin': '抖音', 'bilibili': 'B站', 'kuaishou': '快手',
               'podcast': '播客', 'zhihu': '知乎', 'toutiao': '头条', 'moments': '朋友圈'}
@@ -975,6 +1060,7 @@ def api_generate_article():
         '选题': topic_show, '语气': tone or '温暖、真诚、有洞察',
         '角度': angle, '结构': structure, '钩子': hook, '输出格式': fmt,
         '素材': material[:4500],
+        '平台规范': platform_note(line, platform, _risk_words(line, material, topic_obj)),
         '书目': book, '话题': topic, '选题类型': kind_name, '选题对象': topic_obj,
     }
     _sys, _usr = article_prompts.render_split(line, vars_)
@@ -999,10 +1085,23 @@ def api_generate_article():
         # 尝试解析JSON
         import re
         json_match = re.search(r'\{[\s\S]*\}', raw)
+        article_data, _parse_fallback = None, False
         if json_match:
-            article_data = json.loads(json_match.group())
-        else:
-            article_data = {'title': '未命名', 'content': raw, 'summary': '', 'tags': ''}
+            try:
+                article_data = json.loads(json_match.group())
+            except Exception:
+                # LLM 偶发非法 JSON（多余引号/换行）→ 尝试宽松修复后再解析
+                frag = json_match.group().replace('\n', '\\n').replace('\r', '')
+                frag = re.sub(r'(?<![\\])"(?=[^",:{}]*[\u4e00-\u9fa5])', '\u201c', frag, count=0)
+                try:
+                    article_data = json.loads(frag)
+                except Exception:
+                    article_data, _parse_fallback = None, True
+        if not article_data:
+            # 兜底：正文用原文，能拿到标题更好；不因解析失败整条失败
+            article_data = {'title': _guess_title(raw) or '未命名', 'content': _strip_json_shell(raw),
+                            'summary': '', 'tags': ''}
+            _parse_fallback = True
 
         content_md = article_data.get('content', raw)
         # 推广链接在入库拿到「文案编号」后再拼（src = 文案编号），见下方两步写入
@@ -1038,6 +1137,11 @@ def api_generate_article():
         promo_link = contentlines.promo_link(line, promo_uid, promo_src)
         if promo_link:
             guide_line = '\n\n---\n\n' + contentlines.guide(line) + '\n👉 ' + promo_link
+            if line == 'lingxiu' and book:            # ⑪ 引流深链：指向阅读站该书深读页
+                _bid = contentlines.lingxiu_book_id(book)
+                if _bid:
+                    guide_line += '\n📖 想看《%s》的深度解读 → https://read.xianbao.love/books/%d/aideep-v2' % (
+                        str(book).strip('《》'), _bid)
             if promo_link not in content_md:
                 content_md = content_md.rstrip() + guide_line
                 word_count = len(content_md.replace(' ', '').replace('\n', ''))
@@ -1050,6 +1154,8 @@ def api_generate_article():
             "id": cursor.lastrowid,
             "title": article_data.get('title', '未命名'),
             "word_count": word_count,
+            "warnings": scan_content(content_md),     # ⑩ 生成后敏感词告警（不自动改稿）
+            "parse_fallback": _parse_fallback,        # LLM 输出非法 JSON 时走了兜底
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

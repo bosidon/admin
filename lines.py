@@ -21,6 +21,15 @@ TAROT_CARDS = Path("/var/www/tarot/backend/cards.json")
 TAROT_SPREADS = Path("/var/www/tarot/shared/spreads.json")
 PSYCH_DB = Path("/var/www/psych-test/data/psychological_assessment.db")
 LINGXIU_DB = Path("/var/www/lingxiu/data/xianbao.db")     # 阅读站（灵修）内容库
+_SENSITIVE_FILE = Path(__file__).resolve().parent / "configs" / "sensitive_words.json"
+_SENSITIVE_DEFAULT = {
+    "体系术语": ["密度", "极性", "收割", "八度", "心身灵", "社会记忆复合体", "理则"],
+    "灵性体系": ["通灵", "转世", "前世", "投胎", "灵界", "高维", "扬升", "星际", "外星", "金字塔",
+                 "预言", "玄学", "超自然", "算命", "改运", "开光", "加持", "附体", "业力"],
+    "医疗健康": ["治疗", "治愈", "疗效", "药用", "诊断", "抑郁症", "焦虑症", "心理疾病", "包治", "根治"],
+    "绝对化用语": ["最灵", "最准", "一定", "保证", "必然", "必定", "绝对", "100%"],
+    "平台违禁": ["加微信", "私信我", "扫码", "免费领取", "独家首发"],
+}
 KIN_CYCLE = 260
 
 # 业务线定义：home = 引流落点（子网站首页），guide = 文末引导语
@@ -118,25 +127,147 @@ def _lingxiu_books():
     return out
 
 
+def _sensitive_words():
+    """平台敏感词分组（configs/sensitive_words.json，缺失则用内置兜底）"""
+    try:
+        d = json.loads(_SENSITIVE_FILE.read_text(encoding="utf-8"))
+        return {k: v for k, v in d.items() if not k.startswith("_") and isinstance(v, list)}
+    except Exception:
+        return _SENSITIVE_DEFAULT
+
+
+_EMO_WORDS = ("自我", "关系", "情绪", "孤独", "恐惧", "选择", "成长", "疗愈", "练习", "当下",
+              "困惑", "爱", "痛", "生活", "内耗", "焦虑", "价值", "边界", "原生", "自责")
+_SYS_WORDS = ("历史", "星际", "文明", "起源", "演化", "八度", "密度", "联邦", "金字塔", "战争",
+              "宇宙", "哲学", "法则", "机制", "维度", "体系", "编年", "理论")
+
+
 def _lingxiu_topics():
-    """全部话题（ai_deep_themes，1574 条）→ 话题下拉条目（带 book_name 供书目联动）"""
+    """全部话题（1,574 条，含分类已删的孤儿）→ 选题条目 + 自媒体打标
+
+    关联口径与阅读站一致：按 t.book_id（而不是绕分类表），这样分类被删的
+    36 条话题也能被选中（内容仍在，只是阅读站上点不到）。
+    """
     if not LINGXIU_DB.exists():
         return []
     try:
         c = _lingxiu_conn()
         rows = c.execute(
-            "SELECT t.title, t.summary, c.name AS cat, b.title AS book_title "
-            "FROM ai_deep_themes t "
-            "JOIN ai_deep_categories c ON c.id = t.category_id "
-            "JOIN books b ON b.id = c.book_id "
-            "WHERE b.status='published' "
+            "SELECT t.title, t.summary, t.overview, t.key_concepts, t.core_content, "
+            "t.related_passages, t.practical_application, b.title AS book_title, "
+            "c.name AS cat FROM ai_deep_themes t "
+            "JOIN books b ON b.id = t.book_id "
+            "LEFT JOIN ai_deep_categories c ON c.id = t.category_id "
+            "WHERE b.status = 'published' AND t.status = 'completed' "
             "ORDER BY b.sort_order, b.id, c.name, t.title").fetchall()
         c.close()
     except Exception:
         return []
-    return [{"id": r["title"], "name": r["title"],
-             "preview": _pv(_clean_summary(r["summary"]), 60),
-             "book_name": r["book_title"], "category": r["cat"]} for r in rows]
+    out = []
+    for r in rows:
+        blob = " ".join([str(r["title"] or ""), str(r["summary"] or ""), str(r["overview"] or "")])
+        mat_len = sum(len(str(r[k] or "")) for k in ("summary", "overview", "key_concepts",
+                                                    "core_content", "related_passages", "practical_application"))
+        risk = _lingxiu_risk(blob)
+        out.append({
+            "id": r["title"], "name": r["title"], "preview": _pv(_clean_summary(r["summary"]), 60),
+            "book_name": r["book_title"] or "", "category": r["cat"] or "",
+            "mat_len": mat_len, "seg": _lingxiu_seg(blob), "risk": risk,
+            "plat": "公众号优先" if risk else "全平台",
+        })
+    return out
+
+
+def _lingxiu_seg(blob):
+    """选题画像：情绪向 / 体系向 / 混合（按关键词粗分，仅供选题参考）"""
+    e = sum(1 for k in _EMO_WORDS if k in blob)
+    s = sum(1 for k in _SYS_WORDS if k in blob)
+    if e and not s:
+        return "情绪向"
+    if s and not e:
+        return "体系向"
+    if e and s:
+        return "混合"
+    return ""
+
+
+def _lingxiu_risk(blob):
+    """命中的平台敏感词（灵性体系 / 医疗健康 / 绝对化用语 三组，最多 4 个）"""
+    w = _sensitive_words()
+    hit = []
+    for g in ("灵性体系", "医疗健康", "绝对化用语"):
+        for x in w.get(g, []):
+            if x in blob and x not in hit:
+                hit.append(x)
+    return hit[:4]
+
+
+def lingxiu_book_id(book):
+    """书名 → 阅读站 book_id（只读，用于引流深链）"""
+    if not LINGXIU_DB.exists():
+        return None
+    name = str(book or "").strip().strip("《》").split(" · ")[0].strip()
+    if not name:
+        return None
+    try:
+        c = _lingxiu_conn()
+        r = c.execute("SELECT id FROM books WHERE title=? AND status='published'", (name,)).fetchone()
+        c.close()
+        return r["id"] if r else None
+    except Exception:
+        return None
+
+
+def _chapter_hint(book_title, topic_title, budget):
+    """话题素材偏薄时，从同书章节摘要里挑最相关的补充（关键词重叠打分）"""
+    if budget <= 300 or not LINGXIU_DB.exists():
+        return ""
+    try:
+        c = _lingxiu_conn()
+        rows = c.execute(
+            "SELECT ch.title AS ctitle, s.summary AS csum FROM chapters ch "
+            "JOIN books b ON b.id = ch.book_id "
+            "JOIN chapter_summaries s ON s.chapter_id = ch.id "
+            "WHERE b.title = ? AND length(coalesce(s.summary,'')) > 200 "
+            "ORDER BY ch.sort_order, ch.id LIMIT 80", (book_title,)).fetchall()
+        c.close()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+
+    def grams(t, n=2):
+        t = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", str(t or ""))
+        return {t[i:i + n] for i in range(max(len(t) - n + 1, 0))}
+
+    key = grams(topic_title)
+    scored = []
+    for r in rows:
+        s_ = grams(r["ctitle"] + _clean_summary(r["csum"])[:600])
+        if not s_:
+            continue
+        overlap = len(key & s_) / max(len(key), 1)
+        scored.append((overlap, r["ctitle"], _clean_summary(r["csum"])))
+    scored.sort(key=lambda x: -x[0])
+    out, used = [], 0
+    for ov, ctitle, csum in scored[:2]:
+        if ov <= 0.05:
+            break
+        seg = "《%s》：%s" % (ctitle, csum[:max(budget - used - 40, 0)])
+        if len(seg) < 120:
+            break
+        out.append("- " + seg)
+        used += len(seg)
+        if used >= budget:
+            break
+    if not out:
+        return ""
+    return "相关章节摘要（补充背景，可与话题内容互相印证）：\n" + "\n".join(out)
+
+
+def sensitive_words():
+    """对外暴露敏感词分组（app.py 用）"""
+    return _sensitive_words()
 
 
 def _clean_summary(t):
@@ -149,11 +280,21 @@ def _clean_summary(t):
     return " ".join(t.split())
 
 
-def _lingxiu_material(kind, obj, book=None):
-    """灵性线素材：话题自带内容（摘要/概述/关键概念/核心内容）或书级素材
+def _html_text(h):
+    """HTML 转纯文本（兜底用）"""
+    t = re.sub(r"<(script|style)[^>]*>[\s\S]*?</\1>", " ", str(h or ""), flags=re.I)
+    t = re.sub(r"<br\s*/?>|</p>|</div>|</li>", "\n", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = t.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
 
-    话题是阅读站原生资产（1574 条，summary 覆盖 100%、core_content 99.7%），
-    比章节摘要更适合当引流文案的唯一事实来源。
+
+def _lingxiu_material(kind, obj, book=None):
+    """灵性线素材（唯一事实来源）
+
+    话题粒度：概述 + 摘要 + 关键概念 + **原文引用(related_passages)** + 核心内容 + **实践应用(practical_application)**
+    书粒度：书简介 + 该书话题的摘要清单
+    总量控制在 ~4,400 字以内（调用方另有 4,500 上限）。
     """
     if not LINGXIU_DB.exists():
         return ""
@@ -161,19 +302,20 @@ def _lingxiu_material(kind, obj, book=None):
     book_title = str(book or "").strip().strip("《》").split(" · ")[0].strip()
     try:
         c = _lingxiu_conn()
-        if obj:                                   # —— 话题粒度 ——
+        if obj:                                     # —— 话题粒度 ——
             row = c.execute(
                 "SELECT t.title, t.summary, t.overview, t.key_concepts, t.core_content, "
+                "t.related_passages, t.practical_application, t.content_html, "
                 "c.name AS cat, b.title AS bt FROM ai_deep_themes t "
-                "JOIN ai_deep_categories c ON c.id = t.category_id "
-                "JOIN books b ON b.id = c.book_id "
+                "JOIN books b ON b.id = t.book_id "
+                "LEFT JOIN ai_deep_categories c ON c.id = t.category_id "
                 "WHERE t.title = ? AND (? = '' OR b.title = ?) LIMIT 1",
                 (obj, book_title, book_title)).fetchone()
             if not row:
                 c.close()
                 return ""
             c.close()
-            parts = ["书目：《%s》　分类：%s" % (row["bt"], row["cat"] or "—"),
+            parts = ["书目：《%s》　分类：%s" % (row["bt"], row["cat"] or "（未归类）"),
                      "话题：%s" % row["title"]]
             if row["overview"]:
                 parts.append("概述：\n" + str(row["overview"]).strip())
@@ -182,10 +324,21 @@ def _lingxiu_material(kind, obj, book=None):
             kc = str(row["key_concepts"] or "").strip()
             if kc:
                 parts.append("关键概念：\n" + kc.replace("|", "\n- ").replace(",", "、"))
-            core = str(row["core_content"] or "").strip()
+            rp = str(row["related_passages"] or "").strip()
+            if rp:
+                parts.append("原文引用（可直接引用，注明出处）：\n" + rp[:1300])
+            core = str(row["core_content"] or "").strip() or _html_text(row["content_html"])
             if core:
-                parts.append("核心内容：\n" + core[:2200])
-            return "\n\n".join(parts)
+                parts.append("核心内容：\n" + core[:1400])
+            pa = str(row["practical_application"] or "").strip()
+            if pa:
+                parts.append("实践应用（可写成练习/行动建议）：\n" + pa[:1100])
+            txt = "\n\n".join(parts)
+            if len(txt) < 1500:                      # 素材偏薄 → 用同书章节摘要补厚
+                extra = _chapter_hint(row["bt"], row["title"], 4200 - len(txt))
+                if extra:
+                    txt += "\n\n" + extra
+            return txt
 
         # —— 只选了书目（没选话题）→ 书级素材 ——
         b_ = c.execute("SELECT id, title, subtitle, author, category_id, description FROM books "
@@ -196,8 +349,8 @@ def _lingxiu_material(kind, obj, book=None):
         cat = c.execute("SELECT name FROM categories WHERE id=?", (b_["category_id"],)).fetchone()
         tps = c.execute(
             "SELECT t.title, t.summary FROM ai_deep_themes t "
-            "JOIN ai_deep_categories c ON c.id = t.category_id "
-            "WHERE c.book_id = ? ORDER BY c.name, t.title LIMIT 14", (b_["id"],)).fetchall()
+            "WHERE t.book_id = ? AND t.status='completed' ORDER BY t.category_id, t.title LIMIT 16",
+            (b_["id"],)).fetchall()
         c.close()
         parts = ["书目：《%s》%s" % (b_["title"], ("｜" + b_["subtitle"]) if b_["subtitle"] else ""),
                  "作者：%s　分类：%s" % (b_["author"] or "—", cat["name"] if cat else "—"),

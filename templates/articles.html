@@ -305,7 +305,7 @@ function filterLingxiuTopics() {
     const b = braw ? braw.replace(/^《/, '').replace(/》$/, '') : '';   // 书名去《》再比
     const list = b ? TOPICS.filter(t => t.book_name === b) : TOPICS.slice(0, 60);
     sel.innerHTML = list.map(o => '<option value="' + String(o.id).replace(/"/g, '&quot;') + '">'
-        + (b ? o.name : '《' + (o.book_name || '') + '》 ' + o.name) + '</option>').join('');
+        + (b ? o.name : '《' + (o.book_name || '') + '》 ' + o.name) + tagOf(o) + '</option>').join('');
     sel.onchange = showPreview;
     const pick = list.find(o => !USED.has(o.id)) || list[0];
     if (pick) sel.value = String(pick.id);
@@ -321,11 +321,29 @@ function randTopic() {
     showPreview();
 }
 
+function tagOf(o) {                    // 选题打标：画像 / 素材字数 / 敏感词 / 建议平台
+    const bits = [];
+    if (o.seg) bits.push(o.seg);
+    if (o.mat_len) bits.push('素材' + o.mat_len + '字');
+    if (o.risk && o.risk.length) bits.push('⚠' + o.risk.join('/'));
+    else if (o.plat) bits.push(o.plat);
+    return bits.length ? ' ｜ ' + bits.join(' · ') : '';
+}
+
 function showPreview() {
     const el = document.getElementById('topic-preview');
     if (!el) return;
     const cur = TOPICS.find(o => String(o.id) === v('gen-topic_obj'));
-    el.textContent = cur ? (cur.preview || '') : '';
+    if (!cur) { el.innerHTML = ''; return; }
+    const bits = [];
+    if (cur.book_name) bits.push('《' + cur.book_name + '》');
+    if (cur.seg) bits.push('画像：' + cur.seg);
+    if (cur.mat_len) bits.push('素材 ' + cur.mat_len + ' 字');
+    if (cur.plat) bits.push('建议平台：' + cur.plat);
+    if (cur.risk && cur.risk.length) bits.push('⚠ 敏感词：' + cur.risk.join('、'));
+    const prev = (cur.preview || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    el.innerHTML = (prev ? '<div style="margin-bottom:4px;">' + prev + '</div>' : '')
+        + (bits.length ? '<div style="color:#7c3aed;">' + bits.join(' ｜ ') + '</div>' : '');
 }
 
 function showDraft(a) {
@@ -365,6 +383,10 @@ async function doGenerate() {
         if (r && r.ok) {
             st.textContent = '';
             showToast('✅ 生成成功：' + r.title, 'success');
+            if (r.warnings && r.warnings.length) {
+                st.innerHTML = '<span style="color:#b45309;">⚠ 敏感词提醒：' + r.warnings.join('、')
+                    + '</span>（发布前请替换为体感表述）';
+            }
             const a = await api('/api/articles/' + r.id);
             showDraft(a);
             USED.add(params.topic_obj || '');

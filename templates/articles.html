@@ -37,25 +37,26 @@
     </div>
 </div>
 
-<!-- 导入 -->
-<div class="card" id="imp-card" style="display:none;">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-        <b style="font-size:15px;">📥 导入文案</b>
+<!-- 导入（弹出窗体） -->
+<div id="imp-modal" onclick="if(event.target===this)closeImport()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999;padding:20px;overflow:auto;">
+  <div class="card" style="max-width:860px;margin:32px auto;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
+        <b style="font-size:16px;">📥 导入文案</b>
         <button class="btn btn-sm btn-primary" id="imp-tab-paste" onclick="setImpMode('paste')">粘贴文本</button>
         <button class="btn btn-sm btn-outline" id="imp-tab-file" onclick="setImpMode('file')">上传文件</button>
-        <button class="btn btn-sm btn-outline" style="margin-left:auto;" onclick="closeImport()">关闭</button>
+        <span id="imp-line-hint" style="font-size:12px;color:#94a3b8;"></span>
+        <button class="btn btn-sm btn-outline" style="margin-left:auto;" onclick="closeImport()">✕ 关闭</button>
     </div>
     <div id="imp-paste">
-        <textarea id="imp-text" rows="10" placeholder="把正文粘贴到这里（Markdown / 纯文本）。多篇用单独一行 --- 分隔，或每篇以 # 标题 开头。"
+        <textarea id="imp-text" rows="12" placeholder="把正文粘贴到这里（Markdown / 纯文本）。一篇 = 一条文案。"
             style="width:100%;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:14px;line-height:1.7;font-family:inherit;resize:vertical;"></textarea>
     </div>
     <div id="imp-file" style="display:none;">
         <input type="file" id="imp-files" multiple accept=".md,.markdown,.txt" onchange="parseImpFiles()"
-            style="font-size:13px;padding:10px;border:1px dashed var(--border);border-radius:8px;width:100%;">
-        <div style="font-size:12px;color:#94a3b8;margin-top:6px;">支持 .md / .txt，可多选；每篇按单独一行 <code>---</code> 或 <code># 标题</code> 自动切分</div>
+            style="font-size:13px;padding:12px;border:1px dashed var(--border);border-radius:8px;width:100%;">
+        <div style="font-size:12px;color:#94a3b8;margin-top:6px;">支持 .md / .txt；可多选 —— <b>每个文件 = 一条文案</b>（不做拆分）</div>
     </div>
-    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;">
-        <select id="imp-line" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;"></select>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;">
         <select id="imp-platform" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;"></select>
         <select id="imp-type" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;"></select>
         <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
@@ -67,6 +68,7 @@
         <span id="imp-status" style="font-size:12px;color:#7c3aed;"></span>
     </div>
     <div id="imp-list" style="margin-top:12px;"></div>
+  </div>
 </div>
 
 <!-- 筛选栏 -->
@@ -382,14 +384,15 @@ function showPreview() {
 let IMP_ITEMS = [];
 
 function openImport() {
-    document.getElementById('imp-card').style.display = '';
+    document.getElementById('imp-modal').style.display = 'block';
+    const lh = document.getElementById('imp-line-hint');
+    if (lh) lh.textContent = '归类到当前业务线：' + (LINE || 'lingxiu');
     if (!OPTS) { api('/api/options').then(r => { OPTS = r; initImportFields(); }); }
     else initImportFields();
-    document.getElementById('imp-card').scrollIntoView({ block: 'nearest' });
 }
 
 function closeImport() {
-    document.getElementById('imp-card').style.display = 'none';
+    document.getElementById('imp-modal').style.display = 'none';
     IMP_ITEMS = [];
     document.getElementById('imp-list').innerHTML = '';
     document.getElementById('imp-status').textContent = '';
@@ -403,26 +406,11 @@ function setImpMode(m) {
 }
 
 function initImportFields() {
-    const ls = document.getElementById('imp-line');
-    if (ls && !ls.options.length) {
-        ls.innerHTML = (LINES || []).map(l => '<option value="' + l.id + '"' + (l.id === LINE ? ' selected' : '') + '>' + l.name + '</option>').join('');
-    }
     const ps = document.getElementById('imp-platform');
     if (ps && !ps.options.length) ps.innerHTML = (OPTS.platforms || []).map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
     const ts = document.getElementById('imp-type');
     if (ts && !ts.options.length) ts.innerHTML = (OPTS.content_types || []).map(t => '<option value="' + t.id + '">' + t.name + '</option>').join('');
     setImpMode('paste');
-}
-
-function splitDocs(text) {                       // 多篇切分：--- 行 或 # 一级标题
-    const t = (text || '').replace(/\r\n/g, '\n').trim();
-    if (!t) return [];
-    let parts = t.split(/\n\s*-{3,}\s*\n/);
-    if (parts.length < 2) {
-        const byH1 = t.split(/\n(?=#\s+\S)/);
-        if (byH1.length > 1) parts = byH1;
-    }
-    return parts.map(s => s.trim()).filter(Boolean);
 }
 
 function guessTitle(t) {
@@ -435,14 +423,14 @@ function guessTitle(t) {
     return '无标题';
 }
 
-function parseImp() {
-    const docs = splitDocs(document.getElementById('imp-text').value);
-    IMP_ITEMS = docs.map(d => ({ title: guessTitle(d), content_md: d, checked: true }));
+function parseImp() {                              // 粘贴：整段 = 一条（不拆分）
+    const txt = document.getElementById('imp-text').value.trim();
+    IMP_ITEMS = txt ? [{ title: guessTitle(txt), content_md: txt, checked: true }] : [];
     renderImpList();
-    document.getElementById('imp-status').textContent = '解析出 ' + IMP_ITEMS.length + ' 篇';
+    document.getElementById('imp-status').textContent = txt ? '待导入 1 条（不拆分）' : '内容为空';
 }
 
-function parseImpFiles() {
+function parseImpFiles() {                         // 文件：每个文件 = 一条（不拆分）
     const fs = [...document.getElementById('imp-files').files];
     if (!fs.length) return;
     const out = [];
@@ -450,11 +438,13 @@ function parseImpFiles() {
     fs.forEach(f => {
         const rd = new FileReader();
         rd.onload = () => {
-            splitDocs(rd.result).forEach(d => out.push({ title: guessTitle(d), content_md: d, checked: true, from: f.name }));
+            const txt = String(rd.result || '').trim();
+            if (txt) out.push({ title: guessTitle(txt), content_md: txt, checked: true, from: f.name });
             if (--pending === 0) {
+                out.sort((a, b) => String(a.from).localeCompare(String(b.from)));
                 IMP_ITEMS = out;
                 renderImpList();
-                document.getElementById('imp-status').textContent = '从 ' + fs.length + ' 个文件解析出 ' + out.length + ' 篇';
+                document.getElementById('imp-status').textContent = '待导入 ' + out.length + ' 条（每个文件一条）';
             }
         };
         rd.readAsText(f, 'utf-8');
@@ -465,11 +455,12 @@ function renderImpList() {
     const el = document.getElementById('imp-list');
     if (!IMP_ITEMS.length) { el.innerHTML = ''; return; }
     el.innerHTML = '<div style="font-size:12px;color:#94a3b8;margin-bottom:6px;">共 ' + IMP_ITEMS.length
-        + ' 篇（标题可改 / 取消勾选则跳过）</div>'
+        + ' 条（标题可改 / 取消勾选则跳过）</div>'
         + IMP_ITEMS.map((it, i) => '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(148,163,184,.15);">'
             + '<input type="checkbox" ' + (it.checked ? 'checked' : '') + ' onchange="IMP_ITEMS[' + i + '].checked=this.checked">'
             + '<input value="' + String(it.title).replace(/"/g, '&quot;') + '" onchange="IMP_ITEMS[' + i + '].title=this.value" '
             + 'style="flex:1;min-width:0;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">'
+            + (it.from ? '<span style="font-size:11px;color:#94a3b8;white-space:nowrap;">' + it.from + '</span>' : '')
             + '<span style="font-size:12px;color:#94a3b8;white-space:nowrap;">' + String(it.content_md).replace(/\s/g, '').length + ' 字</span>'
             + '</div>').join('');
 }
@@ -478,13 +469,13 @@ async function doImport() {
     const items = IMP_ITEMS.filter(x => x.checked).map(x => ({ title: x.title, content_md: x.content_md }));
     if (!items.length) { showToast('没有勾选任何内容', 'error'); return; }
     const r = await api('/api/articles/import', { method: 'POST', body: JSON.stringify({
-        items, service_line: v('imp-line'), platform: v('imp-platform'), content_type: v('imp-type'),
+        items, service_line: LINE, platform: v('imp-platform'), content_type: v('imp-type'),
         add_link: document.getElementById('imp-link').checked, status: 'pending'
     }) });
     const st = document.getElementById('imp-status');
     if (r && r.ok) {
-        showToast('✅ 导入 ' + r.count + ' 篇' + ((r.skipped || []).length ? '，跳过 ' + r.skipped.length + ' 篇' : ''), 'success');
-        st.innerHTML = '导入 ' + r.count + ' 篇' + (r.skipped || []).map(s => '<br>跳过：' + s.title + '（' + s.reason + '）').join('');
+        showToast('✅ 导入 ' + r.count + ' 条' + ((r.skipped || []).length ? '，跳过 ' + r.skipped.length + ' 条' : ''), 'success');
+        st.innerHTML = '导入 ' + r.count + ' 条' + (r.skipped || []).map(s => '<br>跳过：' + s.title + '（' + s.reason + '）').join('');
         IMP_ITEMS = [];
         document.getElementById('imp-list').innerHTML = '';
         document.getElementById('imp-text').value = '';

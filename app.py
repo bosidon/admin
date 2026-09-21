@@ -396,6 +396,26 @@ def _job_duration(j):
     b = _p(j.get("finished_at") or "") or datetime.now()
     return max(0, int((b - a).total_seconds()))
 
+def _job_segments(j):
+    """用时三段拆解（秒）：开机等待（started→instance）/ ComfyUI 加载（instance→ready）/ 实际出图（ready→finish）
+       缺数据的段返回 None（老任务没有 instance_at/ready_at）"""
+    def _p(s):
+        try:
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+    t0, t1, t2 = _p(j.get("started_at") or ""), _p(j.get("instance_at") or ""), _p(j.get("ready_at") or "")
+    t3 = _p(j.get("finished_at") or "") or datetime.now()
+    seg = {}
+    if t0 and t1:
+        seg["boot"] = max(0, int((t1 - t0).total_seconds()))
+    if t1 and t2:
+        seg["load"] = max(0, int((t2 - t1).total_seconds()))
+    if t2:
+        seg["work"] = max(0, int((t3 - t2).total_seconds()))
+    return seg or None
+
+
 def init_content_db():
     """确保 content.db 的 articles 表存在"""
     conn = sqlite3.connect(CONTENT_DATABASE)
@@ -1707,6 +1727,7 @@ def api_jobs():
         j["article_title"] = titles.get(j.get("article_id"), "")
         j["can_cancel"] = _can_cancel(j, me_id, me_name)
         j["duration"] = _job_duration(j)
+        j["seg"] = _job_segments(j)          # 开机等待 / ComfyUI 加载 / 实际出图
     # 用时统计（已完成）：口径 ready→finished，不含开机等待；范围跟随当前可见范围，不受 limit 限制
     if _adm:
         t_owner = owner_id if not aid else None

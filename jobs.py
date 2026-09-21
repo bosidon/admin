@@ -98,7 +98,8 @@ def init():
                      ("started_at", "TEXT"), ("domain", "TEXT DEFAULT 'llm'"),
                      ("priority", "INTEGER DEFAULT 0"),
                      ("host", "TEXT DEFAULT ''"), ("owner_id", "TEXT DEFAULT ''"),
-                     ("ready_at", "TEXT")):          # 实例/ComfyUI 就绪时刻（精确用时起点）
+                     ("ready_at", "TEXT"),                   # ComfyUI 就绪（精确用时起点）
+                     ("instance_at", "TEXT")):               # 实例 running（拆「开机等待」用）
         if col not in cols:
             c.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (col, ddl))
     c.commit()
@@ -115,6 +116,18 @@ def set_ready(job_id):
     try:
         with _LOCK:
             c.execute("UPDATE jobs SET ready_at=? WHERE id=? AND IFNULL(ready_at,'')=''",
+                      (_now(), job_id))
+            c.commit()
+    finally:
+        c.close()
+
+
+def set_instance_ready(job_id):
+    """实例（AutoDL）变为 running 的时刻 → 用于拆分「开机等待 / ComfyUI 加载」两段耗时"""
+    c = _conn()
+    try:
+        with _LOCK:
+            c.execute("UPDATE jobs SET instance_at=? WHERE id=? AND IFNULL(instance_at,'')=''",
                       (_now(), job_id))
             c.commit()
     finally:

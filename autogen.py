@@ -1888,6 +1888,7 @@ def _ensure_instance(instance_uuid, job_id, log, timeout=300, stock_tries=1):
     st = adl_status(instance_uuid).get("data") or ""
     if st == "running":
         log("实例已在运行，跳过开机")
+        jobstore.set_instance_ready(job_id)     # 无开机等待
         return False
     log("启动实例…（当前状态 %s）" % (st or "未知"))
     # ⚠️ 开机常被「当前算力规格暂无库存，请修改配置或稍等再试」拒绝 → 每 30s 重试，最长 5 分钟
@@ -1917,6 +1918,7 @@ def _ensure_instance(instance_uuid, job_id, log, timeout=300, stock_tries=1):
             raise RuntimeError("已取消")
         time.sleep(3)
         if (adl_status(instance_uuid).get("data") or "") == "running":
+            jobstore.set_instance_ready(job_id)     # 记录「实例已运行」时刻
             log("实例已运行")
             return True
     raise RuntimeError("等待实例 running 超时")

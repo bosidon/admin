@@ -146,7 +146,9 @@ function jobRow(j) {
         + '<td style="padding:9px 10px;"><span class="tag tag-gray">' + esc(j.kind_label || j.kind) + '</span></td>'
         + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;">' + (j.total ? j.done + '/' + j.total : '—') + '</td>'
         + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;color:' + col + ';">' + st + qp + '</td>'
-        + '<td style="padding:9px 10px;font-size:12px;color:var(--text2);white-space:nowrap;">'
+        + '<td title="' + (j.seg ? esc('开机等待 ' + fmtDur(j.seg.boot) + ' ｜ ComfyUI 加载 ' + fmtDur(j.seg.load)
+            + ' ｜ 实际出图 ' + fmtDur(j.seg.work) + '（用时只算后两段之外的实际出图）') : '') + '"'
+        + ' style="padding:9px 10px;font-size:12px;color:var(--text2);white-space:nowrap;">'
         + esc((j.created_at || '').slice(5, 16)) + ' · ' + fmtDur(j.duration) + '</td>'
         + '<td style="padding:9px 6px;text-align:right;">' + x + '</td>'
         + '</tr>';

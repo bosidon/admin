@@ -490,7 +490,23 @@ def init_content_db():
     conn.commit()
     conn.close()
 
+def _ensure_video_cols():
+    """video_plans / video_clips 的幂等列迁移（这两张表历史上手工建的，代码里没有 CREATE）"""
+    db = sqlite3.connect(CONTENT_DATABASE)   # 导入期调用，不能用依赖 Flask 上下文的 get_content_db()
+    cols = {r[1] for r in db.execute("PRAGMA table_info(video_plans)")}
+    for name, ddl in (("persona_material_id", "INTEGER"), ("voice_material_id", "INTEGER"),
+                      ("aspect", "TEXT DEFAULT '9:16'"), ("duration_target", "INTEGER DEFAULT 15")):
+        if cols and name not in cols:
+            db.execute("ALTER TABLE video_plans ADD COLUMN %s %s" % (name, ddl))
+    ccols = {r[1] for r in db.execute("PRAGMA table_info(video_clips)")}
+    for name, ddl in (("line", "TEXT"), ("visual", "TEXT"), ("audio_material_id", "INTEGER")):
+        if ccols and name not in ccols:
+            db.execute("ALTER TABLE video_clips ADD COLUMN %s %s" % (name, ddl))
+    db.commit()
+    db.close()
+
 init_content_db()
+_ensure_video_cols()
 
 # ============================================================
 # 模板全局函数
@@ -1381,7 +1397,8 @@ def api_update_video_plan(plan_id):
     if _g:
         return _g
     sets, vals = [], []
-    for f in ('script', 'storyboard', 'status', 'title'):
+    for f in ('script', 'storyboard', 'status', 'title',
+              'persona_material_id', 'voice_material_id', 'aspect', 'duration_target'):
         if f in data:
             sets.append(f + '=?')
             vals.append(data[f])

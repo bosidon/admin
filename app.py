@@ -2474,6 +2474,72 @@ def api_materials_txt2img():
                     "queue_pos": jobstore.queue_pos(jid)})
 
 
+@app.route('/api/video-plans/<int:plan_id>/asset-attach', methods=['POST'])
+def api_plan_asset_attach(plan_id):
+    """素材 Tab「AI 生成」出图后 → 挂到角色槽位（无角色则新建角色并挂图、加入本片素材包）
+    body: {kind?, name?, slot?('front'|'side'|'back'), role_id?, material_id?, url?}
+    """
+    u = current_user()
+    if not u:
+        return jsonify({"error": "未登录"}), 401
+    db = get_content_db()
+    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g:
+        return _g
+    d = request.get_json(silent=True) or {}
+    slot = (d.get("slot") or "front").strip()
+    if slot not in ("front", "side", "back"):
+        return jsonify({"error": "非法槽位"}), 400
+    col = {"front": "front_material_id", "side": "side_material_id", "back": "back_material_id"}[slot]
+    mid = d.get("material_id")
+    if not mid and d.get("url"):                     # 允许用 url 反查素材 id
+        try:
+            _u = d.get("url")
+            _r = materialstore._conn().execute("SELECT id FROM materials WHERE file_path=?", (_u,)).fetchone()
+            if not _r:
+                _r = materialstore._conn().execute("SELECT id FROM materials WHERE file_path LIKE ?", ("%" + _u.split("/")[-1],)).fetchone()
+            mid = _r[0] if _r else None
+        except Exception:
+            mid = None
+    if not mid:
+        return jsonify({"error": "找不到该素材（material_id/url 都无效）"}), 400
+    rid = d.get("role_id")
+    created = False
+    if rid:
+        r2 = db.execute("SELECT * FROM roles WHERE id=?", (int(rid),)).fetchone()
+        if not r2:
+            return jsonify({"error": "角色不存在"}), 404
+        if not _is_admin(u) and r2["owner_id"] != u["id"]:
+            return jsonify({"error": "无权操作"}), 403
+    else:
+        kind = (d.get("kind") or "persona").strip()
+        name = (d.get("name") or "").strip()[:80]
+        if kind not in ROLE_KINDS:
+            return jsonify({"error": "非法类型：%s" % kind}), 400
+        if not name:
+            return jsonify({"error": "缺少名称"}), 400
+        cur = db.execute("INSERT INTO roles (owner_id, kind, name, " + col + ", tags, note)"
+                         " VALUES (?,?,?,?,'','')", (u["id"], kind, name, int(mid)))
+        rid = cur.lastrowid
+        created = True
+        try:
+            _rids = json.loads((row["role_ids"] if "role_ids" in row.keys() else "") or "[]")
+        except Exception:
+            _rids = []
+        if int(rid) not in _rids:
+            _rids.append(int(rid))
+            db.execute("UPDATE video_plans SET role_ids=?, updated_at=datetime('now','localtime') WHERE id=?",
+                       (json.dumps(_rids, ensure_ascii=False), plan_id))
+    db.execute("UPDATE roles SET " + col + "=?, updated_at=datetime('now','localtime') WHERE id=?",
+               (int(mid), int(rid)))
+    db.commit()
+    db.close()
+    return jsonify({"ok": True, "role_id": rid, "created": created, "slot": slot, "material_id": int(mid)})
+
+
 @app.route('/api/materials/download', methods=['POST'])
 def api_materials_download():
     """批量下载所选素材（打包 zip）；只允许自己的（admin 豁免）"""

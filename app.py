@@ -513,6 +513,7 @@ def _ensure_video_cols():
     for name, ddl in (("persona_material_id", "INTEGER"),
                       ("persona_id", "INTEGER"), ("voice_material_id", "INTEGER"),
                       ("role_ids", "TEXT"),
+                      ("asset_reqs", "TEXT"), ("asset_prompts", "TEXT"),
                       ("aspect", "TEXT DEFAULT '9:16'"), ("duration_target", "INTEGER DEFAULT 15")):
         if cols and name not in cols:
             db.execute("ALTER TABLE video_plans ADD COLUMN %s %s" % (name, ddl))
@@ -1390,7 +1391,15 @@ def api_get_video_plan(plan_id):
     _g = _guard_article(row['article_id'])
     if _g:
         return _g
-    return jsonify(dict(row))
+    d = dict(row)
+    # 素材需求持久化字段：asset_reqs 列 -> asset_requirements（列表，坏值回退 []）
+    for _out, _col in (("asset_requirements", "asset_reqs"), ("asset_prompts", "asset_prompts")):
+        try:
+            _v = json.loads(d.get(_col) or "[]")
+            d[_out] = _v if isinstance(_v, list) else []
+        except Exception:
+            d[_out] = []
+    return jsonify(d)
 
 @app.route('/api/video-plans/<int:plan_id>/storyboard', methods=['POST'])
 def api_gen_storyboard(plan_id):
@@ -1428,13 +1437,18 @@ def api_gen_storyboard(plan_id):
     lines = [overview] if overview else []
     for sh in shots:
         lines.append("\u3010" + sh.get("shot_type", "") + "\u3011" + sh.get("subtitle", ""))
+    _reqs = result.get("asset_requirements") or []
+    _prompts = result.get("asset_prompts") or []
     db.execute('UPDATE video_plans SET storyboard=?, script=?, status="storyboard_done",'
-               "total_duration_s=?, updated_at=datetime('now','localtime') WHERE id=?",
-               (json.dumps(shots, ensure_ascii=False), "\n".join(lines), total, plan_id))
+               "total_duration_s=?, asset_reqs=?, asset_prompts=?,"
+               "updated_at=datetime('now','localtime') WHERE id=?",
+               (json.dumps(shots, ensure_ascii=False), "\n".join(lines), total,
+                json.dumps(_reqs, ensure_ascii=False), json.dumps(_prompts, ensure_ascii=False),
+                plan_id))
     db.commit(); db.close()
     return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total,
-                    "asset_requirements": result.get("asset_requirements") or [],
-                    "asset_prompts": result.get("asset_prompts") or []})
+                    "asset_requirements": _reqs,
+                    "asset_prompts": _prompts})
 
 @app.route('/api/video-plans/<int:plan_id>', methods=['PUT'])
 def api_update_video_plan(plan_id):

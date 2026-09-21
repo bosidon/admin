@@ -268,6 +268,9 @@ async function load() {
     if (!Array.isArray(SCENES)) SCENES = [];
     try { ROLE_IDS = JSON.parse(d.role_ids || '[]'); } catch(e) { ROLE_IDS = []; }
     if (!Array.isArray(ROLE_IDS)) ROLE_IDS = [];
+    // 素材需求（持久化字段）：详情接口返回已解析的数组，刷新后仍能渲染
+    REQS = Array.isArray(d.asset_requirements) ? d.asset_requirements : [];
+    PROMPTS = Array.isArray(d.asset_prompts) ? d.asset_prompts : [];
     await loadRoles();
     renderRolePack();
     renderReqs();

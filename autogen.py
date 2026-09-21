@@ -1420,7 +1420,7 @@ def uid_ok(v):
 
 
 
-def gen_storyboard(article_content, llm_cfg):
+def gen_storyboard(article_content, llm_cfg, assets=None):
     """根据文案用 LLM 生成分镜脚本"""
     import os
     prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
@@ -1432,6 +1432,7 @@ def gen_storyboard(article_content, llm_cfg):
         _sp, _up = "", prompt_md
     system_msg = _sp.strip() or "你是一位专业短视频分镜导演。只输出 JSON，不要其他文字。"
     user_msg = _up.replace("{{CONTENT}}", article_content[:8000])
+    user_msg = user_msg.replace("{{ASSETS}}", (assets or "（未指定素材）"))
     url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
     if "/chat/completions" not in url:
         url += "/chat/completions"

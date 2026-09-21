@@ -1403,10 +1403,25 @@ def api_gen_storyboard(plan_id):
     if not art or not (art["content_md"] or "").strip():
         return jsonify({"error": "文案内容为空"}), 400
     try:
+        _rids = json.loads((row["role_ids"] if "role_ids" in row.keys() else "") or "[]")
+    except Exception:
+        _rids = []
+    _roles = _roles_of(_rids)
+    _assets = _role_assets_text(_roles) or ("（用户未指定素材，可自行设计人物/场景/道具，"
+                                            "并在 asset_requirements 里列出需要的素材）")
+    try:
         from autogen import gen_storyboard, get_llm_config
-        result = gen_storyboard(art["content_md"], get_llm_config())
+        result = gen_storyboard(art["content_md"], get_llm_config(), assets=_assets)
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
+    # 后端补齐 exists（不信 LLM）：按草稿包名称集合判断该素材主图是否存在
+    _pool = {}
+    for _r in _roles:
+        _pool.setdefault(_r.get("kind") or "persona", {})[_r.get("name") or ""] = bool(
+            (_r.get("front") or {}).get("file_path"))
+    for _req in (result.get("asset_requirements") or []):
+        if isinstance(_req, dict):
+            _req["exists"] = bool(_pool.get(_req.get("kind") or "persona", {}).get(_req.get("name") or ""))
     shots = result.get("shots", [])
     overview = result.get("overview", "")
     total = result.get("total_duration_s") or sum(s.get("duration_s", 5) for s in shots)
@@ -1417,7 +1432,9 @@ def api_gen_storyboard(plan_id):
                "total_duration_s=?, updated_at=datetime('now','localtime') WHERE id=?",
                (json.dumps(shots, ensure_ascii=False), "\n".join(lines), total, plan_id))
     db.commit(); db.close()
-    return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total})
+    return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total,
+                    "asset_requirements": result.get("asset_requirements") or [],
+                    "asset_prompts": result.get("asset_prompts") or []})
 
 @app.route('/api/video-plans/<int:plan_id>', methods=['PUT'])
 def api_update_video_plan(plan_id):
@@ -1431,7 +1448,7 @@ def api_update_video_plan(plan_id):
     if _g:
         return _g
     sets, vals = [], []
-    for f in ('script', 'storyboard', 'status', 'title',
+    for f in ('script', 'storyboard', 'status', 'title', 'role_ids',
               'persona_id', 'voice_material_id', 'aspect', 'duration_target'):
         if f in data:
             sets.append(f + '=?')
@@ -1494,6 +1511,27 @@ def _roles_of(ids):
                  d.get("back_material_id"), d.get("voice_material_id")]
     matmap = _role_materials(mids)
     return [_role_row(d, matmap) for d in ds]
+
+ROLE_KIND_ORDER = ("persona", "scene", "prop")
+
+def _role_assets_text(roles):
+    """把已选素材包组装成给 LLM 的素材清单文本（人物/场景/道具 各一段）"""
+    if not roles:
+        return ""
+    lines = []
+    for k in ROLE_KIND_ORDER:
+        grp = [r for r in roles if (r.get("kind") or "persona") == k]
+        if not grp:
+            continue
+        lines.append(KIND_CN.get(k, k) + "：")
+        for r in grp:
+            slots = []
+            for slot, cn in (("front", "正面照"), ("side", "侧面照"), ("back", "背面照")):
+                mm = r.get(slot) or {}
+                slots.append(cn + " " + (mm.get("file_path") or "无"))
+            lines.append("- %s ｜ %s ｜ 外观：%s" % (r.get("name") or "", " · ".join(slots),
+                                                  (r.get("note") or "").strip() or "无"))
+    return "\n".join(lines)
 
 @app.route('/api/roles')
 def api_list_roles():

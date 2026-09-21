@@ -328,6 +328,15 @@ async function load() {
     renderScript(SCRIPT_OBJ);
     try { SCENES = JSON.parse(d.storyboard || '[]'); } catch(e) { SCENES = []; }
     if (!Array.isArray(SCENES)) SCENES = [];
+    // 后端落库的是 LLM 原始镜头（visual_prompt/subtitle），页面用 visual/line → 兼容两种键名
+    SCENES = SCENES.map(function (s) {
+        s = s || {};
+        return { visual: s.visual || s.visual_prompt || '', line: s.line || s.subtitle || '',
+                 duration: s.duration || s.duration_s || 5, shot_type: s.shot_type || '',
+                 characters: s.characters || [], scene: s.scene || '', props: s.props || [],
+                 shot_face: s.shot_face || '', music_hint: s.music_hint || '',
+                 template_hint: s.template_hint || 'U02' };
+    });
     try { ROLE_IDS = JSON.parse(d.role_ids || '[]'); } catch(e) { ROLE_IDS = []; }
     if (!Array.isArray(ROLE_IDS)) ROLE_IDS = [];
     // 素材需求（持久化字段）：详情接口返回已解析的数组，刷新后仍能渲染
@@ -446,8 +455,9 @@ async function genStoryboard() {
     await saveRoleIds();                                  // 调用前先把素材包 role_ids 落库
     const r = await api('/api/video-plans/' + PLAN_ID + '/storyboard', {method: 'POST'});
     if (!r.ok) { toast('❌ ' + (r.error || '生成失败'), 'error'); document.getElementById('plan-status').textContent = PLAN.status || ''; return; }
-    REQS = Array.isArray(r.asset_requirements) ? r.asset_requirements : [];
-    PROMPTS = Array.isArray(r.asset_prompts) ? r.asset_prompts : [];
+    // 分镜接口已不产出素材需求/提词 → 只在响应真的带该字段时才更新（不再清空「素材」Tab 的成果）
+    if (Array.isArray(r.asset_requirements)) { REQS = r.asset_requirements; }
+    if (Array.isArray(r.asset_prompts)) { PROMPTS = r.asset_prompts; }
     await loadRoles();
     SCENES = (r.shots || []).map(s => ({
         visual: s.visual_prompt || '', line: s.subtitle || '',

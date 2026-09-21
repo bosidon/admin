@@ -1420,8 +1420,9 @@ def uid_ok(v):
 
 
 
-def gen_storyboard(article_content, llm_cfg, assets=None):
-    """根据文案用 LLM 生成分镜脚本"""
+def gen_storyboard(script_text, llm_cfg, assets=None):
+    """按【剧本】(script_text) + 【已备素材包】(assets) 把分节拆成镜头。
+    只输出 overview / total_duration_s / shots（素材需求归 gen_asset_reqs 管）"""
     import os
     prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
     prompt_md = open(prompts_dir + "/video_storyboard.md", encoding="utf-8").read()
@@ -1431,7 +1432,13 @@ def gen_storyboard(article_content, llm_cfg, assets=None):
     else:
         _sp, _up = "", prompt_md
     system_msg = _sp.strip() or "你是一位专业短视频分镜导演。只输出 JSON，不要其他文字。"
-    user_msg = _up.replace("{{CONTENT}}", article_content[:8000])
+    if not isinstance(script_text, str):
+        try:
+            script_text = json.dumps(script_text, ensure_ascii=False)
+        except Exception:
+            script_text = str(script_text or "")
+    user_msg = _up.replace("{{SCRIPT}}", (script_text or "")[:12000])
+    user_msg = user_msg.replace("{{CONTENT}}", (script_text or "")[:8000])   # 兼容旧占位符
     user_msg = user_msg.replace("{{ASSETS}}", (assets or "（未指定素材）"))
     url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
     if "/chat/completions" not in url:
@@ -1442,13 +1449,31 @@ def gen_storyboard(article_content, llm_cfg, assets=None):
                     {"role": "user", "content": user_msg}])
     if err:
         raise RuntimeError("LLM 调用失败: " + err[:200])
-    if not isinstance(data, dict) or "shots" not in data:
+    if not isinstance(data, dict):
         raise RuntimeError("LLM 返回格式错误: " + str(data)[:200])
+    # 模型偶尔吐坏 JSON（截断）→ 缺 shots 时自动重试一次，两次都缺才报错
+    if not isinstance(data.get("shots"), list) or not data.get("shots"):
+        data2, err2 = _llm_json(url, llm_cfg.get("llm_api_key", ""),
+                                llm_cfg.get("llm_model") or "deepseek-chat",
+                                [{"role": "system", "content": system_msg + "\n\n（重要）必须完整输出 shots 数组，不要中途截断。"},
+                                 {"role": "user", "content": user_msg}])
+        if data2 and isinstance(data2, dict) and isinstance(data2.get("shots"), list) and data2.get("shots"):
+            data = data2
+        else:
+            raise RuntimeError("LLM 返回缺少 shots（已重试一次）: " + str(data)[:160])
     for i, sh in enumerate(data["shots"]):
+        if not isinstance(sh, dict):
+            sh = {}; data["shots"][i] = sh
         sh.setdefault("idx", i); sh.setdefault("duration_s", 5)
         sh.setdefault("shot_type", "中景"); sh.setdefault("visual_prompt", "")
         sh.setdefault("subtitle", ""); sh.setdefault("music_hint", "none")
         sh.setdefault("template_hint", "U02")
+        # 兜底：素材类字段一律补齐（LLM 可能整个漏掉某键）
+        if not isinstance(sh.get("characters"), list): sh["characters"] = []
+        if not isinstance(sh.get("props"), list): sh["props"] = []
+        if not isinstance(sh.get("scene"), str): sh["scene"] = ""
+        if not isinstance(sh.get("shot_face"), str) or not sh.get("shot_face"):
+            sh["shot_face"] = "none"
     return data
 
 def gen_script(article_content, llm_cfg, duration_target=None):

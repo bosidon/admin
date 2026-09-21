@@ -1418,19 +1418,19 @@ def api_gen_storyboard(plan_id):
     if not row: return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
     if _g: return _g
-    art = db.execute("SELECT content_md FROM articles WHERE id=?", (row["article_id"],)).fetchone()
-    if not art or not (art["content_md"] or "").strip():
-        return jsonify({"error": "文案内容为空"}), 400
+    # 输入 = 剧本（video_plans.script 里的剧本 JSON）；还没生成剧本 → 提示先点「AI 生成剧本」
+    _script = ((row["script"] or "") if "script" in row.keys() else "").strip()
+    if not _script.startswith("{"):
+        return jsonify({"error": "请先生成剧本（点🤖 AI 生成剧本）"}), 400
     try:
         _rids = json.loads((row["role_ids"] if "role_ids" in row.keys() else "") or "[]")
     except Exception:
         _rids = []
     _roles = _roles_of(_rids)
-    _assets = _role_assets_text(_roles) or ("（用户未指定素材，可自行设计人物/场景/道具，"
-                                            "并在 asset_requirements 里列出需要的素材）")
+    _assets = _role_assets_text(_roles) or "（素材包为空：镜头里的素材只能用剧本里已列出的人物/场景/道具）"
     try:
         from autogen import gen_storyboard, get_llm_config
-        result = gen_storyboard(art["content_md"], get_llm_config(), assets=_assets)
+        result = gen_storyboard(_script, get_llm_config(), assets=_assets)
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
     # 后端补齐 exists（不信 LLM）：按草稿包名称集合判断该素材主图是否存在
@@ -1447,8 +1447,12 @@ def api_gen_storyboard(plan_id):
     lines = [overview] if overview else []
     for sh in shots:
         lines.append("\u3010" + sh.get("shot_type", "") + "\u3011" + sh.get("subtitle", ""))
-    _reqs = result.get("asset_requirements") or []
-    _prompts = result.get("asset_prompts") or []
+    _reqs = result.get("asset_requirements")
+    _prompts = result.get("asset_prompts")
+    _has_reqs = isinstance(_reqs, list)          # 分镜提词已不再产出素材需求/提词
+    _has_prompts = isinstance(_prompts, list)    # → 只有真的带该字段才覆盖（别冲掉「素材」Tab 的成果）
+    _reqs = _reqs if _has_reqs else []
+    _prompts = _prompts if _has_prompts else []
     # script 列归「剧本」管（/api/video-plans/<id>/script）；已是剧本 JSON 时不覆盖
     _cur_script = (row["script"] or "") if "script" in row.keys() else ""
     _cols, _vals = [], []
@@ -1456,15 +1460,21 @@ def api_gen_storyboard(plan_id):
         _cols.append("script=?")
         _vals.append("\n".join(lines))
     _cols += ["storyboard=?", "status='storyboard_done'", "total_duration_s=?",
-              "asset_reqs=?", "asset_prompts=?", "updated_at=datetime('now','localtime')"]
-    _vals += [json.dumps(shots, ensure_ascii=False), total,
-              json.dumps(_reqs, ensure_ascii=False), json.dumps(_prompts, ensure_ascii=False)]
+              "updated_at=datetime('now','localtime')"]
+    _vals += [json.dumps(shots, ensure_ascii=False), total]
+    if _has_reqs:
+        _cols.append("asset_reqs=?"); _vals.append(json.dumps(_reqs, ensure_ascii=False))
+    if _has_prompts:
+        _cols.append("asset_prompts=?"); _vals.append(json.dumps(_prompts, ensure_ascii=False))
     _vals.append(plan_id)
     db.execute('UPDATE video_plans SET ' + ", ".join(_cols) + " WHERE id=?", _vals)
     db.commit(); db.close()
-    return jsonify({"ok": True, "shots": shots, "overview": overview, "total_duration_s": total,
-                    "asset_requirements": _reqs,
-                    "asset_prompts": _prompts})
+    _resp = {"ok": True, "shots": shots, "overview": overview, "total_duration_s": total}
+    if _has_reqs:
+        _resp["asset_requirements"] = _reqs
+    if _has_prompts:
+        _resp["asset_prompts"] = _prompts
+    return jsonify(_resp)
 
 @app.route('/api/video-plans/<int:plan_id>/script', methods=['POST'])
 def api_gen_script(plan_id):

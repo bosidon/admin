@@ -26,7 +26,22 @@
 {% endblock %}
 
 {% block content %}
-<div class="card">
+<div style="display:flex;gap:8px;margin-bottom:12px;">
+    <button class="btn btn-sm" id="v-lib" onclick="switchView('lib')">素材</button>
+    <button class="btn btn-outline btn-sm" id="v-persona" onclick="switchView('persona')">人物形象</button>
+</div>
+
+<div id="personaView" style="display:none;">
+    <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;flex-wrap:wrap;">
+            <div style="font-weight:600;">人物形象（姓名 + 正面/侧面/背面照 + 默认声音）</div>
+            <button class="btn btn-primary btn-sm" onclick="openPersonaForm(null)">＋ 新建人物形象</button>
+        </div>
+        <div id="personaList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;"></div>
+    </div>
+</div>
+
+<div class="card" id="libView">
     <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">
         <select id="type-filter" onchange="load()" style="padding:7px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;">
             <option value="all">全部类型</option>
@@ -598,6 +613,196 @@ document.addEventListener('keydown', function (e) {
 
 window.addEventListener('resize', function () { if (viewerVisible()) { fitViewer(); } });
 
+// ==================== 人物形象（姓名 + 正面/侧面/背面照 + 默认声音）====================
+let PERSONAS = [];
+let PK = { slot: null, type: 'image' };
+const PF_SLOTS = ['front', 'side', 'back', 'voice'];
+
+function switchView(v) {
+    document.getElementById('libView').style.display = (v === 'lib') ? '' : 'none';
+    document.getElementById('personaView').style.display = (v === 'persona') ? '' : 'none';
+    document.getElementById('v-lib').className = (v === 'lib') ? 'btn btn-sm' : 'btn btn-outline btn-sm';
+    document.getElementById('v-persona').className = (v === 'persona') ? 'btn btn-sm' : 'btn btn-outline btn-sm';
+    if (v === 'persona') loadPersonas();
+}
+
+async function loadPersonas() {
+    const r = await api('/api/personas');
+    PERSONAS = Array.isArray(r) ? r : [];
+    const box = document.getElementById('personaList');
+    if (!PERSONAS.length) {
+        box.innerHTML = '<div style="color:#94a3b8;padding:20px;">还没有人物形象 —— 点右上「＋ 新建人物形象」开始</div>';
+        return;
+    }
+    box.innerHTML = PERSONAS.map(p => {
+        const tri = [['正面', p.front], ['侧面', p.side], ['背面', p.back]].map(([t, mm]) =>
+            mm ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(mm.file_path) + '" title="' + t + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;">'
+               : '<div title="' + t + '未设" style="width:64px;height:64px;border-radius:8px;background:#f1f5f9;color:#94a3b8;font-size:11px;display:flex;align-items:center;justify-content:center;">' + t + '未设</div>').join('');
+        const voice = (p.voice && p.voice.file_path)
+            ? '<audio controls src="' + p.voice.file_path + '" style="width:100%;height:30px;"></audio>'
+            : '<div style="font-size:11px;color:#94a3b8;">未设默认声音</div>';
+        return '<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px;">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+            + '<b style="font-size:14px;">' + (p.name || '') + '</b>'
+            + '<span style="display:flex;gap:6px;">'
+            + '<button class="btn btn-outline btn-sm" onclick="openPersonaForm(' + p.id + ')">✏️</button>'
+            + '<button class="btn btn-outline btn-sm" onclick="delPersona(' + p.id + ')">✕</button>'
+            + '</span></div>'
+            + '<div style="display:flex;gap:6px;margin-bottom:8px;">' + tri + '</div>'
+            + voice
+            + (p.tags ? '<div style="font-size:11px;color:#64748b;margin-top:6px;">' + p.tags + '</div>' : '')
+            + '</div>';
+    }).join('');
+}
+
+function openPersonaForm(id) {
+    const p = id ? (PERSONAS.find(x => x.id === id) || {}) : {};
+    document.getElementById('pfId').value = p.id || '';
+    document.getElementById('pfModalTitle').textContent = id ? '编辑人物形象' : '新建人物形象';
+    document.getElementById('pfName').value = p.name || '';
+    document.getElementById('pfTags').value = p.tags || '';
+    document.getElementById('pfNote').value = p.note || '';
+    PF_SLOTS.forEach(slot => {
+        const mid = p[slot + '_material_id'] || '';
+        const mm = p[slot];
+        document.getElementById('pf-' + slot).dataset.mid = mid;
+        document.getElementById('pf-' + slot + '-label').textContent = mm ? ('已选：' + (mm.name || ('#' + mm.id))) : '未选择';
+        const im = document.getElementById('pf-' + slot + '-thumb');
+        if (im) im.src = mm ? ('/api/materials/thumb?u=' + encodeURIComponent(mm.file_path)) : '';
+    });
+    document.getElementById('pfModal').style.display = 'flex';
+}
+function closePersonaModal() { document.getElementById('pfModal').style.display = 'none'; }
+
+async function pickForSlot(slot) {
+    PK.slot = slot;
+    PK.type = (slot === 'voice') ? 'audio' : 'image';
+    const items = await libCache(PK.type);
+    window.__PK_ITEMS = items;
+    document.getElementById('pkTitle').textContent = (PK.type === 'audio') ? '选择声音（音频素材）' : '选择照片（图片素材）';
+    document.getElementById('pkList').innerHTML = items.length ? items.map(m => {
+        const left = (PK.type === 'audio')
+            ? '<span style="font-size:22px;">🎵</span>'
+            : '<img src="/api/materials/thumb?u=' + encodeURIComponent(m.file_path || '') + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;">';
+        const player = (PK.type === 'audio') ? '<audio controls src="' + (m.file_path || '') + '" style="height:30px;" onclick="event.stopPropagation()"></audio>' : '';
+        return '<div onclick="chooseSlot(' + m.id + ')" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;">'
+            + left
+            + '<div style="flex:1;min-width:0;"><div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (m.name || ('素材 #' + m.id)) + '</div>'
+            + '<div style="font-size:11px;color:#94a3b8;">#' + m.id + ' · ' + (m.created_at || '') + '</div></div>'
+            + player + '</div>';
+    }).join('') : '<div style="padding:24px;color:#94a3b8;text-align:center;">该类型暂无素材 —— 请先上传</div>';
+    document.getElementById('pkModal').style.display = 'flex';
+}
+function closePicker() { document.getElementById('pkModal').style.display = 'none'; }
+
+async function libCache(type) {
+    const r = await api('/api/library?type=' + type);
+    return Array.isArray(r) ? r : [];
+}
+
+function chooseSlot(id) {
+    const el = document.getElementById('pf-' + PK.slot);
+    el.dataset.mid = id;
+    const it = (window.__PK_ITEMS || []).find(x => x.id === id);
+    document.getElementById('pf-' + PK.slot + '-label').textContent = '已选素材 #' + id;
+    const im = document.getElementById('pf-' + PK.slot + '-thumb');
+    if (im && it && it.file_path) im.src = '/api/materials/thumb?u=' + encodeURIComponent(it.file_path);
+    closePicker();
+}
+
+async function savePersona() {
+    const id = document.getElementById('pfId').value;
+    const body = {
+        name: document.getElementById('pfName').value.trim(),
+        tags: document.getElementById('pfTags').value.trim(),
+        note: document.getElementById('pfNote').value.trim()
+    };
+    PF_SLOTS.forEach(slot => {
+        const v = parseInt(document.getElementById('pf-' + slot).dataset.mid || '0', 10) || null;
+        body[slot + '_material_id'] = v;
+    });
+    if (!body.name) return toast('请填写姓名', 'error');
+    if (!body.front_material_id) return toast('请选择正面照', 'error');
+    const r = id ? await api('/api/personas/' + id, { method: 'POST', body: JSON.stringify(body) })
+                 : await api('/api/personas', { method: 'POST', body: JSON.stringify(body) });
+    if (r && r.ok) { toast('已保存 ✓'); closePersonaModal(); await loadPersonas(); }
+    else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
+}
+
+async function delPersona(id) {
+    const p = PERSONAS.find(x => x.id === id) || {};
+    if (!confirm('删除人物形象「' + (p.name || id) + '」？素材库里的图片/音频不会被删。')) return;
+    const r = await api('/api/personas/' + id + '/delete', { method: 'POST', body: '{}' });
+    if (r && r.ok) { toast('已删除 ✓'); await loadPersonas(); }
+    else { toast('❌ ' + ((r && r.error) || '删除失败'), 'error'); }
+}
+
 load();
 </script>
+
+<div id="pfModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:999;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:14px;padding:20px;width:470px;max-width:92vw;max-height:86vh;overflow:auto;">
+        <div id="pfModalTitle" style="font-weight:600;margin-bottom:14px;">新建人物形象</div>
+        <input type="hidden" id="pfId">
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">姓名 <span style="color:#dc2626;">*</span></div>
+            <input id="pfName" placeholder="如：小仙" style="width:100%%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;">
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">正面照 <span style="color:#dc2626;">*</span></div>
+            <div style="display:flex;gap:10px;align-items:center;">
+                <img id="pf-front-thumb" src="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#f1f5f9;display:block;">
+                <span id="pf-front-label" style="flex:1;font-size:12px;color:#64748b;">未选择</span>
+                <button id="pf-front" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('front')">选择</button>
+            </div>
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">侧面照</div>
+            <div style="display:flex;gap:10px;align-items:center;">
+                <img id="pf-side-thumb" src="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#f1f5f9;display:block;">
+                <span id="pf-side-label" style="flex:1;font-size:12px;color:#64748b;">未选择</span>
+                <button id="pf-side" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('side')">选择</button>
+            </div>
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">背面照</div>
+            <div style="display:flex;gap:10px;align-items:center;">
+                <img id="pf-back-thumb" src="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#f1f5f9;display:block;">
+                <span id="pf-back-label" style="flex:1;font-size:12px;color:#64748b;">未选择</span>
+                <button id="pf-back" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('back')">选择</button>
+            </div>
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">默认声音</div>
+            <div style="display:flex;gap:10px;align-items:center;">
+                <span style="width:56px;height:56px;border-radius:8px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:22px;">🎙</span>
+                <span id="pf-voice-label" style="flex:1;font-size:12px;color:#64748b;">未选择</span>
+                <button id="pf-voice" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('voice')">选择</button>
+            </div>
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">标签</div>
+            <input id="pfTags" placeholder="如：国风·青年·女" style="width:100%%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;">
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">备注</div>
+            <input id="pfNote" placeholder="可选" style="width:100%%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;">
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button class="btn btn-outline btn-sm" onclick="closePersonaModal()">取消</button>
+            <button class="btn btn-sm" onclick="savePersona()">保存</button>
+        </div>
+    </div>
+</div>
+
+<div id="pkModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:14px;padding:18px;width:470px;max-width:92vw;max-height:76vh;display:flex;flex-direction:column;">
+        <div id="pkTitle" style="font-weight:600;margin-bottom:10px;">选择素材</div>
+        <div id="pkList" style="overflow:auto;display:grid;gap:8px;"></div>
+        <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+            <button class="btn btn-outline btn-sm" onclick="closePicker()">关闭</button>
+        </div>
+    </div>
+</div>
+
 {% endblock %}

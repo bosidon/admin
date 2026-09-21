@@ -79,8 +79,8 @@ function render() {
         el.innerHTML = ready.map(p => `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:16px;">
             <div style="font-weight:600;margin-bottom:8px;">${p.article_title || p.title || '未命名'}</div>
             <div style="font-size:12px;color:#64748b;margin-bottom:10px;">状态：${p.status}</div>
-            <button class="btn btn-outline btn-sm" onclick="openSetup(${p.id})">${p.persona_material_id ? '修改人物/声音' : '制作视频'}</button>
-            <div style="font-size:12px;color:#0f766e;margin-top:8px;">🖼 ${p.persona_material_id ? '形象 #' + p.persona_material_id : '未选形象'} · 🎙 ${p.voice_material_id ? '声音 #' + p.voice_material_id : '未选声音'} · ${p.aspect || '9:16'} · ${p.duration_target || 15}s</div>
+            <button class="btn btn-outline btn-sm" onclick="openSetup(${p.id})">${p.persona_id ? '修改人物/声音' : '制作视频'}</button>
+            <div style="font-size:12px;color:#0f766e;margin-top:8px;">🖼 ${p.persona_id ? (PER_NAME[p.persona_id] || ('形象 #' + p.persona_id)) : '未选形象'} · 🎙 ${p.voice_material_id ? '声音 #' + p.voice_material_id : '未选声音'} · ${p.aspect || '9:16'} · ${p.duration_target || 15}s</div>
         </div>`).join('');
     }
 }
@@ -111,9 +111,9 @@ async function openSetup(planId) {
     document.getElementById('setupAspect').value = p.aspect || '9:16';
     document.getElementById('setupDuration').value = String(p.duration_target || 15);
     const pe = document.getElementById('setupPersona'), ve = document.getElementById('setupVoice');
-    pe.dataset.mid = p.persona_material_id || '';
+    pe.dataset.mid = p.persona_id || '';
     ve.dataset.mid = p.voice_material_id || '';
-    pe.textContent = p.persona_material_id ? ('已选素材 #' + p.persona_material_id) : '未选择';
+    pe.textContent = p.persona_id ? (PER_NAME[p.persona_id] || ('形象 #' + p.persona_id)) : '未选择';
     ve.textContent = p.voice_material_id ? ('已选素材 #' + p.voice_material_id) : '未选择';
     document.getElementById('setupModal').style.display = 'flex';
 }
@@ -141,18 +141,51 @@ function choosePick(id) {
 }
 async function saveSetup() {
     const body = {
-        persona_material_id: parseInt(document.getElementById('setupPersona').dataset.mid || '0', 10) || null,
+        persona_id: parseInt(document.getElementById('setupPersona').dataset.mid || '0', 10) || null,
         voice_material_id: parseInt(document.getElementById('setupVoice').dataset.mid || '0', 10) || null,
         aspect: document.getElementById('setupAspect').value,
         duration_target: parseInt(document.getElementById('setupDuration').value, 10) || 15
     };
-    if (!body.persona_material_id) { return toast('请先选择人物形象', 'error'); }
-    if (!body.voice_material_id) { return toast('请先选择声音', 'error'); }
+    if (!body.persona_id) { return toast('请先选择人物形象', 'error'); }
     const r = await api('/api/video-plans/' + SETUP_PLAN.id, {method: 'PUT', body: JSON.stringify(body)});
     if (r && r.ok) { toast('已保存 ✓'); closeSetup(); await load(); }
     else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
 }
+let PER_NAME = {}, PER_LIST = [];
+async function loadPerNames() {
+    const r = await api('/api/personas');
+    PER_LIST = Array.isArray(r) ? r : [];
+    PER_NAME = {};
+    PER_LIST.forEach(p => { PER_NAME[p.id] = p.name; });
+}
+async function pickPersona() {
+    await loadPerNames();
+    document.getElementById('pickTitle').textContent = '选择人物形象';
+    document.getElementById('pickList').innerHTML = PER_LIST.length ? PER_LIST.map(p => {
+        const tri = [p.front, p.side, p.back].map(mm => mm
+            ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(mm.file_path) + '" style="width:46px;height:46px;object-fit:cover;border-radius:8px;">'
+            : '<div style="width:46px;height:46px;border-radius:8px;background:#f1f5f9;"></div>').join('');
+        return '<div onclick="choosePersona(' + p.id + ')" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;">'
+            + '<div style="display:flex;gap:4px;">' + tri + '</div>'
+            + '<div style="flex:1;min-width:0;"><div style="font-size:13px;">' + (p.name || '') + '</div>'
+            + '<div style="font-size:11px;color:#94a3b8;">' + (p.voice ? '有默认声音' : '无默认声音') + (p.tags ? (' · ' + p.tags) : '') + '</div></div></div>';
+    }).join('') : '<div style="padding:24px;color:#94a3b8;text-align:center;">还没有人物形象 —— 请到「素材库 → 人物形象」新建</div>';
+    document.getElementById('pickModal').style.display = 'flex';
+}
+function choosePersona(id) {
+    const p = PER_LIST.find(x => x.id === id) || {};
+    const pe = document.getElementById('setupPersona');
+    pe.dataset.mid = id; pe.textContent = p.name || ('形象 #' + id);
+    if (p.voice_material_id) {
+        const ve = document.getElementById('setupVoice');
+        ve.dataset.mid = p.voice_material_id;
+        ve.textContent = '形象默认声音 #' + p.voice_material_id;
+    }
+    document.getElementById('pickModal').style.display = 'none';
+}
+
 load();
+loadPerNames();
 </script>
 
 <div id="setupModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:999;align-items:center;justify-content:center;">
@@ -160,7 +193,7 @@ load();
     <div style="font-weight:600;margin-bottom:4px;">制作视频</div>
     <div id="setupTitle" style="font-size:12px;color:#64748b;margin-bottom:12px;"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
-      <span>🖼 人物形象</span><button id="setupPersona" class="btn btn-outline btn-sm" data-mid="" onclick="pick('persona','image')">未选择</button></div>
+      <span>🖼 人物形象</span><button id="setupPersona" class="btn btn-outline btn-sm" data-mid="" onclick="pickPersona()">未选择</button></div>
     <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
       <span>🎙 声音</span><button id="setupVoice" class="btn btn-outline btn-sm" data-mid="" onclick="pick('voice','audio')">未选择</button></div>
     <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">

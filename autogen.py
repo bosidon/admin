@@ -1485,8 +1485,20 @@ def gen_script(article_content, llm_cfg, duration_target=None):
     for _k in ("characters", "scenes", "props", "beats"):
         if not isinstance(data.get(_k), list):
             data[_k] = []
+    # 模型偶尔吐坏 JSON（值里带游离双引号）→ 提取出残缺对象（有 characters 没 beats）
+    # 这里自动重试一次；两次都缺 beats 才报错
     if not data.get("beats"):
-        raise RuntimeError("LLM 返回缺少 beats: " + str(data)[:200])
+        data2, err2 = _llm_json(url, llm_cfg.get("llm_api_key", ""),
+                                llm_cfg.get("llm_model") or "deepseek-chat",
+                                [{"role": "system", "content": system_msg + "\n\n（重要）必须完整输出 beats 数组，不要中途截断。"},
+                                 {"role": "user", "content": user_msg}])
+        if data2 and isinstance(data2, dict) and isinstance(data2.get("beats"), list) and data2.get("beats"):
+            data = data2
+            for _k in ("characters", "scenes", "props"):
+                if not isinstance(data.get(_k), list):
+                    data[_k] = []
+        else:
+            raise RuntimeError("LLM 返回缺少 beats（已重试一次）: " + str(data)[:160])
     for _i, _b in enumerate(data["beats"]):
         if isinstance(_b, dict):
             _b.setdefault("i", _i)
@@ -1499,6 +1511,95 @@ def gen_script(article_content, llm_cfg, duration_target=None):
         data["total_duration_s"] = sum(
             float(_b.get("seconds") or 0) for _b in data["beats"] if isinstance(_b, dict)) or _dur
     return data
+
+
+def gen_asset_reqs(script_obj, llm_cfg, roles_brief=""):
+    """由剧本 JSON 生成素材需求（asset_requirements / asset_prompts）。
+    roles_brief = 已有素材库清单文本（供 LLM 判断哪些是"缺的"）；"""
+    import json as _json
+    import os
+    prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
+    prompt_md = open(prompts_dir + "/video_assets.md", encoding="utf-8").read()
+    _mk = "\n---USER---\n"
+    if _mk in prompt_md:
+        _sp, _up = prompt_md.split(_mk, 1)
+    else:
+        _sp, _up = "", prompt_md
+    system_msg = _sp.strip() or "你是短视频制片统筹，只输出 JSON。"
+    try:
+        _script_txt = _json.dumps(script_obj, ensure_ascii=False)[:6000]
+    except Exception:
+        _script_txt = str(script_obj)[:6000]
+    user_msg = _up.replace("{{SCRIPT}}", _script_txt)
+    user_msg = user_msg.replace("{{ROLES}}", (roles_brief or "（素材库为空）")[:3000])
+    url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
+    if "/chat/completions" not in url:
+        url += "/chat/completions"
+    data, err = _llm_json(url, llm_cfg.get("llm_api_key", ""),
+                          llm_cfg.get("llm_model") or "deepseek-chat",
+                          [{"role": "system", "content": system_msg},
+                           {"role": "user", "content": user_msg}])
+    if err:
+        raise RuntimeError("LLM 调用失败: " + err[:200])
+    if not isinstance(data, dict):
+        raise RuntimeError("LLM 返回格式错误: " + str(data)[:200])
+    _kinds = ("persona", "scene", "prop")
+    reqs = data.get("asset_requirements")
+    if not isinstance(reqs, list):
+        reqs = []
+    _out_reqs = []
+    for _q in reqs:
+        if not isinstance(_q, dict):
+            continue
+        _k = _q.get("kind") if _q.get("kind") in _kinds else "prop"
+        _n = (_q.get("name") or "").strip()
+        if not _n:
+            continue
+        _slots = _q.get("slots")
+        if not isinstance(_slots, list) or not _slots:
+            _slots = ["front"]
+        _shots = _q.get("needed_in_shots")
+        if not isinstance(_shots, list):
+            _shots = []
+        _out_reqs.append({"kind": _k, "name": _n, "desc": (_q.get("desc") or "").strip(),
+                          "slots": _slots, "needed_in_shots": _shots})
+    prompts = data.get("asset_prompts")
+    if not isinstance(prompts, list):
+        prompts = []
+    _out_pr = []
+    for _p in prompts:
+        if not isinstance(_p, dict):
+            continue
+        _k = _p.get("kind") if _p.get("kind") in _kinds else "prop"
+        _n = (_p.get("name") or "").strip()
+        if not _n or not (_p.get("prompt") or _p.get("prompt_en")):
+            continue
+        _out_pr.append({"kind": _k, "name": _n, "slot": _p.get("slot") or "front",
+                        "aspect": _p.get("aspect") or "1:1",
+                        "prompt": (_p.get("prompt") or "").strip(),
+                        "prompt_en": (_p.get("prompt_en") or "").strip()})
+    if not _out_reqs:
+        data2, err2 = _llm_json(url, llm_cfg.get("llm_api_key", ""),
+                                llm_cfg.get("llm_model") or "deepseek-chat",
+                                [{"role": "system", "content": system_msg + "\n\n（重要）必须输出完整 JSON，asset_requirements 至少 1 条。"},
+                                 {"role": "user", "content": user_msg}])
+        if data2 and isinstance(data2, dict) and isinstance(data2.get("asset_requirements"), list):
+            for _q in data2["asset_requirements"]:
+                if isinstance(_q, dict) and (_q.get("name") or "").strip():
+                    _out_reqs.append({"kind": _q.get("kind") if _q.get("kind") in _kinds else "prop",
+                                      "name": _q["name"].strip(), "desc": (_q.get("desc") or "").strip(),
+                                      "slots": _q.get("slots") if isinstance(_q.get("slots"), list) and _q.get("slots") else ["front"],
+                                      "needed_in_shots": _q.get("needed_in_shots") if isinstance(_q.get("needed_in_shots"), list) else []})
+            if isinstance(data2.get("asset_prompts"), list):
+                for _p in data2["asset_prompts"]:
+                    if isinstance(_p, dict) and (_p.get("name") or "").strip() and (_p.get("prompt") or _p.get("prompt_en")):
+                        _out_pr.append({"kind": _p.get("kind") if _p.get("kind") in _kinds else "prop",
+                                        "name": _p["name"].strip(), "slot": _p.get("slot") or "front",
+                                        "aspect": _p.get("aspect") or "1:1",
+                                        "prompt": (_p.get("prompt") or "").strip(), "prompt_en": (_p.get("prompt_en") or "").strip()})
+        if not _out_reqs:
+            raise RuntimeError("LLM 未返回有效素材需求（已重试一次）: " + str(data)[:160])
+    return {"asset_requirements": _out_reqs, "asset_prompts": _out_pr}
 
 
 def _llm_json(url, key, model, messages, tries=3, user_id=""):

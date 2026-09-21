@@ -1399,6 +1399,16 @@ def api_get_video_plan(plan_id):
             d[_out] = _v if isinstance(_v, list) else []
         except Exception:
             d[_out] = []
+    # 读时重新校验：素材需求里匹配到的角色可能已被删除 → 不能指向幽灵角色
+    try:
+        _live = set(r["id"] for r in get_content_db().execute("SELECT id FROM roles").fetchall())
+        for _q in d.get("asset_requirements") or []:
+            if isinstance(_q, dict) and _q.get("matched_role_id") not in _live:
+                _q["matched_role_id"] = None
+                _q["matched_role_name"] = None
+                _q["exists"] = False
+    except Exception:
+        pass
     return jsonify(d)
 
 @app.route('/api/video-plans/<int:plan_id>/storyboard', methods=['POST'])
@@ -1485,9 +1495,100 @@ def api_gen_script(plan_id):
     db.commit(); db.close()
     return jsonify({"ok": True, "script": script})
 
+def _norm_name(s):
+    """名称归一：去空白 + 小写 + 去常见标点"""
+    return re.sub(r"[\s\-_\.·、，,（）()【】\[\]]+", "", (s or "")).lower()
+
+
+def _match_role(req, roles):
+    """把素材需求条目与全局角色库匹配（后端算，不信 LLM）：
+    ① 名称精确 → ② 名称互相包含 → ③ desc 关键词重合 ≥2（需 desc 与 role.note 都非空）"""
+    kind = req.get("kind") or "persona"
+    pool = [r for r in roles if (r.get("kind") or "persona") == kind]
+    rn = _norm_name(req.get("name"))
+    if not rn or not pool:
+        return None
+    for r in pool:
+        if _norm_name(r.get("name")) == rn:
+            return r
+    for r in pool:
+        a = _norm_name(r.get("name"))
+        if a and (a in rn or rn in a):
+            return r
+    _rw = set(w for w in re.split(r"[,\s/·;]+", (req.get("desc") or "").lower()) if len(w) > 3)
+    if len(_rw) >= 2:
+        for r in pool:
+            _tw = set(w for w in re.split(r"[,\s/·;]+", (r.get("note") or "").lower()) if len(w) > 3)
+            if len(_rw & _tw) >= 2:
+                return r
+    return None
+
+
+@app.route('/api/video-plans/<int:plan_id>/asset-reqs', methods=['POST'])
+def api_gen_asset_reqs(plan_id):
+    """由剧本生成素材需求（人物/场景/道具 + 缺失素材的生成提词），并与全局角色库匹配"""
+    u = current_user()
+    if not u:
+        return jsonify({"error": "未登录"}), 401
+    db = get_content_db()
+    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g:
+        return _g
+    try:
+        _sobj = json.loads(row["script"] or "")
+    except Exception:
+        _sobj = None
+    if not isinstance(_sobj, dict) or not _sobj:
+        return jsonify({"error": "请先生成剧本"}), 400
+    # 现有角色库（admin 全看，其他只看自己）
+    if _is_admin(u):
+        _rrows = db.execute("SELECT * FROM roles ORDER BY id DESC").fetchall()
+    else:
+        _rrows = db.execute("SELECT * FROM roles WHERE owner_id=? ORDER BY id DESC", (u["id"],)).fetchall()
+    rlist = [dict(r) for r in _rrows]
+    _brief = _role_assets_text(_roles_of([r["id"] for r in rlist])) if rlist else "（素材库为空）"
+    try:
+        from autogen import gen_asset_reqs, get_llm_config
+        out = gen_asset_reqs(_sobj, get_llm_config(), roles_brief=_brief)
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500      # 失败不写库
+    reqs = out.get("asset_requirements") or []
+    for q in reqs:
+        m = _match_role(q, rlist)
+        q["exists"] = bool(m and m.get("front_material_id"))     # 有主图才算"已有"
+        q["matched_role_id"] = (m.get("id") if m else None)
+        q["matched_role_name"] = (m.get("name") if m else None)
+    prompts = out.get("asset_prompts") or []
+    db.execute("UPDATE video_plans SET asset_reqs=?, asset_prompts=?,"
+               "updated_at=datetime('now','localtime') WHERE id=?",
+               (json.dumps(reqs, ensure_ascii=False), json.dumps(prompts, ensure_ascii=False), plan_id))
+    db.commit(); db.close()
+    return jsonify({"ok": True, "asset_requirements": reqs, "asset_prompts": prompts})
+
+
 @app.route('/api/video-plans/<int:plan_id>', methods=['PUT'])
 def api_update_video_plan(plan_id):
     """保存脚本 / 分镜 / 状态"""
+    _d0 = request.get_json(silent=True) or {}
+    if "role_ids" in _d0:      # 素材包：丢弃已不存在的角色 id（防悬空引用）
+        try:
+            _raw = _d0["role_ids"]
+            _ids = json.loads(_raw) if isinstance(_raw, str) else _raw
+        except Exception:
+            _ids = []
+        _live2 = set(r["id"] for r in get_content_db().execute("SELECT id FROM roles").fetchall())
+        _keep = []
+        for _x in (_ids if isinstance(_ids, list) else []):
+            try:
+                _xi = int(_x)
+            except Exception:
+                continue
+            if _xi in _live2:
+                _keep.append(_xi)
+        _d0["role_ids"] = json.dumps(_keep, ensure_ascii=False)
     data = request.json or {}
     db = get_content_db()
     _row = db.execute('SELECT article_id FROM video_plans WHERE id=?', (plan_id,)).fetchone()

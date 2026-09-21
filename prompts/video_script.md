@@ -18,7 +18,9 @@
 4. line 是中文旁白或台词，字数 ≈ seconds × 4~5 字（配音节奏）；不要写镜号、不要写"旁白："前缀
 5. mood 用简短英文词（calm / warm / tense / hopeful / nostalgic 等）
 6. total_duration_s 填 beats 时长之和的整数
-7. 只输出 JSON，不要解释、不要前后缀、不要代码围栏
+7. **任何字符串值里都不要使用双引号 \( " \)、不要换行**（会破坏 JSON）；
+   需要引用时用中文引号「」或省略；desc 内可用逗号分隔
+8. 只输出 JSON，不要解释、不要前后缀、不要代码围栏
 ---USER---
 目标时长：{{DURATION}} 秒
 

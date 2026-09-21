@@ -86,7 +86,7 @@
     <div id="blk-reqs" class="tab-pane" style="margin-top:20px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">③ 素材需求</label>
-            <button class="btn btn-outline btn-sm" id="asset-gen-btn" disabled title="P1 上线" onclick="genAssets()">🤖 AI 生成</button>
+            <button class="btn btn-outline btn-sm" id="asset-gen-btn" onclick="genAssets()">🧩 生成素材需求</button>
         </div>
         <div id="asset-req"></div>
     </div>
@@ -247,7 +247,9 @@ function renderReqs() {
         const btns = pm.map(promptHtml).join('');
         return '<div style="border:1px solid ' + (exists ? '#e2e8f0' : '#fcd34d') + ';background:' + (exists ? '#fff' : '#fffbeb') + ';border-radius:10px;padding:10px;margin-bottom:8px;">'
             + '<div style="font-size:13px;"><b>' + (KIND_CN[q.kind] || q.kind || '') + ' · ' + (q.name || '') + '</b> '
-            + (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 已有</span>' : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>')
+            + (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 已有' + (q.matched_role_name ? '：' + q.matched_role_name : '') + '</span>'
+                      : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>')
+            + (q.matched_role_id ? ' <button class="btn btn-outline btn-sm" onclick="useRoleOnce(' + q.matched_role_id + ')">用库里的</button>' : '')
             + '<span style="color:#94a3b8;font-size:11px;"> · 出现在镜头 '
             + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
             + btns + '</div>';
@@ -288,7 +290,31 @@ function copyText(t) {
     toast('已复制 ✓');
 }
 
-function genAssets() { toast('AI 生成素材：P1 上线', 'info'); }
+async function genAssets() {
+    const btn = document.getElementById('asset-gen-btn');
+    const _t = btn.textContent;
+    btn.disabled = true; btn.textContent = '🧩 生成中…';
+    try {
+        const r = await api('/api/video-plans/' + PLAN_ID + '/asset-reqs', {method: 'POST', body: '{}'});
+        if (r && r.ok) {
+            REQS = r.asset_requirements || [];
+            PROMPTS = r.asset_prompts || [];
+            renderReqs();
+            toast('素材需求已生成 ✓（' + REQS.length + ' 项，缺 ' + REQS.filter(q => !q.exists).length + ' 项）');
+        } else {
+            toast('❌ ' + ((r && r.error) || '生成失败'), 'error');
+        }
+    } catch (e) { toast('❌ ' + e, 'error'); }
+    btn.disabled = false; btn.textContent = _t;
+}
+
+// 把「库里已有」的角色一键加进素材包
+async function useRoleOnce(id) {
+    if (typeof addRole === 'function') { addRole(id); }
+    else if (ROLE_IDS.indexOf(id) < 0) { ROLE_IDS.push(id); }
+    await saveRoleIds();
+    toast('已加入素材包 ✓');
+}
 
 async function load() {
     const d = await api('/api/video-plans/' + PLAN_ID, {method:'GET'});

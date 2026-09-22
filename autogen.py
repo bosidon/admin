@@ -2731,18 +2731,40 @@ def _frame_target_rows(conn, plan_id, targets):
                 return ""
             return str(mat.url_to_path(m.get("file_path") or "") or "")   # 归一成 str（url_to_path 返回 Path）
 
-        subs = [r for r in reqs_d if (r.get("link_role") or "subject") in ("subject", "reference")]
+        _vis = (shot_d.get("visual") or "")
+        subs = sorted([r for r in reqs_d if (r.get("link_role") or "subject") in ("subject", "reference")],
+                      key=lambda r: _vis.find((r.get("name") or "").strip())
+                      if (r.get("name") or "").strip() in _vis else 999)   # 按在画面描述里出现的先后
         bgs = [r for r in reqs_d if (r.get("link_role") or "") == "background"]
         props = [r for r in reqs_d if (r.get("link_role") or "") == "prop"]
         seed = int(hashlib.md5(("shotframe|%s|%s" % (plan_id, idx)).encode("utf-8"))
                    .hexdigest()[:8], 16)     # 同一镜首/尾帧同 seed（一致性）
+        people = [p for p in [_path(r.get("material_id")) for r in subs] if p]
+        propp = [p for p in [_path(r.get("material_id")) for r in props] if p]
+
+        def _refs_for(main_p):
+            """参考图上限 2 张（节点 TextEncodeQwenImageEditPlus 只有 image1-3 = 主体 1 + 参考 2）：
+            人物 ≥2 个时拼成 1 张横排参考图，多出的额度给关键道具"""
+            others = [p for p in people if p != main_p]
+            out = []
+            if len(others) >= 2:
+                try:
+                    out.append(mat.stitch_refs(others[:4], str(Path(tempfile.gettempdir()) /
+                               ("hermes_refs_%s_%02d_%s.png" % (plan_id, idx, frame)))))
+                except Exception:
+                    out.extend(others)
+            else:
+                out.extend(others)
+            out.extend([p for p in propp if p != main_p])
+            return [p for p in out if p][:2]
+
         skip, main_p, refs = "", "", []
         if frame == "end":
             main_p = _path(shot_d.get("image_material_id"))
             if not main_p:
                 skip = "还没有首帧图（尾帧以首帧为底图）"
             else:
-                refs = [p for p in [_path(r.get("material_id")) for r in subs] if p][:2]
+                refs = _refs_for(main_p)
         else:
             main_p = next((p for p in [_path(r.get("material_id")) for r in bgs] if p), "")
             if not main_p:
@@ -2750,9 +2772,7 @@ def _frame_target_rows(conn, plan_id, targets):
             if not main_p:
                 skip = "没有可用主体图（请先给该镜挂场景/人物素材并出图）"
             else:
-                refs = [p for p in ([_path(r.get("material_id")) for r in subs]
-                                    + [_path(r.get("material_id")) for r in props])
-                        if p and p != main_p][:2]
+                refs = _refs_for(main_p)
         items.append({"shot_id": shot["id"], "idx": idx, "frame": frame, "seed": seed,
                       "main": main_p, "refs": refs, "aspect": aspect, "skip": skip,
                       "prompt": mat.frame_prompt(shot_d, reqs_d, frame=frame, aspect=aspect)})
@@ -2804,7 +2824,7 @@ def run_shotframe_job(job):
                 if jobstore.canceled(jid):
                     raise RuntimeError("已取消")
                 label = "%d 镜·%s" % (it["idx"] + 1, "尾帧" if it["frame"] == "end" else "首帧")
-                _log(jid, "%s：出图（主体图 %s）" % (label, it["main"].rsplit("/", 1)[-1]))
+                _log(jid, "%s：出图（主体图 %s / 参考图 %d 张）" % (label, it["main"].rsplit("/", 1)[-1], len(it["refs"])))
                 # 裁切后的源图只用于上传 ComfyUI，落临时目录（不要写进素材目录）
                 src = mat.fit_cover(it["main"], str(Path(tempfile.gettempdir()) /
                                      ("hermes_shotframe_%s_%02d_%s.png" % (jid, it["idx"], it["frame"]))), w, h)
@@ -2814,10 +2834,12 @@ def run_shotframe_job(job):
                 wf = mat.build_wf("edit", imgs, {"negative": neg}, cfg=cfg,
                                   prompt=it["prompt"], seed=it["seed"], prefix="shot_frame")
                 data = _run_wf_one(base, wf, logger=lambda m: _log(jid, m))
-                try:
-                    Path(src).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                for _tmp in [src] + list(it["refs"]):      # 裁切图/参考拼图都是用后即弃的临时件
+                    try:
+                        if "hermes_" in str(_tmp):
+                            Path(_tmp).unlink(missing_ok=True)
+                    except Exception:
+                        pass
                 name = "shot%02d_%s_%08x.png" % (it["idx"] + 1, it["frame"], it["seed"] % (2 ** 32))
                 (outdir / name).write_bytes(data)
                 url = "%s/materials/%s/%s" % (mat.URL_PREFIX, article_id, name)

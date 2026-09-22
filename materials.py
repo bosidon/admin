@@ -554,6 +554,30 @@ def fit_cover(src_path, out_path, w, h):
     return str(out_path)
 
 
+def stitch_refs(paths, out_path, cell=(416, 728), gap=8):
+    """把多个人物素材拼成 1 张横向参考图（ComfyUI 的 Qwen-Image-Edit 节点最多吃 3 张图 =
+    主体 1 + 参考 2，多人镜头靠拼图才能把全部人物的外观带进去）。
+    单元格按 cover 裁切、不拉伸；顺序 = 调用方给定的出场顺序，与提词里的人物顺序一致。"""
+    from PIL import Image
+    ps = [p for p in (paths or []) if p][:4]
+    if not ps:
+        raise ValueError("拼图需要至少 1 张图")
+    cw, ch = cell
+    canvas = Image.new("RGB", (cw * len(ps) + gap * (len(ps) - 1), ch), (24, 24, 24))
+    for i, p in enumerate(ps):
+        im = Image.open(str(p)).convert("RGB")
+        sw, sh = im.size or (cw, ch)
+        k = max(cw / float(sw or 1), ch / float(sh or 1))
+        nw, nh = max(cw, int(round(sw * k))), max(ch, int(round(sh * k)))
+        if (nw, nh) != (sw, sh):
+            im = im.resize((nw, nh), Image.LANCZOS)
+        l, t = (nw - cw) // 2, (nh - ch) // 2
+        canvas.paste(im.crop((l, t, l + cw, t + ch)), (i * (cw + gap), 0))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(str(out_path), "PNG", optimize=True)
+    return str(out_path)
+
+
 def frame_looks(reqs):
     """外观文字的唯一来源 = 素材需求行的 desc（短外观；不带「纯色背景/半身像」等素材图构图指令）——
     分镜本身不再复述外观（避免同一人物两套形象描述）"""
@@ -572,6 +596,18 @@ def frame_prompt(shot, reqs, frame="start", aspect="9:16", style=""):
     尾帧 = 同批素材外观 + 收尾状态 end_state + 「与首帧同人同景、只变机位与姿态」"""
     shot = shot or {}
     look = frame_looks(reqs)
+    vis = (shot.get("visual") or "")
+    persons, shows = [], []           # 本镜真正出场的人物 / 道具（按出场先后 = 参考拼图从左到右的顺序）
+    for _r in (reqs or []):
+        _nm = (_r.get("name") or "").strip()
+        if not _nm or _nm not in vis:
+            continue
+        if (_r.get("kind") or "").strip() == "persona":
+            persons.append(_nm)
+        elif (_r.get("kind") or "").strip() == "prop":
+            shows.append(_nm)
+    persons.sort(key=lambda n: vis.find(n))
+    shows.sort(key=lambda n: vis.find(n))
     kind = (shot.get("shot_type") or "中景").strip()
     move = (shot.get("camera_move") or "").strip()
     face = {"front": "正面朝向镜头", "side": "侧面朝镜头", "back": "背对镜头"}.get(
@@ -580,6 +616,11 @@ def frame_prompt(shot, reqs, frame="start", aspect="9:16", style=""):
     p = ["电影感单帧画面，真人实拍质感，构图完整、主体清晰"]
     if look:
         p.append("画面中的人物、场景、道具必须与下列外观完全一致，不得改动长相、服装、场景与画风：" + look)
+    if persons:
+        p.append("画面中必须出现 %d 个人物：%s；参考拼图里的人像从左到右依次就是这 %d 个人，"
+                 "每个人都要清晰可分辨，不得增减人数、不得把两个人物合成一张脸" % (len(persons), "、".join(persons), len(persons)))
+    if shows:
+        p.append("画面中必须出现的道具：" + "、".join(shows))
     if frame == "end":
         body = (shot.get("end_state") or "").strip().rstrip("。.；; ") or "延续同一动作的收尾姿态，动作刚完成"
         p.append("这是同一镜头连续画面里的「最后一帧」：" + body)

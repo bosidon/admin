@@ -60,6 +60,8 @@
                     <option value="zh-CN-YunjianNeural">云健 · 男声（成熟）</option>
                     <option value="zh-CN-YunyangNeural">云扬 · 男声（播报）</option>
                 </select>
+                <button class="btn btn-outline btn-sm" onclick="genFrameAll('start')">🎨 整片出首帧</button>
+                <button class="btn btn-outline btn-sm" onclick="genFrameAll('end')">🎨 整片出尾帧</button>
                 <button class="btn btn-outline btn-sm" onclick="genVoiceAll()">🔊 全部配音</button>
                 <button class="btn btn-primary btn-sm" onclick="genStoryboard()">🤖 AI 生成分镜</button>
                 <button class="btn btn-outline btn-sm" onclick="addScene()">＋ 添加镜头</button>
@@ -72,6 +74,8 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;">画面</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;">台词/字幕</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;">素材</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:118px;">首帧图</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:118px;">尾帧图</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
                 </tr>
@@ -129,7 +133,7 @@ function switchTab(name) {
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="6" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
@@ -137,6 +141,8 @@ function renderScenes() {
         <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="visual" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.visual||''}</textarea></td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="line" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.line||''}</textarea><div id="vz-${i}" style="margin-top:3px;"></div></td>
         <td style="padding:6px;border:1px solid #e2e8f0;">${assetCell(s)}</td>
+        <td style="padding:6px;border:1px solid #e2e8f0;">${frameCell(i,'start')}</td>
+        <td style="padding:6px;border:1px solid #e2e8f0;">${frameCell(i,'end')}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-outline btn-sm" onclick="genVoice(${i})" title="生成配音">🔊</button> <button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
@@ -148,6 +154,69 @@ function renderScenes() {
         };
     });
 }
+
+// ==================== 首/尾帧图（文+图 出图；尾帧以首帧为底图） ====================
+let FRAMES = {};                        // 镜号 → {image_url,end_image_url,image_material_id,end_image_material_id}
+async function loadFrames() {
+    try {
+        const d = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', { method: 'GET' });
+        FRAMES = {};
+        (d.shots || []).forEach(s => { FRAMES[s.shot_idx] = s; });
+    } catch (e) { FRAMES = {}; }
+}
+function frameCell(i, kind) {
+    const f = FRAMES[i] || {};
+    const url = (kind === 'start' ? f.image_url : f.end_image_url) || '';
+    const mid = (kind === 'start' ? f.image_material_id : f.end_image_material_id);
+    const thumb = url
+        ? '<a href="' + url + '" target="_blank" title="点击看大图"><img src="/api/materials/thumb?u=' + encodeURIComponent(url) + '" style="width:100%;height:64px;object-fit:cover;border-radius:6px;display:block;"></a>'
+        : '<div style="height:64px;display:flex;align-items:center;justify-content:center;background:#f8fafc;border-radius:6px;color:#cbd5e1;font-size:11px;">未生成</div>';
+    return '<div style="display:flex;flex-direction:column;gap:4px;">' + thumb
+        + '<div style="display:flex;gap:4px;">'
+        + '<button class="btn btn-outline btn-sm" style="flex:1;padding:2px 6px;font-size:11px;" onclick="genFrame(' + i + ',\'' + kind + '\')">' + (mid ? '重出' : '🎨 生成') + '</button>'
+        + '<button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:11px;" onclick="pickFrameMaterial(' + i + ',\'' + kind + '\')" title="从素材库选一张">📚</button>'
+        + '</div></div>';
+}
+async function genFrame(i, kind) {
+    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', {
+        method: 'POST', body: JSON.stringify({ frame: kind, shot_idx: i }) });
+    if (r && r.ok) { toast('已排队：第 ' + (i + 1) + ' 镜 · ' + (kind === 'start' ? '首帧' : '尾帧') + '（队列 ' + (r.queue_pos || 0) + '）'); }
+    else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
+}
+async function genFrameAll(kind) {
+    if (!SCENES.length) { toast('还没有分镜', 'error'); return; }
+    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', {
+        method: 'POST', body: JSON.stringify({ frame: kind }) });
+    if (r && r.ok) { toast('已排队 ' + r.targets + ' 张' + (kind === 'start' ? '首帧' : '尾帧') + ' —— 去「任务」页看进度'); }
+    else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
+}
+let FRAME_PICK_I = 0, FRAME_PICK_KIND = 'start';
+async function pickFrameMaterial(i, kind) {
+    FRAME_PICK_I = i; FRAME_PICK_KIND = kind;
+    const rows = await api('/api/library?type=image');
+    LIB_PICK = (Array.isArray(rows) ? rows : []).filter(function (m) {
+        return m && (m.file_path || m.path || m.url) && (m.type === 'image' || !m.type); });
+    const body = LIB_PICK.length ? ('<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;max-height:52vh;overflow:auto;">'
+        + LIB_PICK.map(function (m, k) {
+            const fp = m.file_path || m.path || m.url || '';
+            return '<div onclick="attachFrameMaterial(' + k + ')">'
+                + '<div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;cursor:pointer;">'
+                + '<img src="/api/materials/thumb?u=' + encodeURIComponent(fp) + '" style="width:100%;height:96px;object-fit:cover;display:block;">'
+                + '<div style="font-size:11px;padding:4px;color:#475569;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (m.name || ('#' + m.id)) + '</div></div></div>';
+        }).join('') + '</div>')
+        : '<div style="padding:24px;text-align:center;color:#94a3b8;">素材库里还没有图片</div>';
+    openModal('第 ' + (i + 1) + ' 镜 · 选' + (kind === 'start' ? '首帧' : '尾帧') + '图', body, function () {});
+}
+async function attachFrameMaterial(k) {
+    const m = LIB_PICK[k];
+    if (!m) { closeModal(); return; }
+    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', {
+        method: 'POST', body: JSON.stringify({ attach_material: { shot_idx: FRAME_PICK_I, frame: FRAME_PICK_KIND, material_id: m.id } }) });
+    closeModal();
+    if (r && r.ok) { toast('✓ 已挂到第 ' + (FRAME_PICK_I + 1) + ' 镜 · ' + (FRAME_PICK_KIND === 'start' ? '首帧' : '尾帧')); await refreshFrames(); }
+    else { toast('❌ ' + ((r && r.error) || '挂载失败'), 'error'); }
+}
+async function refreshFrames() { await loadFrames(); renderScenes(); }
 
 function addScene() { SCENES.push({visual:'', line:'', duration:5}); renderScenes(); }
 function delScene(i) { SCENES.splice(i,1); renderScenes(); }
@@ -529,6 +598,7 @@ async function load() {
     await loadRoles();
     renderRolePack();
     renderReqs();
+    await loadFrames();
     renderScenes();
     // 加载原始文案
     const arts = await api('/api/articles');

@@ -763,10 +763,11 @@ def needs_for_job(kind, payload=None):
         payload = payload or {}
         params = payload.get("params") or {}
         cfg = get_comfy_config()
-        if kind in ("cutout", "edit", "stitch"):
-            return mat.needs_for(kind, params=params, cfg=cfg,
+        if kind in ("cutout", "edit", "stitch", "shotframe"):
+            _n = 3 if kind == "shotframe" else (len(payload.get("ids") or []) or 1)
+            return mat.needs_for("edit" if kind == "shotframe" else kind, params=params, cfg=cfg,
                                  prompt=params.get("prompt") or params.get("instruction") or "",
-                                 n_imgs=len(payload.get("ids") or []) or 1)
+                                 n_imgs=_n)
         # images / txt2img：同一条出图链路（build_workflow）
         return mat.wf_needs(build_workflow("need_check", 768, 1024, 0, cfg, "__need_check__", ""))
     except Exception:
@@ -2692,6 +2693,159 @@ def run_txt2img_job(job):
     _log(jid, "文生图完成 → " + made["name"])
 
 
+def _frame_target_rows(conn, plan_id, targets):
+    """解析首/尾帧出图目标 → [{shot_id, idx, frame, prompt, main, refs, seed, aspect, skip}]
+    主图决定产物画幅：首帧 = 该镜背景图（无则第 1 张人物图）；尾帧 = 该镜首帧图
+    参考图最多 2 张（图生图总输入上限 3 = 1 主体 + 2 参考）"""
+    import materials as mat
+    conn.row_factory = sqlite3.Row
+    plan = conn.execute("SELECT * FROM video_scripts WHERE id=?", (plan_id,)).fetchone()
+    if not plan:
+        raise RuntimeError("剧本 #%s 不存在" % plan_id)
+    aspect = (plan["aspect"] or "9:16")
+    items = []
+    for t in targets:
+        try:
+            idx = int(t.get("shot_idx"))
+        except Exception:
+            raise RuntimeError("镜号不合法：%r" % (t.get("shot_idx"),))
+        frame = "end" if (t.get("frame") == "end") else "start"
+        shot = conn.execute("SELECT * FROM storyboard_shots WHERE script_id=? AND shot_idx=?",
+                            (plan_id, idx)).fetchone()
+        if not shot:
+            raise RuntimeError("镜号 %d 不存在" % idx)
+        shot_d = dict(shot)
+        reqs = conn.execute("""SELECT a.*, sa.role AS link_role FROM shot_assets sa
+                               JOIN script_assets a ON a.id = sa.asset_id
+                               WHERE sa.shot_id=? ORDER BY sa.sort_order, sa.id""",
+                            (shot["id"],)).fetchall()
+        reqs_d = [dict(r) for r in reqs]
+
+        def _path(mid):                      # 素材在另一个库（data/database.db），逐个取
+            if not mid:
+                return ""
+            try:
+                m = mat.get_material(mid) or {}
+            except Exception:
+                return ""
+            return str(mat.url_to_path(m.get("file_path") or "") or "")   # 归一成 str（url_to_path 返回 Path）
+
+        subs = [r for r in reqs_d if (r.get("link_role") or "subject") in ("subject", "reference")]
+        bgs = [r for r in reqs_d if (r.get("link_role") or "") == "background"]
+        props = [r for r in reqs_d if (r.get("link_role") or "") == "prop"]
+        seed = int(hashlib.md5(("shotframe|%s|%s" % (plan_id, idx)).encode("utf-8"))
+                   .hexdigest()[:8], 16)     # 同一镜首/尾帧同 seed（一致性）
+        skip, main_p, refs = "", "", []
+        if frame == "end":
+            main_p = _path(shot_d.get("image_material_id"))
+            if not main_p:
+                skip = "还没有首帧图（尾帧以首帧为底图）"
+            else:
+                refs = [p for p in [_path(r.get("material_id")) for r in subs] if p][:2]
+        else:
+            main_p = next((p for p in [_path(r.get("material_id")) for r in bgs] if p), "")
+            if not main_p:
+                main_p = next((p for p in [_path(r.get("material_id")) for r in subs] if p), "")
+            if not main_p:
+                skip = "没有可用主体图（请先给该镜挂场景/人物素材并出图）"
+            else:
+                refs = [p for p in ([_path(r.get("material_id")) for r in subs]
+                                    + [_path(r.get("material_id")) for r in props])
+                        if p and p != main_p][:2]
+        items.append({"shot_id": shot["id"], "idx": idx, "frame": frame, "seed": seed,
+                      "main": main_p, "refs": refs, "aspect": aspect, "skip": skip,
+                      "prompt": mat.frame_prompt(shot_d, reqs_d, frame=frame, aspect=aspect)})
+    return items, (plan["article_id"] or 0)
+
+
+def run_shotframe_job(job):
+    """分镜首/尾帧出图：文（素材外观 + 分镜的动作/落点）+ 图（参考图 / 首帧图）→ 一张静帧
+    首帧主图 = 背景图（无则第 1 张人物图）｜尾帧主图 = 该镜首帧图（保证衔接）
+    产物：素材库一条 + storyboard_shots.image_material_id / end_image_material_id + shot_renders
+    一次开机 → 做完 → 队列空才关机（与素材加工共用底座 / 同 GPU 域串行）"""
+    import materials as mat
+    jid = job["id"]
+    opts = job.get("payload") or {}
+    plan_id = int(opts.get("plan_id") or 0)
+    targets = opts.get("targets") or []
+    if not plan_id or not targets:
+        raise RuntimeError("缺少 plan_id / targets")
+    cfg = get_comfy_config()
+    if not instance_uuids() or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置实例池 / Token，请去「设置」页填写")
+    conn = _content_db()
+    items, article_id = _frame_target_rows(conn, plan_id, targets)
+    runnable = [x for x in items if not x["skip"]]
+    for x in items:
+        if x["skip"]:
+            _log(jid, "跳过 %d 镜·%s：%s" % (x["idx"] + 1, "尾帧" if x["frame"] == "end" else "首帧", x["skip"]))
+    if not runnable:
+        conn.close()
+        raise RuntimeError("没有可出图的目标：%s" % (items[0]["skip"] or "无"))
+    _set(jid, total=len(runnable), done=0)
+    _log(jid, "分镜首/尾帧：%d 张（剧本 #%d）" % (len(runnable), plan_id))
+    w, h = mat.frame_size(runnable[0]["aspect"])
+    outdir = mat.out_dir(article_id)
+    done = 0
+    with instance_ctx(jid, lambda m: _log(jid, m), needs=needs_for_job("shotframe", opts)) as inst:
+        try:
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
+            if not base:
+                raise RuntimeError("拿不到 ComfyUI 地址")
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
+                raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)
+            _set(jid, stage="generating")
+            neg = load_negative_prompt()
+            for it in runnable:
+                if jobstore.canceled(jid):
+                    raise RuntimeError("已取消")
+                label = "%d 镜·%s" % (it["idx"] + 1, "尾帧" if it["frame"] == "end" else "首帧")
+                _log(jid, "%s：出图（主体图 %s）" % (label, it["main"].rsplit("/", 1)[-1]))
+                src = mat.fit_cover(it["main"], str(outdir / ("frame_src_%02d_%s.png" % (it["idx"], it["frame"]))), w, h)
+                imgs = [comfy_upload(base, src)]
+                for rp in it["refs"]:
+                    imgs.append(comfy_upload(base, rp))
+                wf = mat.build_wf("edit", imgs, {"negative": neg}, cfg=cfg,
+                                  prompt=it["prompt"], seed=it["seed"], prefix="shot_frame")
+                data = _run_wf_one(base, wf, logger=lambda m: _log(jid, m))
+                name = "shot%02d_%s_%08x.png" % (it["idx"] + 1, it["frame"], it["seed"] % (2 ** 32))
+                (outdir / name).write_bytes(data)
+                url = "%s/materials/%s/%s" % (mat.URL_PREFIX, article_id, name)
+                mid = mat.upsert(url, "image",
+                                 name="分镜%d·%s" % (it["idx"] + 1, "尾帧" if it["frame"] == "end" else "首帧"),
+                                 category="shot_frame", source="shotframe", article_id=article_id,
+                                 owner_id=job.get("owner_id"), owner=job.get("owner") or "",
+                                 tags="分镜首尾帧")
+                col = "end_image_material_id" if it["frame"] == "end" else "image_material_id"
+                conn.execute("UPDATE storyboard_shots SET %s=?, updated_at=datetime('now','localtime') WHERE id=?" % col,
+                             (mid, it["shot_id"]))
+                if it["frame"] == "start":
+                    conn.execute("UPDATE storyboard_shots SET status='image_done' WHERE id=? AND status='pending'",
+                                 (it["shot_id"],))
+                conn.execute("INSERT INTO shot_renders (shot_id, kind, material_id, url, status, params, duration_s)"
+                             " VALUES (?,?,?,?,'done',?,0)",
+                             (it["shot_id"], "image", mid, url,
+                              json.dumps({"frame": it["frame"], "seed": it["seed"], "w": w, "h": h,
+                                          "prompt": it["prompt"][:800]}, ensure_ascii=False)))
+                conn.commit()
+                done += 1
+                _set(jid, done=done, images=[url])
+                _log(jid, "%s 完成 → %s（素材 #%s）" % (label, name, mid))
+            _log(jid, "首/尾帧全部完成：%d 张" % done)
+        except Exception as e:
+            _log(jid, "❌ 首/尾帧失败：%s" % str(e)[:220])
+            raise RuntimeError(str(e)[:300])
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
+
+
 def register_jobs():
     """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
     jobstore.DISPATCHER.register("images", run_images_job, domain="gpu")   # 显存域：一块 GPU 串行
@@ -2700,6 +2854,7 @@ def register_jobs():
     for _k in ("cutout", "edit", "stitch"):
         jobstore.DISPATCHER.register(_k, run_material_job, domain="gpu")
     jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
+    jobstore.DISPATCHER.register("shotframe", run_shotframe_job, domain="gpu")  # 分镜首/尾帧出图（同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
     # 空闲守卫：按需线程（无常驻钩子），唯一出生点 = 有任务（acquire_ready_instance 入口）

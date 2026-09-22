@@ -528,6 +528,80 @@ def out_dir(article_id=None):
 
 
 # ============================================================
+# 分镜首/尾帧：出图前的拼装（文 + 图）
+# ============================================================
+FRAME_SIZE = {"9:16": (768, 1344), "16:9": (1344, 768), "1:1": (1024, 1024)}
+
+
+def frame_size(aspect=None):
+    """首/尾帧画幅（决定图生图产物尺寸：图生图输出尺寸跟第 1 张输入图）"""
+    return FRAME_SIZE.get((aspect or "9:16").strip(), FRAME_SIZE["9:16"])
+
+
+def fit_cover(src_path, out_path, w, h):
+    """按目标画幅 cover 裁切（不拉伸、不补边）：作为图生图的主体图，保证产物比例稳定"""
+    from PIL import Image
+    im = Image.open(str(src_path)).convert("RGB")
+    sw, sh = im.size or (w, h)
+    k = max(w / float(sw or 1), h / float(sh or 1))
+    nw, nh = max(w, int(round(sw * k))), max(h, int(round(sh * k)))
+    if (nw, nh) != (sw, sh):
+        im = im.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    im = im.crop((left, top, left + w, top + h))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(str(out_path), "PNG", optimize=True)
+    return str(out_path)
+
+
+def frame_looks(reqs):
+    """外观文字的唯一来源 = 素材需求行（中文 desc，缺失退 prompt_en）——
+    分镜本身不再复述外观（避免同一人物两套形象描述）"""
+    parts = []
+    for r in (reqs or []):
+        d = (r.get("desc") or "").strip() or (r.get("prompt_en") or "").strip()
+        nm = (r.get("name") or "").strip()
+        if nm and d:
+            parts.append("%s：%s" % (nm, d))
+    return "；".join(parts)
+
+
+def frame_prompt(shot, reqs, frame="start", aspect="9:16", style=""):
+    """首帧/尾帧出图提词（全中文，便于调试）：
+    首帧 = 素材外观 + 起始画面（动作 + 运镜起幅）
+    尾帧 = 同批素材外观 + 收尾状态 end_state + 「与首帧同人同景、只变机位与姿态」"""
+    shot = shot or {}
+    look = frame_looks(reqs)
+    kind = (shot.get("shot_type") or "中景").strip()
+    move = (shot.get("camera_move") or "").strip()
+    face = {"front": "正面朝向镜头", "side": "侧面朝镜头", "back": "背对镜头"}.get(
+        (shot.get("shot_face") or "front").strip(), "")
+    w, h = frame_size(aspect)
+    p = ["电影感单帧画面，真人实拍质感，构图完整、主体清晰"]
+    if look:
+        p.append("画面中的人物、场景、道具必须与下列外观完全一致，不得改动长相、服装、场景与画风：" + look)
+    if frame == "end":
+        body = (shot.get("end_state") or "").strip() or "延续同一动作的收尾姿态，动作刚完成"
+        p.append("这是同一镜头连续画面里的「最后一帧」：" + body)
+        p.append("必须与参考图（该镜首帧画面）保持同一人物、同一服装、同一场景、同一画面轴向，"
+                 "只改变机位距离与角度以及该时刻的姿态，能和首帧自然衔接")
+    else:
+        body = (shot.get("visual") or "").strip() or "镜头开始的静态画面"
+        p.append("这是镜头的「第一帧」（起始画面）：" + body)
+    if kind:
+        p.append("景别：" + kind)
+    if move:
+        p.append("镜头运动倾向（决定构图透视）：" + move)
+    if face:
+        p.append("人物朝向：" + face)
+    if (style or "").strip():
+        p.append("画风：" + style.strip())
+    p.append("画面比例 %s（%d×%d），高清细节" % (aspect, w, h))
+    p.append("不要文字、不要字幕、不要水印、不要边框、不要拼贴、不要多手多指")
+    return "。".join(p)
+
+
+# ============================================================
 # ComfyUI 工作流构建（纯函数）
 # ============================================================
 def build_cutout_wf(img, model="RMBG-2.0", background="Alpha", color="#FFFFFF",

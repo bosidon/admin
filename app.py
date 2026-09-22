@@ -901,20 +901,23 @@ def save_shots(db, script_id, shots):
         sh = sh if isinstance(sh, dict) else {}
         idx = int(sh.get('shot_idx')) if isinstance(sh.get('shot_idx'), int) else i
         scene_id = _aid('scene', sh.get('scene'))
-        ex = db.execute('SELECT id FROM storyboard_shots WHERE script_id=? AND shot_idx=?',
+        ex = db.execute('SELECT id, visual FROM storyboard_shots WHERE script_id=? AND shot_idx=?',
                         (script_id, idx)).fetchone()
         _bi = sh.get('beat_idx')          # 对应剧本第几节（LLM 新口径；缺失/非法一律 0）
         try:
             _bi = int(_bi)
         except Exception:
             _bi = 0
-        vals = (sh.get('visual') or '', sh.get('line') or sh.get('subtitle') or '',
+        vals = (sh.get('visual') or sh.get('visual_prompt') or '',   # ★ 分镜提词的键名是 visual_prompt
+                sh.get('line') or sh.get('subtitle') or '',
                 sh.get('duration') or sh.get('duration_s'), sh.get('shot_type') or '',
                 sh.get('shot_face') or 'front', sh.get('music_hint') or '',
                 sh.get('template_hint') or '', scene_id,
                 _bi, sh.get('camera_move') or '', sh.get('end_state') or '')
         if ex:
             sid = ex['id']
+            if not (vals[0] or '').strip():        # 新值空 → 保留原画面描述，别把已有内容抹掉
+                vals = (ex['visual'] or '',) + vals[1:]
             db.execute("""UPDATE storyboard_shots SET visual=?, line=?, duration_s=?, shot_type=?,
                           shot_face=?, music_hint=?, template_hint=?, scene_asset_id=?,
                           beat_idx=?, camera_move=?, end_state=?,
@@ -2975,6 +2978,88 @@ def _mp3_seconds(fp):
         return round(float((r.stdout or "0").strip()), 2)
     except Exception:
         return 0
+
+
+@app.route('/api/video-plans/<int:plan_id>/shot-frame', methods=['GET', 'POST'])
+def api_plan_shot_frame(plan_id):
+    """分镜首/尾帧出图：GET = 每镜两张图的状态；POST = 入队（GPU 队列，看板可见）
+    body: {"frame": "start"|"end", "shot_idx": 3} —— 不传 shot_idx = 整片所有镜"""
+    u = current_user()
+    if not u:
+        return jsonify({"error": "未登录"}), 401
+    db = get_content_db()
+    row = _script_row(db, plan_id)
+    if not row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g:
+        return _g
+    shots = db.execute("""SELECT shot_idx, image_material_id, end_image_material_id, status
+                          FROM storyboard_shots WHERE script_id=? ORDER BY shot_idx""",
+                       (plan_id,)).fetchall()
+    if request.method == 'GET':
+        mdb = materialstore._conn()
+        out = []
+        for s in shots:
+            d = dict(s)
+            for k in ('image_material_id', 'end_image_material_id'):
+                mid = s[k]
+                m = mdb.execute("SELECT file_path FROM materials WHERE id=?", (mid,)).fetchone() if mid else None
+                d[k.replace('_material_id', '_url')] = (m["file_path"] if m else "")
+            out.append(d)
+        return jsonify({"shots": out})
+    if not shots:
+        return jsonify({"error": "该剧本还没有分镜，请先生成分镜"}), 400
+    body = request.get_json(silent=True) or {}
+    _at = body.get('attach_material') or {}
+    if _at:                                   # 手动挂图：从素材库选一张当该镜首/尾帧
+        try:
+            mid = int(_at.get('material_id'))
+            _si = int(_at.get('shot_idx'))
+        except Exception:
+            return jsonify({"error": "shot_idx / material_id 不合法"}), 400
+        _f = 'end' if (_at.get('frame') == 'end') else 'start'
+        if not [s2 for s2 in shots if s2["shot_idx"] == _si]:
+            return jsonify({"error": "镜号 %s 不存在" % _si}), 404
+        try:
+            _lib = materialstore.list_for(uid=u.get('id'), mtype='image', scope='mine', is_admin=_is_admin(u))
+        except Exception:
+            _lib = []
+        if not any(int(x.get('id') or 0) == mid for x in _lib):
+            return jsonify({"error": "素材不存在或无权使用"}), 403
+        col = 'end_image_material_id' if _f == 'end' else 'image_material_id'
+        db.execute("UPDATE storyboard_shots SET %s=?, updated_at=datetime('now','localtime')"
+                   " WHERE script_id=? AND shot_idx=?" % col, (mid, plan_id, _si))
+        db.commit()
+        return jsonify({"ok": True, "frame": _f, "shot_idx": _si, "material_id": mid})
+    frame = 'end' if (body.get('frame') == 'end') else 'start'
+    idx = body.get('shot_idx')
+    if idx is None or idx == '':
+        targets = [{"shot_idx": s["shot_idx"], "frame": frame} for s in shots]
+        if frame == 'end':               # 尾帧以首帧为底图：还没出首帧的镜先跳过
+            _first = {s["shot_idx"]: s["image_material_id"] for s in shots}
+            targets = [t for t in targets if _first.get(t["shot_idx"])]
+    else:
+        try:
+            idx = int(idx)
+        except Exception:
+            return jsonify({"error": "镜号不合法"}), 400
+        hit = [dict(s) for s in shots if s["shot_idx"] == idx]
+        if not hit:
+            return jsonify({"error": "镜号 %s 不存在" % idx}), 404
+        if frame == 'end' and not hit[0]["image_material_id"]:
+            return jsonify({"error": "请先生成该镜的首帧图（尾帧以首帧为底图）"}), 400
+        targets = [{"shot_idx": idx, "frame": frame}]
+    if not targets:
+        return jsonify({"error": "没有可出图的目标（尾帧需要先生成首帧）"}), 400
+    cfg = get_comfy_config()
+    if not instance_uuids() or not cfg.get('comfy_api_token'):
+        return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
+    payload = {"plan_id": plan_id, "targets": targets, "params": {}}
+    jid, reused = jobstore.DISPATCHER.enqueue('shotframe', row["article_id"], payload, len(targets),
+                                             priority=10, owner=user_label(u), owner_id=u.get('id'))
+    return jsonify({"ok": True, "job_id": jid, "reused": reused, "targets": len(targets),
+                    "queue_pos": jobstore.queue_pos(jid)})
 
 
 @app.route('/api/video-plans/<int:plan_id>/voice', methods=['GET'])

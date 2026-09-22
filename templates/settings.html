@@ -105,6 +105,11 @@
     </div>
 
     <div class="form-group">
+        <label class="form-label">负面提示词（留空则用提词文件里的「# 负面提示词」段，再空用内置默认）</label>
+        <input type="text" class="form-input" id="comfy-neg" placeholder="模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 引号, 双引号">
+    </div>
+
+    <div class="form-group">
         <label class="form-label">同时出图任务数（GPU 并行上限，≤ 实例池台数）</label>
         <input type="number" class="form-input" id="gpu-parallel" min="1" max="8" placeholder="2">
     </div>
@@ -212,6 +217,7 @@ async function saveComfy(msg) {
         comfy_sampler: document.getElementById('comfy-sampler').value.trim(),
         comfy_scheduler: document.getElementById('comfy-scheduler').value.trim(),
         comfy_denoise: document.getElementById('comfy-denoise').value.trim(),
+        comfy_neg: document.getElementById('comfy-neg').value.trim(),
         comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0',
         comfy_idle_shutdown_min: String(Math.max(0, parseInt(document.getElementById('comfy-idle-min').value || '0', 10) || 0))
     };
@@ -355,6 +361,7 @@ async function loadSettings() {
     document.getElementById('comfy-sampler').value = settings['comfy_sampler'] || 'euler';
     document.getElementById('comfy-scheduler').value = settings['comfy_scheduler'] || 'simple';
     document.getElementById('comfy-denoise').value = settings['comfy_denoise'] || '1.0';
+    document.getElementById('comfy-neg').value = settings['comfy_neg'] || '';
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
     document.getElementById('comfy-idle-min').value = settings['comfy_idle_shutdown_min'] || '5';
     try {

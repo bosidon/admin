@@ -469,7 +469,10 @@ def load_plan_prompt():
 
 
 def load_negative_prompt():
-    """提交给 ComfyUI 的负面提示词：文件里「负面提示词」段的内容；该段缺失时回落到内置默认"""
+    """提交给 ComfyUI 的负面提示词：设置项 comfy_neg 优先（页面留空则自动回落）；其次文件里「负面提示词」段；该段也缺 → 内置默认"""
+    _s = str(get_comfy_config().get("comfy_neg") or "").strip()
+    if _s:
+        return _s
     words = _split_neg_section(load_plan_prompt_raw())[1]
     words = ", ".join(ln.strip() for ln in words.splitlines()
                       if ln.strip() and not ln.strip().startswith("#"))
@@ -2441,7 +2444,8 @@ def run_material_job(job):
                 imgs = [comfy_upload(base, str(p)) for p in srcs]
                 name = mat.out_name(kind, rows[0].get("file_path"), params,
                                     "|".join(sorted(r.get("file_path") or "" for r in rows)))
-                wf = mat.build_wf(kind, imgs, params, cfg=cfg)
+                _p = dict(params); _p.setdefault("negative", load_negative_prompt())
+                wf = mat.build_wf(kind, imgs, _p, cfg=cfg)
                 (outdir / name).write_bytes(_run_wf_one(base, wf, logger=lambda m: _log(jid, m)))
                 url = "%s/materials/%s/%s" % (mat.URL_PREFIX, aid, name)
                 results.append((rows[0], url))
@@ -2461,7 +2465,8 @@ def run_material_job(job):
                         for r2, p2 in refs:
                             imgs.append(comfy_upload(base, str(p2)))
                     name = mat.out_name(kind, r.get("file_path"), params)
-                    wf = mat.build_wf(kind, imgs, params, cfg=cfg,
+                    _p = dict(params); _p.setdefault("negative", load_negative_prompt())
+                    wf = mat.build_wf(kind, imgs, _p, cfg=cfg,
                                       prompt=mat.make_prompt(kind, params),
                                       seed=random.randint(1, 2 ** 31 - 1))
                     (outdir / name).write_bytes(_run_wf_one(base, wf, logger=lambda m: _log(jid, m)))

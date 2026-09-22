@@ -848,6 +848,23 @@ def save_script_obj(db, script_id, obj):
             if isinstance(it, dict) and (it.get('name') or '').strip():
                 order += 1
                 upsert_asset(db, script_id, kind, it['name'], desc=it.get('desc') or '', sort_order=order)
+    # 本次未再提及的需求行不留幽灵 —— 两条保护缺一不可：
+    # ① 只清 slot='front'（本函数自己产生的那一类；「素材需求」步骤产生的 side/back 行不动）
+    # ② 用户/下游动过的行不删：已挂素材或已选源（material_id / status）、已被镜头关联（shot_assets）
+    _seen = [_req_key(_k, (_it.get('name') or '').strip(), 'front')
+             for _k, _key in (('persona', 'characters'), ('scene', 'scenes'), ('prop', 'props'))
+             for _it in (obj.get(_key) or [])
+             if isinstance(_it, dict) and (_it.get('name') or '').strip()]
+    if _seen:                                   # 三类全空＝生成异常 → 整段跳过，绝不误删
+        _dead = ("SELECT id FROM script_assets WHERE script_id=? AND slot='front'"
+                 " AND req_key NOT IN (%s) AND material_id IS NULL"
+                 " AND COALESCE(status,'missing') IN ('','missing')"
+                 " AND id NOT IN (SELECT asset_id FROM shot_assets)" % ','.join('?' * len(_seen)))
+        _p_dead = [script_id] + _seen
+        # 先解开镜头对需求行的引用（生产库该外键还是 NO ACTION，直接删会被 SQLite 拦死）
+        db.execute('UPDATE storyboard_shots SET scene_asset_id=NULL WHERE script_id=?'
+                   ' AND scene_asset_id IN (' + _dead + ')', [script_id] + _p_dead)
+        db.execute('DELETE FROM script_assets WHERE id IN (' + _dead + ')', _p_dead)
     return obj
 
 

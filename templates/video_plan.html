@@ -84,9 +84,14 @@
 
     <!-- Tab 素材：③ 素材需求（asset_requirements / asset_prompts） -->
     <div id="blk-reqs" class="tab-pane" style="margin-top:20px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">
             <label style="font-weight:600;font-size:14px;">素材列表（列出剧本需要的素材）</label>
-            <button class="btn btn-outline btn-sm" id="asset-gen-btn" onclick="genAssets()">🧩 生成素材需求</button>
+            <div style="display:flex;gap:6px;align-items:center;">
+                <span id="asset-sel-count" style="color:#64748b;font-size:12px;"></span>
+                <button class="btn btn-outline btn-sm" onclick="toggleSelectAll()">☑ 全选待生成</button>
+                <button class="btn btn-primary btn-sm" id="asset-batch-btn" onclick="genAssetsBatch()">🎨 批量生成所选</button>
+                <button class="btn btn-outline btn-sm" id="asset-gen-btn" onclick="genAssets()">🧩 生成素材需求</button>
+            </div>
         </div>
         <div id="asset-req"></div>
     </div>
@@ -225,21 +230,40 @@ function renderReqs() {
         return;
     }
     const USED = [];
-    box.innerHTML = REQS.map(function (q) {
+    REQ_PROMPT_IDX = {};                    // 需求行 id → 该行的提词下标（批量生成用）
+    box.innerHTML = REQS.map(function (q, qi) {
         const exists = !!q.exists;
-        const pm = PROMPTS.filter(p => (p.kind || '') === (q.kind || '') && p.name === q.name);
+        const attached = !!q.material_id;
+        const rid = (q.id === undefined || q.id === null) ? ('x' + qi) : q.id;
+        const pm = PROMPTS.filter(p => (p.kind || '') === (q.kind || '') && p.name === q.name
+                                       && (!q.slot || !p.slot || p.slot === q.slot));
         pm.forEach(p => { if (USED.indexOf(p) < 0) USED.push(p); });
-        const btns = pm.map(promptHtml).join('');
-        return '<div style="border:1px solid ' + (exists ? '#e2e8f0' : '#fcd34d') + ';background:' + (exists ? '#fff' : '#fffbeb') + ';border-radius:10px;padding:10px;margin-bottom:8px;">'
-            + '<div style="font-size:13px;"><b>' + (KIND_CN[q.kind] || q.kind || '') + ' · ' + (q.name || '') + '</b> '
-            + (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 已有' + (q.matched_role_name ? '：' + q.matched_role_name : '') + '</span>'
-                      : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>')
+        const idxs = pm.map(function (p) { return PROMPT_OBJ.push(p) - 1; });
+        REQ_PROMPT_IDX[rid] = idxs;
+        const btns = pm.map(function (p, k) { return promptHtml(p, idxs[k]); }).join('');
+        const img = attached ? ('<img src="/api/materials/thumb?u=' + encodeURIComponent(q.material_url || '') + '" '
+            + 'style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #e2e8f0;">') : '';
+        const ck = '<input type="checkbox" class="ar-ck" data-rid="' + rid + '"' + (SEL_REQ.has(rid) ? ' checked' : '')
+            + ' onclick="onReqCheck(this)" style="margin-right:6px;vertical-align:-2px;">';
+        return '<div style="border:1px solid ' + (attached ? '#99f6e4' : (exists ? '#e2e8f0' : '#fcd34d'))
+            + ';background:' + (attached ? '#f0fdfa' : (exists ? '#fff' : '#fffbeb'))
+            + ';border-radius:10px;padding:10px;margin-bottom:8px;display:flex;gap:10px;">'
+            + img
+            + '<div style="flex:1;min-width:0;">'
+            + '<div style="font-size:13px;">' + ck + '<b>' + (KIND_CN[q.kind] || q.kind || '') + ' · ' + (q.name || '')
+            + (q.slot ? ' · ' + q.slot : '') + '</b> '
+            + (attached ? '<span style="color:#0f766e;font-size:11px;">✔ 已关联素材'
+                        + (q.source ? '（' + (q.source === 'ai' ? 'AI 生成' : '素材库') + '）' : '') + '</span>'
+                        : (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 库里已有' + (q.matched_role_name ? '：' + q.matched_role_name : '') + '</span>'
+                                  : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>'))
             + ((q.matched_role_id && ROLE_IDS.indexOf(q.matched_role_id) >= 0) ? ' <span style="color:#0f766e;font-size:11px;">✓ 已进本片</span>' : '')
+            + ' <button class="btn btn-outline btn-sm" onclick="pickMaterialFor(\'' + rid + '\')">📚 从素材库选</button>'
             + (q.matched_role_id ? ' <button class="btn btn-outline btn-sm" onclick="useRoleOnce(' + q.matched_role_id + ')">用库里的</button>' : '')
             + '<span style="color:#94a3b8;font-size:11px;"> · 出现在镜头 '
             + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
-            + btns + '</div>';
+            + btns + '</div></div>';
     }).join('');
+    updateSelCount();
     // LLM 可能给 req 与 prompt 用不同名字：未匹配上的提词单独列出，避免被吞掉
     const rest = PROMPTS.filter(p => USED.indexOf(p) < 0);
     if (rest.length) {
@@ -249,17 +273,100 @@ function renderReqs() {
     }
 }
 
-function promptHtml(p) {
+function promptHtml(p, _objIdx) {
     const i1 = PROMPT_FLAT.push(p.prompt || '') - 1;
     const i2 = PROMPT_FLAT.push(p.prompt_en || '') - 1;
     return '<div style="margin-top:6px;background:#f8fafc;border-radius:8px;padding:8px;font-size:12px;">'
         + '<div><b>中文提词</b>：' + (p.prompt || '') + ' <button class="btn btn-outline btn-sm" onclick="copyIdx(' + i1 + ')">复制</button></div>'
         + '<div style="margin-top:4px;color:#475569;"><b>EN</b>：' + (p.prompt_en || '') + ' <button class="btn btn-outline btn-sm" onclick="copyIdx(' + i2 + ')">复制</button></div>'
-        + '<div style="margin-top:4px;color:#94a3b8;">' + (KIND_CN[p.kind] || p.kind || '') + ' · ' + (p.name || '') + ' · aspect ' + (p.aspect || '-') + ' · slot ' + (p.slot || '-')  + ' <button class=\"btn btn-primary btn-sm\" onclick=\"genAssetByIdx(' + (PROMPT_OBJ.push(p) - 1) + ')\">🎨 AI 生成素材</button> <span id=\"as-st-' + (PROMPT_OBJ.length - 1) + '\" style=\"color:#64748b;font-size:11px;\"></span>' + '</div>'
+        + '<div style="margin-top:4px;color:#94a3b8;">' + (KIND_CN[p.kind] || p.kind || '') + ' · ' + (p.name || '') + ' · aspect ' + (p.aspect || '-') + ' · slot ' + (p.slot || '-')  + ' <button class=\"btn btn-primary btn-sm\" onclick=\"genAssetByIdx(' + (_objIdx === undefined ? (PROMPT_OBJ.push(p) - 1) : _objIdx) + ')\">🎨 AI 生成素材</button> <span id=\"as-st-' + (PROMPT_OBJ.length - 1) + '\" style=\"color:#64748b;font-size:11px;\"></span>' + '</div>'
         + '</div>';
 }
 
 const PROMPT_OBJ = [];
+const SEL_REQ = new Set();          // 勾选的需求行 id（批量生成用）
+let REQ_PROMPT_IDX = {};            // 需求行 id → 提词对象下标数组
+let LIB_PICK = [];                  // 素材库选择器当前列表（onclick 用下标查表，避免引号嵌套）
+
+function onReqCheck(el) {
+    const rid = el.dataset.rid;
+    if (el.checked) { SEL_REQ.add(rid); } else { SEL_REQ.delete(rid); }
+    updateSelCount();
+}
+function updateSelCount() {
+    const el = document.getElementById('asset-sel-count');
+    if (el) { el.textContent = SEL_REQ.size ? ('已选 ' + SEL_REQ.size + ' 项') : ''; }
+}
+function toggleSelectAll() {
+    const all = REQS.map(function (q, i) { return (q.id === undefined || q.id === null) ? ('x' + i) : q.id; });
+    const wantAll = SEL_REQ.size < all.length;
+    SEL_REQ.clear();
+    if (wantAll) { all.forEach(id => SEL_REQ.add(id)); }
+    document.querySelectorAll('.ar-ck').forEach(function (ck) { ck.checked = wantAll; });
+    updateSelCount();
+}
+
+// ① 多选 → 批量 AI 生成（并发上限 2，避免一次压满 GPU 队列）
+async function genAssetsBatch() {
+    const ids = Array.from(SEL_REQ);
+    if (!ids.length) { toast('先勾选要生成的素材', 'error'); return; }
+    const idxs = [];
+    ids.forEach(function (rid) { (REQ_PROMPT_IDX[rid] || []).forEach(i => idxs.push(i)); });
+    if (!idxs.length) { toast('所选素材没有可用提词', 'error'); return; }
+    const btn = document.getElementById('asset-batch-btn');
+    const _t = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '🎨 提交 ' + idxs.length + ' 个…'; }
+    toast('已提交 ' + idxs.length + ' 个生成任务（队列处理，可关闭页面）');
+    let _cur = 0;
+    const _run = async function () {
+        while (_cur < idxs.length) {
+            const i = idxs[_cur++];
+            try { genAssetByIdx(i); } catch (e) {}
+            await new Promise(r => setTimeout(r, 400));      // 逐个提交，失败不互相影响
+        }
+    };
+    await Promise.all([_run(), _run()]);
+    if (btn) { btn.disabled = false; btn.textContent = _t; }
+    SEL_REQ.clear();
+    updateSelCount();
+}
+
+// ③ 从素材库选择（列表走 /api/library，缩略图走 /api/materials/thumb）
+async function pickMaterialFor(rid) {
+    const q = REQS.find(function (x, i) { return ((x.id === undefined || x.id === null) ? ('x' + i) : x.id) === rid; });
+    if (!q) { return; }
+    const rows = await api('/api/library?type=image');     // type 只认 all/image/audio/video（不能传 kind）
+    LIB_PICK = (Array.isArray(rows) ? rows : []).filter(function (m) {
+        return m && (m.file_path || m.path || m.url) && (m.type === 'image' || !m.type);
+    });
+    const body = LIB_PICK.length ? ('<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;max-height:52vh;overflow:auto;">'
+        + LIB_PICK.map(function (m, k) {
+            const fp = m.file_path || m.path || m.url || '';
+            return '<div onclick=\'attachMaterial("' + rid + '",' + k + ')\'>'
+                + '<div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;cursor:pointer;">'
+                + '<img src="/api/materials/thumb?u=' + encodeURIComponent(fp) + '" style="width:100%;height:96px;object-fit:cover;display:block;">'
+                + '<div style="font-size:11px;padding:4px;color:#475569;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                + (m.name || ('#' + m.id)) + '</div></div></div>';
+        }).join('') + '</div>')
+        : '<div style="padding:24px;text-align:center;color:#94a3b8;">素材库里还没有这类图片 —— 可先点「🎨 AI 生成素材」</div>';
+    openModal('从素材库选 · ' + (KIND_CN[q.kind] || '') + (q.name || ''), body, function () {});
+}
+
+// ② 素材归属：挂到该需求行（后端同时把素材挂到角色槽位、并把素材归到本文案名下）
+async function attachMaterial(rid, k) {
+    const q = REQS.find(function (x, i) { return ((x.id === undefined || x.id === null) ? ('x' + i) : x.id) === rid; });
+    const m = LIB_PICK[k];
+    if (!q || !m) { closeModal(); return; }
+    const r = await api('/api/video-plans/' + PLAN_ID + '/asset-attach', {
+        method: 'POST',
+        body: JSON.stringify({ kind: q.kind, name: q.name, slot: q.slot || 'front',
+                               material_id: m.id || null, url: m.file_path || m.path || m.url || '',
+                               source: (m.source === 'ai' || m.source === 'txt2img') ? 'ai' : 'library' })
+    });
+    closeModal();
+    if (r && r.ok) { toast('✓ 已关联到「' + (q.name || '') + '」', 'success'); await load(); }
+    else { toast('❌ ' + ((r && r.error) || '关联失败'), 'error'); }
+}
 function genAssetByIdx(i) {
     const p = PROMPT_OBJ[i];
     const st = document.getElementById('as-st-' + i);

@@ -636,6 +636,25 @@ def _shot_links(db, script_id):
     return out
 
 
+def _material_urls(ids):
+    """materials 在 database.db、roles 在 content.db → Python 侧组装（沿用既有做法，不做跨库 JOIN）"""
+    ids = sorted({int(i) for i in (ids or []) if i})
+    if not ids:
+        return {}
+    try:
+        mdb = sqlite3.connect('file:%s?mode=ro' % DATABASE, uri=True)
+        rows = mdb.execute('SELECT id, file_path FROM materials WHERE id IN (%s)'
+                           % ','.join('?' * len(ids)), ids).fetchall()
+        mdb.close()
+        return {r[0]: (r[1] or '') for r in rows}
+    except Exception as e:                      # 取不到就不显示缩略图，不影响主流程
+        try:
+            log.warning('取素材文件路径失败: %s', e)
+        except Exception:
+            pass
+        return {}
+
+
 def asset_reqs_of(db, script_id):
     """旧 asset_reqs 形状 + 新字段"""
     rows = _assets_rows(db, script_id)
@@ -647,6 +666,7 @@ def asset_reqs_of(db, script_id):
     shot_idx = {r['id']: r['shot_idx'] for r in
                 db.execute('SELECT id, shot_idx FROM storyboard_shots WHERE script_id=?', (script_id,))}
     out = []
+    murls = _material_urls([a['material_id'] for a in rows])
     for a in rows:
         rid = a['matched_role_id'] if a['matched_role_id'] in roles else None
         out.append({'kind': a['kind'], 'name': a['name'], 'desc': a['desc'],
@@ -656,6 +676,7 @@ def asset_reqs_of(db, script_id):
                     'matched_role_name': roles.get(rid) if rid else None,
                     'id': a['id'], 'slot': a['slot'], 'aspect': a['aspect'], 'prompt': a['prompt'],
                     'prompt_en': a['prompt_en'], 'material_id': a['material_id'],
+                    'material_url': murls.get(a['material_id']) or '',
                     'source': a['source'], 'status': a['status']})
     return out
 

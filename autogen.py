@@ -39,7 +39,6 @@ ADL_P = "/api/v1/adl_dev/dev/instance/pro"
 DEFAULTS = {
     "comfy_api_token": "",
     "comfy_instance_uuid": "",
-    "comfy_base_url": "",
     "comfy_unet": "qwen_image_fp8_e4m3fn.safetensors",
     "comfy_clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
     "comfy_vae": "qwen_image_vae.safetensors",
@@ -897,14 +896,6 @@ def fit_workflow(wf, base, logger=None):
     return changes
 
 
-def _comfy_ping(base, timeout=6):
-    """快速探一下 /system_stats（配好的地址可能因实例换区/重建而失效）"""
-    try:
-        return requests.get(base.rstrip("/") + "/system_stats", timeout=timeout).status_code == 200
-    except Exception:
-        return False
-
-
 def _snapshot_domain(instance_uuid=""):
     """指定实例的实时域名（AutoDL 换区/重建后域名会变）"""
     try:
@@ -918,20 +909,14 @@ def _snapshot_domain(instance_uuid=""):
 
 
 def base_for(instance_uuid="", logger=None):
-    """指定实例的 ComfyUI 地址：池中第一台优先用 settings 里配的地址（探得通才用），其余用实时域名"""
-    cfg = get_comfy_config()
+    """指定实例的 ComfyUI 地址：取 AutoDL 实时域名（唯一来源；不再读 settings 里的固定地址）"""
     u = instance_uuid or primary_uuid()
-    base = (cfg.get("comfy_base_url") or "").strip().rstrip("/")
-    if base and not base.startswith("http"):
-        base = "https://" + base
-    if base and u == primary_uuid() and _comfy_ping(base):
-        return base
     live = _snapshot_domain(u)
     if live:
-        if logger and base and live.rstrip("/") != base.rstrip("/"):
-            logger("实例 %s 实时地址：%s" % (u, live))
         return live
-    return base
+    if logger:
+        logger("实例 %s 拿不到实时域名（AutoDL 快照为空或无此字段）" % u)
+    return ""
 
 
 def resolve_base_url(logger=None):

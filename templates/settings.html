@@ -54,11 +54,6 @@
     </div>
 
     <div class="form-group">
-        <label class="form-label">ComfyUI 地址（留空则自动从实例详情取）</label>
-        <input type="text" class="form-input" id="comfy-base-url" placeholder="https://xxx.seetacloud.com:8443">
-    </div>
-
-    <div class="form-group">
         <label class="form-label">模型组</label>
         <select class="form-select" id="comfy-model-group" onchange="applyModelGroup()"></select>
     </div>
@@ -207,7 +202,6 @@ async function saveComfy(msg) {
         comfy_instance_uuid: (document.getElementById('comfy-instances').value.trim().split('\n')[0] || '').split('|')[0].trim(),
         gpu_parallel: document.getElementById('gpu-parallel').value.trim() || '2',
         comfy_api_token: document.getElementById('comfy-api-token').value.trim(),
-        comfy_base_url: document.getElementById('comfy-base-url').value.trim(),
         comfy_unet: document.getElementById('comfy-unet').value.trim(),
         comfy_clip: document.getElementById('comfy-clip').value.trim(),
         comfy_vae: document.getElementById('comfy-vae').value.trim(),
@@ -351,7 +345,6 @@ async function loadSettings() {
     document.getElementById('comfy-instances').value = settings['comfy_instances'] || settings['comfy_instance_uuid'] || '';
     document.getElementById('gpu-parallel').value = settings['gpu_parallel'] || '2';
     document.getElementById('comfy-api-token').value = settings['comfy_api_token'] || '';
-    document.getElementById('comfy-base-url').value = settings['comfy_base_url'] || '';
     document.getElementById('comfy-unet').value = settings['comfy_unet'] || 'qwen_image_fp8_e4m3fn.safetensors';
     document.getElementById('comfy-clip').value = settings['comfy_clip'] || 'qwen_2.5_vl_7b_fp8_scaled.safetensors';
     document.getElementById('comfy-vae').value = settings['comfy_vae'] || 'qwen_image_vae.safetensors';

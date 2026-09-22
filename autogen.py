@@ -2854,11 +2854,19 @@ def run_shotframe_job(job):
                 if it["frame"] == "start":
                     conn.execute("UPDATE storyboard_shots SET status='image_done' WHERE id=? AND status='pending'",
                                  (it["shot_id"],))
-                conn.execute("INSERT INTO shot_renders (shot_id, kind, material_id, url, status, params, duration_s)"
-                             " VALUES (?,?,?,?,'done',?,0)",
-                             (it["shot_id"], "image", mid, url,
-                              json.dumps({"frame": it["frame"], "seed": it["seed"], "w": w, "h": h,
-                                          "prompt": it["prompt"][:800]}, ensure_ascii=False)))
+                _rp = json.dumps({"frame": it["frame"], "seed": it["seed"], "w": w, "h": h,
+                                  "prompt": it["prompt"][:800]}, ensure_ascii=False)
+                # 首/尾帧同为 kind='image'，按 (shot_id, url) upsert —— 同图重跑更新原行，不新增（app.set_shot_render 按
+                # (shot_id,kind) 会让首帧被尾帧覆盖，故这条图片产物路径单独按 url 去重）
+                _ex = conn.execute("SELECT id FROM shot_renders WHERE shot_id=? AND url=?",
+                                   (it["shot_id"], url)).fetchone()
+                if _ex:
+                    conn.execute("UPDATE shot_renders SET material_id=?, status='done', params=?, error='' WHERE id=?",
+                                 (mid, _rp, _ex[0]))
+                else:
+                    conn.execute("INSERT INTO shot_renders (shot_id, kind, material_id, url, status, params, duration_s)"
+                                 " VALUES (?,?,?,?,'done',?,0)",
+                                 (it["shot_id"], "image", mid, url, _rp))
                 conn.commit()
                 done += 1
                 _set(jid, done=done, images=[url])

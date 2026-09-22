@@ -97,7 +97,7 @@ def init():
                      ("want_cards", "INTEGER DEFAULT 0"), ("want_scenes", "INTEGER DEFAULT 0"),
                      ("started_at", "TEXT"), ("domain", "TEXT DEFAULT 'llm'"),
                      ("priority", "INTEGER DEFAULT 0"),
-                     ("host", "TEXT DEFAULT ''"), ("owner_id", "TEXT DEFAULT ''"),
+                     ("host", "TEXT DEFAULT ''"), ("owner_id", "TEXT DEFAULT ''"), ("retry", "INTEGER DEFAULT 0"),
                      ("ready_at", "TEXT"),                   # ComfyUI 就绪（精确用时起点）
                      ("instance_at", "TEXT")):               # 实例 running（拆「开机等待」用）
         if col not in cols:
@@ -409,6 +409,13 @@ def canceled(job_id):
     return bool(j) and (j["status"] == "canceled" or "取消中" in (j.get("error") or ""))
 
 
+def _is_infra_error(msg):
+    """基础设施类错误（实例离线/开机失败/地址拿不到）→ 可自动重排队；代码类错误不重试"""
+    kws = ("实例已离线", "等待空闲实例超时", "未就绪", "拿不到 ComfyUI 地址", "无库存",
+           "开机失败", "Connection", "Max retries", "timed out", "请求超时", "生成超时")
+    return any(k in msg for k in kws)
+
+
 def recover_orphans():
     """启动自愈：上次进程残留的 running/queued → interrupted"""
     c = _conn()
@@ -476,11 +483,23 @@ class Dispatcher:
                 update(jid, status="done", finished_at=_now(), stage="")
         except Exception as e:
             msg = str(e)[:300] or "未知错误"
-            log(jid, "❌ 失败：%s" % msg)
             cur = get(jid) or {}
-            if cur.get("status") == "running":
-                update(jid, status="canceled" if "已取消" in msg else "failed",
-                       error=msg, finished_at=_now(), stage="")
+            if cur.get("status") != "running":
+                return
+            if _is_infra_error(msg):
+                try:
+                    rn = int((get(jid) or {}).get("retry") or 0)
+                except Exception:
+                    rn = 0
+                if rn < 2:
+                    log(jid, "♻️ %s → 自动重排队（第 %d 次）" % (msg, rn + 1))
+                    update(jid, status="queued", retry=rn + 1, stage="", host="",
+                           error="实例离线，自动重排队（第 %d 次）：%s" % (rn + 1, msg))
+                    return
+                msg = "重试 %d 次仍失败：%s" % (rn, msg)
+            log(jid, "❌ 失败：%s" % msg)
+            update(jid, status="canceled" if "已取消" in msg else "failed",
+                   error=msg, finished_at=_now(), stage="")
 
     def enqueue(self, kind, article_id=None, payload=None, total=0, owner="", priority=0,
                 owner_id=""):

@@ -1105,15 +1105,23 @@ def comfy_generate(base, prompt, w, h, prefix, cfg, timeout=600, seed=None):
     meta["name_fit"] = fit_workflow(wf, base)      # 按实例适配模型名（多实例目录结构可能不同）
     r = requests.post(base + "/prompt", json={"prompt": wf}, timeout=60)
     if r.status_code != 200:
-        raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, r.text[:300]))
+        _b = r.text or ""
+        if r.status_code in (403, 404, 502, 503, 504) or "<html" in _b[:400].lower():
+            raise RuntimeError("实例已离线（提交返回 HTTP %s，实例可能已关机）" % r.status_code)
+        raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, _b[:300]))
     pid = r.json()["prompt_id"]
 
     t0 = time.time()
+    _fail = 0
     while time.time() - t0 < timeout:
         time.sleep(4)
         try:
             hh = requests.get(base + "/history/" + pid, timeout=30).json()
+            _fail = 0
         except Exception:
+            _fail += 1
+            if _fail >= 8:
+                raise RuntimeError("实例已离线（连续 %d 次连不上 ComfyUI）" % _fail)
             continue
         if pid in hh:
             entry = hh[pid]
@@ -1170,14 +1178,22 @@ def comfy_run_wf(base, wf, timeout=900, poll=3):
     """提交**任意工作流**并等待完成，返回 [(filename, subfolder), ...]"""
     r = requests.post(base + "/prompt", json={"prompt": wf}, timeout=60)
     if r.status_code != 200:
-        raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, r.text[:300]))
+        _b = r.text or ""
+        if r.status_code in (403, 404, 502, 503, 504) or "<html" in _b[:400].lower():
+            raise RuntimeError("实例已离线（提交返回 HTTP %s，实例可能已关机）" % r.status_code)
+        raise RuntimeError("提交失败 HTTP %s: %s" % (r.status_code, _b[:300]))
     pid = r.json()["prompt_id"]
     t0 = time.time()
+    _fail = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
         try:
             hh = requests.get(base + "/history/" + pid, timeout=30).json()
+            _fail = 0
         except Exception:
+            _fail += 1
+            if _fail * max(1, poll) >= 32:
+                raise RuntimeError("实例已离线（连续 %d 次连不上 ComfyUI）" % _fail)
             continue
         if pid in hh:
             entry = hh[pid]

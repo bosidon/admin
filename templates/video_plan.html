@@ -255,8 +255,10 @@ function renderReqs() {
                         : (exists ? '<span style="color:#0f766e;font-size:11px;">✔ 库里已有' + (q.matched_role_name ? '：' + q.matched_role_name : '') + '</span>'
                                   : '<span style="color:#d97706;font-size:11px;">⚠️ 缺，需出图</span>'))
             + ((q.matched_role_id && ROLE_IDS.indexOf(q.matched_role_id) >= 0) ? ' <span style="color:#0f766e;font-size:11px;">✓ 已进本片</span>' : '')
-            + ' <button class="btn btn-outline btn-sm" onclick="pickMaterialFor(\'' + rid + '\')">📚 从素材库选</button>'
-            + (q.matched_role_id ? ' <button class="btn btn-outline btn-sm" onclick="useRoleOnce(' + q.matched_role_id + ')">用库里的</button>' : '')
+        + ' <button class="btn btn-outline btn-sm" onclick="pickMaterialFor(\'' + rid + '\')">📚 从素材库选</button>'
+        + ' <button class="btn btn-primary btn-sm" onclick="genAssetByIdx(' + (idxs[0] !== undefined ? idxs[0] : -1) + ')">🎨 AI 生成</button>'
+        + ' <span id="as-st-' + (idxs[0] !== undefined ? idxs[0] : -1) + '" style="color:#64748b;font-size:11px;"></span>'
+        + (q.matched_role_id ? ' <button class="btn btn-outline btn-sm" onclick="useRoleOnce(' + q.matched_role_id + ')">用库里的</button>' : '')
             + '<span style="color:#94a3b8;font-size:11px;"> · 出现在镜头 '
             + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
             + btns + '</div></div>';
@@ -277,7 +279,7 @@ function promptHtml(p, _objIdx) {
     return '<div style="margin-top:6px;background:#f8fafc;border-radius:8px;padding:8px;font-size:12px;">'
         + '<div><b>中文提词</b>：' + (p.prompt || '') + ' <button class="btn btn-outline btn-sm" onclick="copyIdx(' + i1 + ')">复制</button></div>'
         + '<div style="margin-top:4px;color:#475569;"><b>EN</b>：' + (p.prompt_en || '') + ' <button class="btn btn-outline btn-sm" onclick="copyIdx(' + i2 + ')">复制</button></div>'
-        + '<div style="margin-top:4px;color:#94a3b8;">' + (KIND_CN[p.kind] || p.kind || '') + ' · ' + (p.name || '') + ' · aspect ' + (p.aspect || '-') + ' · slot ' + (p.slot || '-')  + ' <button class=\"btn btn-primary btn-sm\" onclick=\"genAssetByIdx(' + (_objIdx === undefined ? (PROMPT_OBJ.push(p) - 1) : _objIdx) + ')\">🎨 AI 生成素材</button> <span id=\"as-st-' + (PROMPT_OBJ.length - 1) + '\" style=\"color:#64748b;font-size:11px;\"></span>' + '</div>'
+        + '<div style="margin-top:4px;color:#94a3b8;">' + (KIND_CN[p.kind] || p.kind || '') + ' · ' + (p.name || '') + ' · aspect ' + (p.aspect || '-') + ' · slot ' + (p.slot || '-')  + '</div>'
         + '</div>';
 }
 

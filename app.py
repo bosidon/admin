@@ -3118,18 +3118,32 @@ def _do_asset_attach(plan_id, d, u, trusted=False):
             return {"error": "非法类型：%s" % kind}, 400
         if not name:
             return {"error": "缺少名称"}, 400
-        cur = db.execute("INSERT INTO roles (owner_id, kind, name, " + col + ", tags, note)"
-                         " VALUES (?,?,?,?,'','')", (u["id"], kind, name, int(mid)))
-        rid = cur.lastrowid
-        created = True
-        try:
-            _rids = json.loads((row["role_ids"] if "role_ids" in row.keys() else "") or "[]")
-        except Exception:
-            _rids = []
-        if int(rid) not in _rids:
-            _rids.append(int(rid))
-            db.execute("UPDATE video_scripts SET role_ids=?, updated_at=datetime('now','localtime') WHERE id=?",
-                       (json.dumps(_rids, ensure_ascii=False), plan_id))
+        # 有就更新、没有就插入：roles 有 UNIQUE(owner_id, name)，同名直接 INSERT 会 500
+        _er = db.execute("SELECT id FROM roles WHERE owner_id=? AND name=?",
+                         (u["id"], name)).fetchone()
+        if _er:
+            rid = _er["id"]
+        else:
+            try:
+                cur = db.execute("INSERT INTO roles (owner_id, kind, name, " + col + ", tags, note)"
+                                 " VALUES (?,?,?,?,'','')", (u["id"], kind, name, int(mid)))
+                rid = cur.lastrowid
+                created = True
+            except sqlite3.IntegrityError:      # 并发竞态：别的请求刚建好同名角色 → 复用它
+                _er2 = db.execute("SELECT id FROM roles WHERE owner_id=? AND name=?",
+                                  (u["id"], name)).fetchone()
+                if not _er2:
+                    raise
+                rid = _er2["id"]
+    # 复用或新建都要进本片 role_ids（否则「✓ 已进本片」不显示）
+    try:
+        _rids = json.loads((row["role_ids"] if "role_ids" in row.keys() else "") or "[]")
+    except Exception:
+        _rids = []
+    if int(rid) not in _rids:
+        _rids.append(int(rid))
+        db.execute("UPDATE video_scripts SET role_ids=?, updated_at=datetime('now','localtime') WHERE id=?",
+                   (json.dumps(_rids, ensure_ascii=False), plan_id))
     db.execute("UPDATE roles SET " + col + "=?, updated_at=datetime('now','localtime') WHERE id=?",
                (int(mid), int(rid)))
     # 桥接需求行：素材库里选的 / AI 出的图，同步挂到对应素材需求项（素材 Tab 的唯一入口）
@@ -3159,8 +3173,12 @@ def _do_asset_attach(plan_id, d, u, trusted=False):
 
 @app.route('/api/video-plans/<int:plan_id>/asset-attach', methods=['POST'])
 def api_plan_asset_attach(plan_id):
-    payload, code = _do_asset_attach(plan_id, request.get_json(silent=True) or {},
-                                     current_user())
+    try:
+        payload, code = _do_asset_attach(plan_id, request.get_json(silent=True) or {},
+                                         current_user())
+    except Exception as e:                      # 兜底：异常也回 JSON，不让前端拿到 HTML 错误页
+        app.logger.exception("asset-attach 异常")
+        payload, code = {"error": "服务端异常：%s" % e}, 500
     return jsonify(payload), code
 
 

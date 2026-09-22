@@ -2168,19 +2168,6 @@ def idle_shutdown_check(log=None, force=False):
         return False, "检查异常：" + str(e)[:120]
 
 
-def start_idle_watchdog(interval=60):
-    """后台看门狗：每 interval 秒检查一次空闲关机（守护线程，随进程退出）"""
-    def _loop():
-        while True:
-            try:
-                idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
-            except Exception:
-                pass
-            time.sleep(interval)
-    t = threading.Thread(target=_loop, daemon=True, name="idle-shutdown")
-    t.start()
-    return t
-
 
 def _shutdown_if_idle(job_id, instance_uuid, log):
     """任务收尾：交给统一的空闲判定（0 分钟 = 立即关；>0 则由看门狗到点关）"""
@@ -2542,4 +2529,7 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
-    start_idle_watchdog()               # 空闲关机看门狗（每 60s 检查一次）
+    # 空闲关机归一进调度器：job-dispatcher 线程统一计时（1s tick、60s 到点触发）
+    # 回调在独立线程里跑，AutoDL HTTP 不会推迟任务派发；异常只记录、不影响派发
+    jobstore.DISPATCHER.every(60, lambda: idle_shutdown_check(
+        log=lambda m: print("[空闲关机] " + str(m), flush=True)), name="idle-shutdown")

@@ -470,6 +470,7 @@ class Dispatcher:
     def __init__(self):
         self.runners = {}          # kind → 执行体
         self.domains = {}          # kind → 资源域（llm / gpu / none）
+        self._hooks = []           # 周期维护任务：[{gap, fn, name, last, running}]
         self._thread = None
         self._stop = False
 
@@ -477,6 +478,25 @@ class Dispatcher:
         """注册任务类型：kind 只是标签，限流按 domain 走（域上限用 settings 实时读）"""
         self.runners[kind] = fn
         self.domains[kind] = domain or "llm"
+
+    def every(self, seconds, fn, name=""):
+        """注册周期维护任务（与任务派发共用同一个常驻线程）
+
+        计时由调度线程做（tick 1s），回调丢到独立线程执行：
+        - 回调里的 IO（AutoDL HTTP 等）不会推迟任务派发
+        - 上一次没跑完就跳过（不重入）；回调异常只记录，不影响派发
+        """
+        self._hooks.append({"gap": float(seconds), "fn": fn, "name": name or getattr(fn, "__name__", "hook"),
+                            "last": 0.0, "running": False})
+        return self
+
+    def _run_hook(self, h):
+        try:
+            h["fn"]()
+        except Exception as e:
+            print("[调度] 周期任务 %s 异常：%s" % (h["name"], str(e)[:160]), flush=True)
+        finally:
+            h["running"] = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -506,6 +526,14 @@ class Dispatcher:
                                          name="job-%s-%s" % (cand["kind"], cand["id"][:6])).start()
             except Exception:
                 pass
+            # 周期维护任务（空闲关机等）：到点丢独立线程，不阻塞派发
+            _tick = time.time()
+            for h in self._hooks:
+                if h["running"] or _tick - h["last"] < h["gap"]:
+                    continue
+                h["last"], h["running"] = _tick, True
+                threading.Thread(target=self._run_hook, args=(h,), daemon=True,
+                                 name="hook-%s" % h["name"]).start()
             time.sleep(1.0)
 
     def _run(self, kind, fn, job):

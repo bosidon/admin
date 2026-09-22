@@ -508,17 +508,218 @@ def init_content_db():
     conn.commit()
     conn.close()
 
+# ============================================================
+# 视频剧本（新表结构）数据访问层
+#   旧 video_plans（单表 + 3 个 JSON 列）已废弃 → 现为 5 张表：
+#     video_scripts    剧本（1 行 = 一个项目）        ← script.title/logline/beats
+#     script_assets    素材需求项（1 行 = 一个槽位）  ← asset_reqs + asset_prompts 一一对应，合并于此
+#     storyboard_shots 分镜（1 行 = 一个镜头）        ← storyboard[]
+#     shot_assets      镜头 × 素材（多对多）          ← ★参考图 = role='reference'★
+#     shot_renders     镜头产物（图/视频）            ← 取代 video_clips
+#   旧列映射：
+#     script.characters/scenes/props → script_assets(kind=persona/scene/prop)
+#     role_ids / persona_material_id / voice_material_id → script_assets.matched_role_id / material_id
+#   本层对路由/前端仍返回【旧形状】，接口向后兼容；新字段（id/material_id/status…）一并带上，前端可渐进使用
+# ============================================================
+VIDEO_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS video_scripts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL, title TEXT, logline TEXT,
+  total_duration_s INTEGER, beats TEXT DEFAULT '[]', aspect TEXT DEFAULT '9:16',
+  duration_target INTEGER DEFAULT 15, style TEXT DEFAULT '', status TEXT DEFAULT 'draft',
+  owner_id INTEGER, created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
+  FOREIGN KEY (article_id) REFERENCES articles(id));
+CREATE TABLE IF NOT EXISTS script_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, script_id INTEGER NOT NULL, req_key TEXT NOT NULL,
+  kind TEXT NOT NULL, name TEXT NOT NULL, desc TEXT DEFAULT '', slot TEXT DEFAULT 'front',
+  aspect TEXT DEFAULT '1:1', prompt TEXT DEFAULT '', prompt_en TEXT DEFAULT '',
+  material_id INTEGER, source TEXT DEFAULT '', status TEXT DEFAULT 'missing',
+  matched_role_id INTEGER, sort_order INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
+  FOREIGN KEY (script_id) REFERENCES video_scripts(id) ON DELETE CASCADE,
+  UNIQUE (script_id, req_key));
+CREATE TABLE IF NOT EXISTS storyboard_shots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, script_id INTEGER NOT NULL, shot_idx INTEGER NOT NULL,
+  visual TEXT DEFAULT '', line TEXT DEFAULT '', duration_s REAL, shot_type TEXT DEFAULT '',
+  shot_face TEXT DEFAULT 'front', scene_asset_id INTEGER, music_hint TEXT DEFAULT '',
+  template_hint TEXT DEFAULT '', image_material_id INTEGER, audio_material_id INTEGER,
+  status TEXT DEFAULT 'pending',
+  created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
+  FOREIGN KEY (script_id) REFERENCES video_scripts(id) ON DELETE CASCADE,
+  FOREIGN KEY (scene_asset_id) REFERENCES script_assets(id),
+  UNIQUE (script_id, shot_idx));
+CREATE TABLE IF NOT EXISTS shot_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id INTEGER NOT NULL, asset_id INTEGER NOT NULL,
+  role TEXT DEFAULT 'subject', sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY (shot_id) REFERENCES storyboard_shots(id) ON DELETE CASCADE,
+  FOREIGN KEY (asset_id) REFERENCES script_assets(id) ON DELETE CASCADE,
+  UNIQUE (shot_id, asset_id, role));
+CREATE TABLE IF NOT EXISTS shot_renders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id INTEGER NOT NULL, kind TEXT DEFAULT 'image',
+  material_id INTEGER, url TEXT DEFAULT '', status TEXT DEFAULT 'queued', params TEXT DEFAULT '{}',
+  error TEXT DEFAULT '', created_at DATETIME DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (shot_id) REFERENCES storyboard_shots(id) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS idx_scripts_article   ON video_scripts(article_id);
+CREATE INDEX IF NOT EXISTS idx_scripts_status    ON video_scripts(status);
+CREATE INDEX IF NOT EXISTS idx_assets_script     ON script_assets(script_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_assets_material   ON script_assets(material_id);
+CREATE INDEX IF NOT EXISTS idx_assets_status     ON script_assets(script_id, status);
+CREATE INDEX IF NOT EXISTS idx_shots_script      ON storyboard_shots(script_id, shot_idx);
+CREATE INDEX IF NOT EXISTS idx_shots_status      ON storyboard_shots(status);
+CREATE INDEX IF NOT EXISTS idx_shot_assets_shot  ON shot_assets(shot_id);
+CREATE INDEX IF NOT EXISTS idx_shot_assets_asset ON shot_assets(asset_id);
+CREATE INDEX IF NOT EXISTS idx_shot_renders_shot  ON shot_renders(shot_id, kind);
+CREATE INDEX IF NOT EXISTS idx_shot_renders_status ON shot_renders(status);
+"""
+
+
+def _ensure_video_schema():
+    """幂等建 5 张视频表（导入期调用，不能依赖 Flask 上下文）"""
+    _db = sqlite3.connect(CONTENT_DATABASE)
+    try:
+        _db.executescript(VIDEO_SCHEMA_SQL)
+        _db.commit()
+    finally:
+        _db.close()
+
+
+def _sjson(x, default):
+    """宽容解析 JSON 列（坏值 → default）"""
+    try:
+        v = json.loads(x) if isinstance(x, str) else x
+    except Exception:
+        return default
+    return v if isinstance(v, type(default)) else default
+
+
+def _req_key(kind, name, slot):
+    """素材需求项在同剧本内的稳定键"""
+    return '%s:%s:%s' % ((kind or '').strip(), (name or '').strip(), ((slot or 'front') or 'front').strip())
+
+
+def _script_row(db, script_id):
+    return db.execute('SELECT * FROM video_scripts WHERE id=?', (script_id,)).fetchone()
+
+
+def script_id_by_article(db, article_id):
+    r = db.execute('SELECT id FROM video_scripts WHERE article_id=? ORDER BY id DESC LIMIT 1',
+                   (article_id,)).fetchone()
+    return r['id'] if r else None
+
+
+def _assets_rows(db, script_id):
+    return db.execute('SELECT * FROM script_assets WHERE script_id=? ORDER BY sort_order, id',
+                      (script_id,)).fetchall()
+
+
+def _roles_map(db):
+    return {r['id']: r['name'] for r in db.execute('SELECT id, name FROM roles').fetchall()}
+
+
+def _shot_links(db, script_id):
+    """{shot_id: [(role, asset_id)]}"""
+    out = {}
+    for r in db.execute('''SELECT sa.shot_id AS shot_id, sa.asset_id AS asset_id, sa.role AS role
+                           FROM shot_assets sa JOIN storyboard_shots sh ON sh.id = sa.shot_id
+                           WHERE sh.script_id=?''', (script_id,)):
+        out.setdefault(r['shot_id'], []).append((r['role'], r['asset_id']))
+    return out
+
+
+def asset_reqs_of(db, script_id):
+    """旧 asset_reqs 形状 + 新字段"""
+    rows = _assets_rows(db, script_id)
+    roles = _roles_map(db)
+    links = {}
+    for sid, pairs in _shot_links(db, script_id).items():
+        for _role, aid in pairs:
+            links.setdefault(aid, []).append(sid)
+    shot_idx = {r['id']: r['shot_idx'] for r in
+                db.execute('SELECT id, shot_idx FROM storyboard_shots WHERE script_id=?', (script_id,))}
+    out = []
+    for a in rows:
+        rid = a['matched_role_id'] if a['matched_role_id'] in roles else None
+        out.append({'kind': a['kind'], 'name': a['name'], 'desc': a['desc'],
+                    'slots': [a['slot']] if a['slot'] else [],
+                    'needed_in_shots': sorted(shot_idx[s] for s in links.get(a['id'], []) if s in shot_idx),
+                    'exists': bool(rid), 'matched_role_id': rid,
+                    'matched_role_name': roles.get(rid) if rid else None,
+                    'id': a['id'], 'slot': a['slot'], 'aspect': a['aspect'], 'prompt': a['prompt'],
+                    'prompt_en': a['prompt_en'], 'material_id': a['material_id'],
+                    'source': a['source'], 'status': a['status']})
+    return out
+
+
+def asset_prompts_of(db, script_id):
+    """旧 asset_prompts 形状（与 script_assets 一一对应）"""
+    return [{'kind': a['kind'], 'name': a['name'], 'slot': a['slot'], 'aspect': a['aspect'],
+             'prompt': a['prompt'], 'prompt_en': a['prompt_en']} for a in _assets_rows(db, script_id)]
+
+
+def shots_of(db, script_id):
+    """旧 storyboard 形状（characters/scene/props 由 shot_assets 反查）+ 新字段"""
+    names = {a['id']: a for a in _assets_rows(db, script_id)}
+    links = _shot_links(db, script_id)
+    out = []
+    for s in db.execute('SELECT * FROM storyboard_shots WHERE script_id=? ORDER BY shot_idx', (script_id,)):
+        cast, props = [], []
+        for _role, aid in links.get(s['id'], []):
+            a = names.get(aid)
+            if not a:
+                continue
+            if a['kind'] == 'persona':
+                cast.append(a['name'])
+            elif a['kind'] == 'prop':
+                props.append(a['name'])
+        sc = names.get(s['scene_asset_id']) if s['scene_asset_id'] else None
+        out.append({'visual': s['visual'], 'line': s['line'], 'duration': s['duration_s'],
+                    'shot_type': s['shot_type'], 'characters': cast, 'scene': (sc['name'] if sc else ''),
+                    'props': props, 'shot_face': s['shot_face'], 'music_hint': s['music_hint'],
+                    'template_hint': s['template_hint'],
+                    'id': s['id'], 'shot_idx': s['shot_idx'], 'status': s['status'],
+                    'image_material_id': s['image_material_id'],
+                    'audio_material_id': s['audio_material_id']})
+    return out
+
+
+def script_obj_of(db, script_id):
+    """旧 script 形状"""
+    row = _script_row(db, script_id)
+    if not row:
+        return {}
+    by = {'persona': [], 'scene': [], 'prop': []}
+    for a in _assets_rows(db, script_id):
+        if a['kind'] in by:
+            by[a['kind']].append({'name': a['name'], 'desc': a['desc']})
+    return {'title': row['title'], 'logline': row['logline'],
+            'total_duration_s': row['total_duration_s'],
+            'characters': by['persona'], 'scenes': by['scene'], 'props': by['prop'],
+            'beats': _sjson(row['beats'], [])}
+
+
+def role_ids_of(db, script_id):
+    return sorted({a['matched_role_id'] for a in _assets_rows(db, script_id) if a['matched_role_id']})
+
+
+def plan_payload(db, script_id):
+    """★路由出口★：完整旧形状（JSON 列给字符串，与旧 /api/video-plans/<id> 完全一致）"""
+    row = _script_row(db, script_id)
+    if not row:
+        return None
+    d = dict(row)
+    d['role_ids'] = json.dumps(role_ids_of(db, script_id), ensure_ascii=False)
+    d['script'] = json.dumps(script_obj_of(db, script_id), ensure_ascii=False)
+    d['storyboard'] = json.dumps(shots_of(db, script_id), ensure_ascii=False)
+    d['asset_requirements'] = asset_reqs_of(db, script_id)
+    d['asset_reqs'] = json.dumps(d['asset_requirements'], ensure_ascii=False)
+    d['asset_prompts'] = asset_prompts_of(db, script_id)
+    d['persona_material_id'] = None
+    d['persona_id'] = None
+    d['voice_material_id'] = None
+    return d
+
 def _ensure_video_cols():
-    """video_plans / video_clips 的幂等列迁移（这两张表历史上手工建的，代码里没有 CREATE）"""
+    """video_clips 的幂等列迁移（该表历史上手工建的；video_plans 已废弃，见 _ensure_video_schema）"""
     db = sqlite3.connect(CONTENT_DATABASE)   # 导入期调用，不能用依赖 Flask 上下文的 get_content_db()
-    cols = {r[1] for r in db.execute("PRAGMA table_info(video_plans)")}
-    for name, ddl in (("persona_material_id", "INTEGER"),
-                      ("persona_id", "INTEGER"), ("voice_material_id", "INTEGER"),
-                      ("role_ids", "TEXT"),
-                      ("asset_reqs", "TEXT"), ("asset_prompts", "TEXT"),
-                      ("aspect", "TEXT DEFAULT '9:16'"), ("duration_target", "INTEGER DEFAULT 15")):
-        if cols and name not in cols:
-            db.execute("ALTER TABLE video_plans ADD COLUMN %s %s" % (name, ddl))
     ccols = {r[1] for r in db.execute("PRAGMA table_info(video_clips)")}
     for name, ddl in (("line", "TEXT"), ("visual", "TEXT"), ("audio_material_id", "INTEGER")):
         if ccols and name not in ccols:
@@ -543,6 +744,7 @@ def _drop_empty_personas():
 
 init_content_db()
 _ensure_video_cols()
+_ensure_video_schema()   # 新版 5 张视频表（video_scripts/script_assets/storyboard_shots/shot_assets/shot_renders）
 _drop_empty_personas()
 
 # ============================================================
@@ -814,7 +1016,15 @@ def api_delete_article(article_id):
         return _g
     # ① content.db：视频计划 + 出图日志 + 文案本体（同一事务）
     db = get_content_db()
-    n_video = db.execute('DELETE FROM video_plans WHERE article_id=?', (article_id,)).rowcount
+    # 视频剧本已拆成 5 张表且 article_id 外键为 NO ACTION → 必须显式逐层清理（不能依赖级联）
+    _sids = [r['id'] for r in db.execute('SELECT id FROM video_scripts WHERE article_id=?', (article_id,))]
+    for _sid in _sids:
+        db.execute('DELETE FROM shot_assets WHERE shot_id IN (SELECT id FROM storyboard_shots WHERE script_id=?)', (_sid,))
+        db.execute('DELETE FROM shot_renders WHERE shot_id IN (SELECT id FROM storyboard_shots WHERE script_id=?)', (_sid,))
+        db.execute('DELETE FROM storyboard_shots WHERE script_id=?', (_sid,))
+        db.execute('DELETE FROM script_assets WHERE script_id=?', (_sid,))
+        db.execute('DELETE FROM video_scripts WHERE id=?', (_sid,))
+    n_video = len(_sids)
     n_log = db.execute('DELETE FROM illustration_logs WHERE article_id=?', (article_id,)).rowcount
     db.execute('DELETE FROM articles WHERE id=?', (article_id,))
     db.commit()
@@ -1351,9 +1561,16 @@ def api_list_video_plans():
     """视频计划列表"""
     db = get_content_db()
     _u = current_user()
+    # 列表只取必要列；旧接口里的 JSON 列以空值占位，前端无需改（详细内容走 /<id> 接口）
     _sql = '''
-        SELECT v.*, a.title as article_title, a.platform, a.content_type
-        FROM video_plans v
+        SELECT v.id, v.article_id, v.title, v.status, v.aspect, v.duration_target,
+               v.logline, v.created_at, v.updated_at,
+               '' AS script, '[]' AS storyboard, '[]' AS asset_reqs, '[]' AS asset_prompts,
+               '' AS role_ids, NULL AS persona_material_id, NULL AS persona_id,
+               NULL AS voice_material_id, NULL AS final_url,
+               'none' AS render_status, NULL AS total_duration_s,
+               a.title as article_title, a.platform, a.content_type
+        FROM video_scripts v
         LEFT JOIN articles a ON v.article_id = a.id'''
     _args = []
     if not _is_admin(_u):
@@ -1374,11 +1591,11 @@ def api_create_video_plan():
     if _g:
         return _g
     db = get_content_db()
-    existing = db.execute('SELECT id FROM video_plans WHERE article_id=?', (article_id,)).fetchone()
+    existing = db.execute('SELECT id FROM video_scripts WHERE article_id=?', (article_id,)).fetchone()
     if existing:
         return jsonify({"ok": True, "id": existing['id'], "existed": True})
     cur = db.execute(
-        "INSERT INTO video_plans (article_id, title, status, created_at) VALUES (?, ?, ?, datetime('now','localtime'))",
+        "INSERT INTO video_scripts (article_id, title, status, created_at) VALUES (?, ?, ?, datetime('now','localtime'))",
         (article_id, data.get('title', ''), 'draft')
     )
     db.commit()
@@ -1386,32 +1603,15 @@ def api_create_video_plan():
 
 @app.route('/api/video-plans/<int:plan_id>')
 def api_get_video_plan(plan_id):
+    """单个视频计划（新表 5 张 → 旧形状出口；幽灵角色校验已在 asset_reqs_of 内完成）"""
     db = get_content_db()
-    row = db.execute('SELECT * FROM video_plans WHERE id=?', (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row['article_id'])
     if _g:
         return _g
-    d = dict(row)
-    # 素材需求持久化字段：asset_reqs 列 -> asset_requirements（列表，坏值回退 []）
-    for _out, _col in (("asset_requirements", "asset_reqs"), ("asset_prompts", "asset_prompts")):
-        try:
-            _v = json.loads(d.get(_col) or "[]")
-            d[_out] = _v if isinstance(_v, list) else []
-        except Exception:
-            d[_out] = []
-    # 读时重新校验：素材需求里匹配到的角色可能已被删除 → 不能指向幽灵角色
-    try:
-        _live = set(r["id"] for r in get_content_db().execute("SELECT id FROM roles").fetchall())
-        for _q in d.get("asset_requirements") or []:
-            if isinstance(_q, dict) and _q.get("matched_role_id") not in _live:
-                _q["matched_role_id"] = None
-                _q["matched_role_name"] = None
-                _q["exists"] = False
-    except Exception:
-        pass
-    return jsonify(d)
+    return jsonify(plan_payload(db, plan_id))
 
 @app.route('/api/video-plans/<int:plan_id>/storyboard', methods=['POST'])
 def api_gen_storyboard(plan_id):
@@ -1804,12 +2004,9 @@ def api_delete_role(rid):
     if not _is_admin(u) and row["owner_id"] != u["id"]:
         return jsonify({"error": "无权操作"}), 403
     used = 0
-    for r in db.execute("SELECT role_ids FROM video_plans WHERE role_ids IS NOT NULL AND role_ids!=''").fetchall():
-        try:
-            if rid in [int(x) for x in json.loads(r["role_ids"] or "[]")]:
-                used += 1
-        except Exception:
-            continue
+    for r in db.execute('SELECT DISTINCT script_id FROM script_assets WHERE matched_role_id=?',
+                        (rid,)).fetchall():
+        used += 1
     db.execute("DELETE FROM roles WHERE id=?", (rid,))
     db.commit()
     return jsonify({"ok": True, "used_by": used})
@@ -1819,7 +2016,7 @@ def api_delete_role(rid):
 def video_plan_page(plan_id):
     """分镜脚本编辑页"""
     try:
-        _row = get_content_db().execute('SELECT article_id FROM video_plans WHERE id=?',
+        _row = get_content_db().execute('SELECT article_id FROM video_scripts WHERE id=?',
                                         (plan_id,)).fetchone()
     except Exception:
         _row = None

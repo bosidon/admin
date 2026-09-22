@@ -3073,8 +3073,9 @@ def _eng_of(row):
 
 @app.route('/api/video-plans/<int:plan_id>/shot-clip', methods=['GET', 'POST'])
 def api_plan_shot_clip(plan_id):
-    """分镜片段（首帧 + 尾帧 → 一条 mp4）：GET = 每镜片段状态；POST = 入队
-    body: {"shot_idx": 3} —— 不传 shot_idx = 整片（只挑首尾帧都齐的镜）"""
+    """分镜片段：GET = 每镜片段状态；POST = 入队
+    body: {"shot_idx": 3, "engine": "wan|h3|h3ref"} —— 不传 shot_idx = 整片
+    engine：wan/h3 吃首尾帧；h3ref（H3 多图参考）不吃首尾帧，用该镜的素材图当参考"""
     u = current_user()
     if not u:
         return jsonify({"error": "未登录"}), 401
@@ -3089,6 +3090,11 @@ def api_plan_shot_clip(plan_id):
                                  end_image_material_id
                           FROM storyboard_shots WHERE script_id=? ORDER BY shot_idx""",
                        (plan_id,)).fetchall()
+    _refcnt = {}                                       # 该镜挂了几个参考素材（H3 多图参考引擎用）
+    for _r in db.execute("""SELECT sa.shot_id AS sid, COUNT(*) AS n FROM shot_assets sa
+                            JOIN storyboard_shots s ON s.id = sa.shot_id
+                            WHERE s.script_id=? GROUP BY sa.shot_id""", (plan_id,)):
+        _refcnt[_r["sid"]] = _r["n"]
     if request.method == 'GET':
         _m = {}
         for r in db.execute("""SELECT shot_id, material_id, url, duration_s, status, params
@@ -3111,10 +3117,16 @@ def api_plan_shot_clip(plan_id):
     if not shots:
         return jsonify({"error": "该剧本还没有分镜，请先生成分镜"}), 400
     body = request.get_json(silent=True) or {}
+    _eng = str(body.get("engine") or "wan").strip().lower()
+    if _eng not in ("wan", "h3", "h3ref"):
+        return jsonify({"error": "片段引擎只能是 wan、h3 或 h3ref"}), 400
     idx = body.get('shot_idx')
     if idx is None or idx == '':
-        targets = [{"shot_idx": s["shot_idx"]} for s in shots
-                   if s["image_material_id"] and s["end_image_material_id"]]
+        if _eng == "h3ref":                            # 多图参考：只看有没有参考素材，不看首尾帧
+            targets = [{"shot_idx": s["shot_idx"]} for s in shots if _refcnt.get(s["id"], 0)]
+        else:
+            targets = [{"shot_idx": s["shot_idx"]} for s in shots
+                       if s["image_material_id"] and s["end_image_material_id"]]
     else:
         try:
             idx = int(idx)
@@ -3123,19 +3135,23 @@ def api_plan_shot_clip(plan_id):
         hit = [s for s in shots if s["shot_idx"] == idx]
         if not hit:
             return jsonify({"error": "镜号 %s 不存在" % idx}), 404
-        if not hit[0]["image_material_id"]:
-            return jsonify({"error": "请先生成该镜的首帧图"}), 400
-        if not hit[0]["end_image_material_id"]:
-            return jsonify({"error": "请先生成该镜的尾帧图（片段靠首尾两帧定形）"}), 400
+        if _eng == "h3ref":
+            if not _refcnt.get(hit[0]["id"], 0):
+                return jsonify({"error": "该镜还没有参考素材（场景/人物/道具的图）——"
+                                         "H3 多图参考引擎靠素材图出片，不用首尾帧"}), 400
+        else:
+            if not hit[0]["image_material_id"]:
+                return jsonify({"error": "请先生成该镜的首帧图"}), 400
+            if not hit[0]["end_image_material_id"]:
+                return jsonify({"error": "请先生成该镜的尾帧图（片段靠首尾两帧定形）"}), 400
         targets = [{"shot_idx": idx}]
     if not targets:
-        return jsonify({"error": "没有可出片段的目标（该镜首帧 + 尾帧都要有）"}), 400
+        return jsonify({"error": "该镜没有参考素材（H3 多图参考用它出片）" if _eng == "h3ref"
+                        else "没有可出片段的目标（该镜首帧 + 尾帧都要有）"}), 400
     cfg = get_comfy_config()
     if not instance_uuids() or not cfg.get('comfy_api_token'):
         return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
     _eng = str(body.get("engine") or "wan").strip().lower()
-    if _eng not in ("wan", "h3"):
-        return jsonify({"error": "片段引擎只能是 wan 或 h3"}), 400
     payload = {"plan_id": plan_id, "targets": targets, "engine": _eng}
     jid, reused = jobstore.DISPATCHER.enqueue('shotclip', row["article_id"], payload, len(targets),
                                              priority=10, owner=user_label(u), owner_id=u.get('id'))

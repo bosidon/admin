@@ -140,6 +140,64 @@ H3_TPL_NODES = {"first": "114", "last": "128", "preset": "122", "prompt": "136",
                 "steps": "105:9", "lora": "148", "decode": "145"}
 
 
+# ── 分镜片段 · H3「多图参考」引擎（ref2va：不吃首尾帧，直接把该镜素材当参考图）──
+# 模板 = 6000D `/root/zealman-app/dist/U04-minimax_h3_light2v-5图参考生视频加速版.json`
+# 已入仓（wf/h3_u04_ref5.json，33 节点，sha1 71a20117a7ac46704b81552dbac75a6a17dd225d）
+# 核心节点 136 MiniMaxH3ReferenceToVideo：参考图槽 = ref_images.ref_image_0..4
+#   ⚠️ 必须「点号扁平键 + 从 0 连续编号」；写成嵌套对象 ref_images:{...} 会被静默丢弃（参考图不生效、不报错）
+# 实测（2026-09-23，6000D）：5 图 / 480×864 / 5s ≈ 193s ≈ ¥0.35 一条 → 960×1728 / 24fps / 带 AAC 音轨
+#   · 3 人物同框不串脸 —— 前提是提词里用 <Subject N>/<Picture N> 显式绑定「谁对应哪张图」
+#   · 台词必须写成 <d>[Chinese] …</d>，不写模型会拿提词正文碎片瞎念（实测过）
+#   · 不吃首尾帧 → 固定机位镜也能出片（首尾帧链路在无尾帧时直接跳过）
+H3REF_WF_DEFAULT = "wf/h3_u04_ref5.json"
+H3REF_MAX_REFS = 5               # 模板槽位数（5 张实测全生效；节点本身允许 0~9，扩槽要真机再验）
+H3REF_SIZES = {"9:16": (480, 864), "16:9": (864, 480)}   # 实测分辨率；其它比例回落 9:16
+H3REF_FPS = H3_FPS               # 模板用 SaveVideo（无帧率输入）→ 由模型给 24fps（实测）
+H3REF_TPL_NODES = {"node": "136", "refs": ("137", "139", "141", "148", "149"), "prompt": "146",
+                   "preset": "145", "secs": "147", "seed": "129", "video": "92",
+                   "supres": "164", "lora": "161"}
+H3REF_REF_ORDER = ("scene", "persona", "prop")            # 参考图排序：场景 → 人物 → 道具
+H3REF_REF_CAP = {"scene": 1, "persona": 3, "prop": 1}     # 上限 5 = 1+3+1；多出的只写进提词、不喂图
+H3REF_PROMPT_TPL = "prompts/shot_clip_ref.md"             # 提词措辞模板（可编辑；缺文件用内置默认）
+H3REF_STYLE = "电影感真人实拍质感，柔和光线，浅景深，画面干净无杂物"
+
+_H3REF_PROMPT_DEFAULT = """subject_definitions:
+参考图与内容一一对应：{ref_map}。
+{subjects}
+
+summary:
+[reference generation] {summary}
+
+retention_analysis:
+{retention}
+
+detailed_description:
+{style}
+[Shot 1] {shot_type}。{visual}，{camera_directive}。
+
+台词：{dialogue}
+
+镜头结束状态：{end_state}
+
+overall_soundscape:
+{soundscape}
+
+non_diegetic_music:
+{music}"""
+
+# 运镜词 → 明确约束句（分镜 camera_move 是枚举值；「固定」必须写死机位，否则模型会自己推镜）
+H3REF_CAMERA = {
+    "固定": "镜头全程不动，不推不摇不变焦不换机位",
+    "推近": "镜头极缓慢推近，幅度小，中途不切镜",
+    "拉远": "镜头极缓慢拉远，幅度小，中途不切镜",
+    "左移": "镜头缓慢向左平移，不看别处",
+    "右移": "镜头缓慢向右平移，不看别处",
+    "升降": "镜头缓慢升降，高度变化幅度小",
+    "俯仰": "镜头缓慢俯仰，角度变化幅度小",
+    "环绕": "镜头缓慢环绕主体，幅度小不换机位",
+}
+
+
 
 # 「风格化」：给编辑链路再追加一个编辑类 LoRA（纯文生图无效，必须走图生图）
 # 实测（2026-09-20，同一输入图 + 同一提示词 + 系统编辑参数 4 步，逐张看图判定）：
@@ -1120,6 +1178,215 @@ def build_h3_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="shot_clip",
     return wf
 
 
+def h3ref_size(aspect=None):
+    """H3 多图参考分辨率（实测值；未知比例回落 9:16）"""
+    return H3REF_SIZES.get((aspect or "9:16").strip(), H3REF_SIZES["9:16"])
+
+
+def h3ref_template(cfg=None):
+    """读 H3 多图参考模板（API 格式）并深拷：只留节点键、保留子图 id。
+    路径可用设置项 comfy_h3ref_wf 覆盖（相对路径 = 项目根）"""
+    import copy, json, re
+    cfg = cfg or {}
+    p = str(cfg.get("comfy_h3ref_wf") or H3REF_WF_DEFAULT).strip()
+    path = Path(p) if os.path.isabs(p) else (Path(__file__).resolve().parent / p)
+    if not path.is_file():
+        raise ValueError("H3 多图参考模板不存在：%s" % path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    wf = {k: v for k, v in raw.items() if re.match(r"^\d+(:\d+)*$", str(k))}
+    if not wf:
+        raise ValueError("H3 多图参考模板里没有节点（%s）" % path)
+    return copy.deepcopy(wf)
+
+
+def h3ref_refs(reqs, cap=None):
+    """挑该镜的参考图并排序：场景 1 → 人物（按出场顺序，最多 3）→ 道具 1（上限 5）
+    返回 [{"kind","name","desc","material_id"}]，索引 i 即提词里的 <Picture i+1>"""
+    cap = cap or H3REF_REF_CAP
+    out = []
+    rows = [r for r in (reqs or []) if str((r or {}).get("name") or "").strip()]
+    for kind in H3REF_REF_ORDER:
+        n = 0
+        for r in rows:
+            if str(r.get("kind") or "").strip() != kind:
+                continue
+            if n >= int(cap.get(kind, 0)):
+                break
+            out.append({"kind": kind, "name": str(r.get("name")).strip(),
+                        "desc": str(r.get("desc") or "").strip(),
+                        "material_id": r.get("material_id")})
+            n += 1
+    return out[:H3REF_MAX_REFS]
+
+
+def _h3ref_prompt_tpl(cfg=None):
+    """提词措辞模板：prompts/shot_clip_ref.md（可编辑，占位符别删）；读不到/不合法 → 内置默认"""
+    cfg = cfg or {}
+    p = str(cfg.get("comfy_h3ref_prompt") or H3REF_PROMPT_TPL).strip()
+    path = Path(p) if os.path.isabs(p) else (Path(__file__).resolve().parent / p)
+    try:
+        t = path.read_text(encoding="utf-8")
+        if "\n---\n" in t:            # 模板文件上半部分是占位符说明，真正的模板在 --- 之后
+            t = t.split("\n---\n", 1)[1]
+        t = t.strip("\n")
+        if "{visual}" in t and "{dialogue}" in t:
+            return t
+    except Exception:
+        pass
+    return _H3REF_PROMPT_DEFAULT
+
+
+def _h3ref_fill(tpl, d):
+    """占位符填充：模板里出现但代码没提供的键 → 原样留空（不抛异常，改了模板也不会崩）"""
+    class _Safe(dict):
+        def __missing__(self, k):
+            return ""
+    return tpl.format_map(_Safe(d))
+
+
+def clip_prompt_h3ref(shot, refs=None, dur=5, cfg=None):
+    """H3 多图参考提词（代码组装：运镜←camera_move、动作←visual、台词←line 原文、末态←end_state、
+    外观←script_assets.desc、配乐←music_hint）。措辞模板见 prompts/shot_clip_ref.md"""
+    shot = shot or {}
+    refs = [r for r in (refs or []) if str((r or {}).get("name") or "").strip()]
+    kind_cn = {"scene": "场景", "persona": "人物", "prop": "道具"}
+
+    def _s(v):
+        return str(v or "").strip().rstrip("。；;,，")
+
+    pic, subs, pers = [], [], []
+    for i, r in enumerate(refs, 1):
+        k = str(r.get("kind") or "").strip() or "persona"
+        nm = str(r.get("name") or "").strip()
+        ds = _s(r.get("desc"))
+        pic.append("<Picture %d>=%s「%s」" % (i, kind_cn.get(k, k), nm))
+        if k == "persona":
+            subs.append("<Subject %d> 是 <Picture %d> 中的%s：%s。" % (len(pers) + 1, i, nm, ds or nm))
+            pers.append(nm)
+        else:
+            subs.append("%s「%s」（参考 <Picture %d>）：%s。" % (kind_cn.get(k, k), nm, i, ds or nm))
+    # 防串脸：多人同框时点名禁止特征漂移（实测这是「3 人同框不串脸」的关键一句）
+    if len(pers) >= 2:
+        reten = ("每个主体的外观特征只留在其本人身上——%s 的面部、发型、胡须严格按各自参考图，"
+                 "禁止把其中一人的胡须、眉毛、发际线、脸型挪到另一人脸上；画面里人数不增减。"
+                 % "、".join(pers))
+    else:
+        reten = "人物外观严格按参考图，面部特征不漂移；画面里人数不增减。"
+    try:
+        _sec = "%.0f" % float(dur or 5)
+    except Exception:
+        _sec = "5"
+    cm = _s(shot.get("camera_move"))
+    line = _s(shot.get("line"))
+    _es = _s(shot.get("end_state"))
+    d = {
+        "ref_map": "、".join(pic),
+        "subjects": "\n".join(subs),
+        "summary": "本镜%s、镜头%s；出场：%s。" % (_s(shot.get("shot_type")) or "—", cm or "—",
+                                          "、".join([str(r.get("name") or "").strip() for r in refs]) or "—"),
+        "retention": reten,
+        "style": H3REF_STYLE,
+        "shot_type": _s(shot.get("shot_type")) or "—",
+        "camera_move": cm or "固定",
+        "visual": _s(shot.get("visual")),
+        "camera_directive": H3REF_CAMERA.get(cm, "机位稳定"),
+        "dialogue": ("<d>[Chinese] %s</d>" % line) if line else "本镜全程不说话（无对白）。",
+        "end_state": (_es + "。") if _es else "镜头结束时画面自然收束。",
+        "soundscape": "安静的环境音，与参考素材的氛围一致，不要额外音效。",
+        "music": (_s(shot.get("music_hint")) or "无配乐"),
+        "seconds": _sec,
+    }
+    return _h3ref_fill(_h3ref_prompt_tpl(cfg), d)
+
+
+def build_h3ref_wf(refs, prompt, seed=0, cfg=None, prefix="shot_h3ref",
+                   width=480, height=864, seconds=5.0, superres=None, sr_quality="",
+                   crf=None, lora=None):
+    """H3 多图参考出片段（MiniMaxH3ReferenceToVideo / ref2va）
+    模板整条链已固定：5×LoadImage(ref_images.ref_image_0..4) → 136 参考条件化 →
+    RandomNoise/H3SigmaRefiner → SamplerCustomAdvanced → 解码 → 164 超分 → 92 SaveVideo
+    运行时只改：参考图（1~5 张，多余槽位与节点整段摘掉）/ 提示词 / 宽高 / 秒数 / seed / 输出前缀
+    （可选：超分、画质、crf、LoRA 强度）。refs = 已上传到 ComfyUI 的文件名，顺序 = <Picture 1..N>"""
+    cfg = cfg or {}
+    refs = [str(x).strip() for x in (refs or []) if str(x or "").strip()]
+    if not refs:
+        raise ValueError("H3 多图参考出片段至少需要 1 张参考图")
+    refs = refs[:H3REF_MAX_REFS]
+    wf = h3ref_template(cfg)
+    N = H3REF_TPL_NODES
+    for k, tag in (("node", "MiniMaxH3ReferenceToVideo"), ("prompt", "CR Prompt Text"),
+                   ("preset", "WJILatentPreset"), ("secs", "PrimitiveFloat(秒)"),
+                   ("seed", "RandomNoise(seed)"), ("video", "SaveVideo")):
+        if N[k] not in wf:
+            raise ValueError("H3 多图参考模板缺少节点 %s（%s）——模板版本变了，请重新导出" % (N[k], tag))
+    host = wf[N["node"]]
+    # 参考图：按张数喂 0..N-1，其余槽位与对应 LoadImage 节点整段摘掉（槽位可以为空，不必补占位图）
+    for i, slot in enumerate(N["refs"]):
+        key = "ref_images.ref_image_%d" % i
+        if i < len(refs):
+            if slot not in wf:
+                raise ValueError("H3 多图参考模板缺少参考图节点 %s（模板版本变了）" % slot)
+            wf[slot]["inputs"]["image"] = refs[i]
+            host["inputs"][key] = [slot, 0]
+        else:
+            host["inputs"].pop(key, None)
+            wf.pop(slot, None)
+    wf[N["prompt"]]["inputs"]["prompt"] = prompt or ""
+    wf[N["preset"]]["inputs"]["自定义宽"] = int(width or 480)
+    wf[N["preset"]]["inputs"]["自定义高"] = int(height or 864)
+    wf[N["secs"]]["inputs"]["value"] = float(seconds or 5.0)
+    wf[N["seed"]]["inputs"]["noise_seed"] = int(seed or 0)
+    wf[N["video"]]["inputs"]["filename_prefix"] = prefix
+    if lora and N["lora"] in wf:
+        wf[N["lora"]]["inputs"]["strength_model"] = float(lora)
+    # 超分 / 编码质量：与首尾帧链路同一套设置项（comfy_h3_superres / comfy_h3_sr_quality / comfy_h3_crf）
+    _srp = str(superres).strip().lower() if superres is not None else ""
+    if _srp in ("", "-1", "-1.0", "auto", "none_", "default"):
+        _srp = str(cfg.get("comfy_h3_superres") or "").strip().lower()
+    _spec = _srp
+    _srq = str(sr_quality or cfg.get("comfy_h3_sr_quality") or "").strip().upper()
+    try:
+        _crf = int(crf) if crf not in (None, "") else int(cfg.get("comfy_h3_crf") or 0)
+    except Exception:
+        _crf = 0
+    _sp = N["supres"]
+    if _sp in wf:
+        if _spec in ("关", "off", "none", "0", "1", "1.0"):
+            # 旁路超分：SaveVideo 直接吃超分的输入源（模板改名/改号也不会指错）
+            _src = (wf[_sp].get("inputs") or {}).get("images")
+            for _k, _v in list(wf.items()):
+                if not isinstance(_v, dict):
+                    continue
+                for _ik, _iv in (_v.get("inputs") or {}).items():
+                    if isinstance(_iv, (list, tuple)) and len(_iv) == 2 and str(_iv[0]) == _sp:
+                        if _k != N["video"]:
+                            wf.pop(_k, None)
+            wf.pop(_sp, None)
+            if _src:
+                wf[N["video"]]["inputs"]["video"] = _src
+        elif _spec:
+            _ins = wf[_sp]["inputs"]
+            _m = _H3_SR_DIM_RE.match(_spec)
+            if _m:
+                _ins["resize_type"] = "target dimensions"
+                _ins["resize_type.width"] = int(_m.group(1))
+                _ins["resize_type.height"] = int(_m.group(2))
+                _ins.pop("resize_type.scale", None)
+            else:
+                try:
+                    _ins["resize_type"] = "scale by multiplier"
+                    _ins["resize_type.scale"] = float(_spec)
+                    _ins.pop("resize_type.width", None)
+                    _ins.pop("resize_type.height", None)
+                except Exception:
+                    pass
+            if _srq:
+                _ins["quality"] = _srq
+    if _crf and N["video"] in wf:
+        wf[N["video"]]["inputs"]["codec.encoding.crf"] = int(_crf)
+    return wf
+
+
 def clip_prompt_h3(shot, reqs=None, dur=5):
     """H3 提词：H3 用 qwen3vl-32B 文本编码器，中文可直接用；<Picture 1>/<Picture 2> = 首帧/尾帧"""
     shot = shot or {}
@@ -1145,7 +1412,7 @@ def clip_prompt_h3(shot, reqs=None, dur=5):
 
 
 def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat"):
-    """统一入口：action = cutout / edit / stitch / clip / h3clip"""
+    """统一入口：action = cutout / edit / stitch / clip / h3clip / h3ref"""
     params = params or {}
     if action == "cutout":
         return build_cutout_wf(imgs[0], model=params.get("model") or "RMBG-2.0",
@@ -1177,6 +1444,14 @@ def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat
                            steps=params.get("steps") or 0, lora=params.get("lora") or 0.0,
                            superres=params.get("superres"), sr_quality=params.get("sr_quality") or "",
                            crf=params.get("crf"))
+    if action == "h3ref":
+        return build_h3ref_wf(imgs, prompt or params.get("prompt") or "", seed=seed, cfg=cfg,
+                              prefix=prefix, width=params.get("width") or 480,
+                              height=params.get("height") or 864,
+                              seconds=params.get("seconds") or 5.0,
+                              superres=params.get("superres"),
+                              sr_quality=params.get("sr_quality") or "",
+                              crf=params.get("crf"), lora=params.get("lora"))
     raise ValueError("未知的加工类型：%s" % action)
 
 
@@ -1205,7 +1480,7 @@ def needs_for(action, params=None, cfg=None, prompt="", n_imgs=1):
     n = max(1, int(n_imgs or 1))
     # 拼版/片段对张数有硬要求（九宫格=9；首尾帧视频=2）
     tries = [n] + ([9, 4, 2] if action == "stitch"
-                    else ([2] if action in ("clip", "h3clip") else []))
+                    else ([2] if action in ("clip", "h3clip", "h3ref") else []))
     last = None
     for cnt in tries:
         imgs = ["__need_check_%d__.png" % i for i in range(cnt)]

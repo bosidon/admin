@@ -776,7 +776,7 @@ def needs_for_job(kind, payload=None):
                 _act = "edit"
             elif kind == "shotclip":
                 # 片段两引擎：wan = 首尾帧插值（任何出图机都有）；h3 = MiniMax-H3（只有 6000D 装了）
-                _act = "h3clip" if _eng == "h3" else "clip"
+                _act = "h3ref" if _eng == "h3ref" else ("h3clip" if _eng == "h3" else "clip")
             else:
                 _act = kind
             return mat.needs_for(_act, params=params, cfg=cfg,
@@ -2932,13 +2932,17 @@ def _clip_target_rows(conn, plan_id, targets, engine="wan"):
     import materials as mat
     engine = str(engine or "wan").strip().lower()
     h3 = (engine == "h3")
+    h3ref = (engine == "h3ref")
     conn.row_factory = sqlite3.Row
     plan = conn.execute("SELECT * FROM video_scripts WHERE id=?", (plan_id,)).fetchone()
     if not plan:
         raise RuntimeError("剧本 #%s 不存在" % plan_id)
     aspect = (plan["aspect"] or "9:16")
     _cfg = get_comfy_config()
-    if h3:
+    if h3ref:
+        w, h = mat.h3ref_size(aspect)
+        fps = mat.H3REF_FPS
+    elif h3:
         w, h = mat.h3_size(aspect)
         fps = mat.H3_FPS
     else:
@@ -2975,8 +2979,17 @@ def _clip_target_rows(conn, plan_id, targets, engine="wan"):
 
         start_p = _path(shot_d.get("image_material_id"))
         end_p = _path(shot_d.get("end_image_material_id"))
+        refs_d = []
+        if h3ref:                                   # 多图参考引擎：不吃首尾帧，直接用该镜素材图
+            refs_d = mat.h3ref_refs(reqs_d)
+            for _r in refs_d:
+                _r["path"] = _path(_r.get("material_id"))
+            refs_d = [r for r in refs_d if r["path"]]
         skip = ""
-        if not start_p:
+        if h3ref:
+            if not refs_d:
+                skip = "还没有可用的参考素材（场景/人物/道具的图）"
+        elif not start_p:
             skip = "还没有首帧图"
         elif not end_p:
             skip = "还没有尾帧图（首尾帧插值要两帧都在）"
@@ -2984,7 +2997,11 @@ def _clip_target_rows(conn, plan_id, targets, engine="wan"):
             dur = float(shot_d.get("duration_s") or 5)
         except Exception:
             dur = 5.0
-        if h3:
+        if h3ref:
+            length = 0
+            seconds = mat.h3_seconds(dur)
+            prompt = mat.clip_prompt_h3ref(shot_d, refs_d, dur, cfg=_cfg)
+        elif h3:
             length = 0                                    # H3：帧数由模板里的表达式按秒数换算
             seconds = mat.h3_seconds(dur)
             prompt = mat.clip_prompt_h3(shot_d, reqs_d, dur)
@@ -2997,7 +3014,7 @@ def _clip_target_rows(conn, plan_id, targets, engine="wan"):
         items.append({"shot_id": shot_d["id"], "idx": idx, "dur": dur, "length": length,
                       "seconds": seconds, "w": w, "h": h, "fps": fps, "engine": engine,
                       "seed": seed, "start": start_p, "end": end_p, "skip": skip,
-                      "prompt": prompt})
+                      "refs": [r["path"] for r in refs_d], "prompt": prompt})
     return items, (plan["article_id"] or 0)
 
 
@@ -3027,7 +3044,11 @@ def run_shotclip_job(job):
         raise RuntimeError("没有可出片段的目标：%s" % (items[0]["skip"] or "无"))
     _it0 = runnable[0]
     _set(jid, total=len(runnable), done=0)
-    if engine == "h3":
+    if engine == "h3ref":
+        _log(jid, "分镜片段：%d 条（H3 多图参考引擎 %d×%d，约 %.1fs/条 @%dfps，"
+                  "不吃首尾帧、参考图最多 5 张、带音轨，剧本 #%d）"
+             % (len(runnable), _it0["w"], _it0["h"], _it0["seconds"], _it0["fps"], plan_id))
+    elif engine == "h3":
         _log(jid, "分镜片段：%d 条（H3 引擎 %d×%d → 2×超分，约 %.1fs/条 @%dfps，带音轨，剧本 #%d）"
              % (len(runnable), _it0["w"], _it0["h"], _it0["seconds"], _it0["fps"], plan_id))
     else:
@@ -3052,11 +3073,30 @@ def run_shotclip_job(job):
                 if jobstore.canceled(jid):
                     raise RuntimeError("已取消")
                 label = "%d 镜" % (it["idx"] + 1)
-                label = ("%s（H3 %.1fs 带音轨）" % (label, it["seconds"])) if engine == "h3" else \
-                        ("%s（%d 帧 ≈ %.1fs）" % (label, it["length"], it["length"] / float(it["fps"])))
-                _log(jid, "%s：出片段，首帧 %s / 尾帧 %s"
-                     % (label, it["start"].rsplit("/", 1)[-1], it["end"].rsplit("/", 1)[-1]))
-                if engine == "h3":
+                if engine == "h3ref":
+                    label = "%s（H3 多图参考 %d 图 %.1fs 带音轨）" % (
+                        label, len(it.get("refs") or []), it["seconds"])
+                elif engine == "h3":
+                    label = "%s（H3 %.1fs 带音轨）" % (label, it["seconds"])
+                else:
+                    label = "%s（%d 帧 ≈ %.1fs）" % (label, it["length"], it["length"] / float(it["fps"]))
+                if engine == "h3ref":
+                    _log(jid, "%s：出片段，参考图 %d 张（%s）" % (
+                        label, len(it.get("refs") or []),
+                        "、".join(p.rsplit("/", 1)[-1] for p in (it.get("refs") or [])[:5])))
+                else:
+                    _log(jid, "%s：出片段，首帧 %s / 尾帧 %s"
+                         % (label, it["start"].rsplit("/", 1)[-1], it["end"].rsplit("/", 1)[-1]))
+                if engine == "h3ref":
+                    # 参考图直接用素材原图（模板自己按生成分辨率缩放，ref_image_size=match）
+                    imgs = [comfy_upload(base, p) for p in (it.get("refs") or [])]
+                    wf = mat.build_wf("h3ref", imgs,
+                                      {"width": it["w"], "height": it["h"],
+                                       "seconds": it["seconds"], "fps": it["fps"]},
+                                      cfg=cfg, prompt=it["prompt"], seed=it["seed"],
+                                      prefix="shot_h3ref")
+                    _to = 2400            # 实测 5s≈193s/条 @480×864（6000D）
+                elif engine == "h3":
                     # H3 模板里有 ImageResizeKJv2（lanczos + crop）会自己缩到 768×1344 → 直接传原图
                     imgs = [comfy_upload(base, it["start"]), comfy_upload(base, it["end"])]
                     wf = mat.build_wf("h3clip", imgs,
@@ -3088,7 +3128,7 @@ def run_shotclip_job(job):
                             Path(_tmp).unlink(missing_ok=True)
                     except Exception:
                         pass
-                _tag = "h3" if engine == "h3" else "wan"
+                _tag = "h3ref" if engine == "h3ref" else ("h3" if engine == "h3" else "wan")
                 name = "shot%02d_%s_%08x.mp4" % (it["idx"] + 1, _tag, it["seed"] % (2 ** 32))
                 (outdir / name).write_bytes(data)
                 url = "%s/materials/%s/%s" % (mat.URL_PREFIX, article_id, name)

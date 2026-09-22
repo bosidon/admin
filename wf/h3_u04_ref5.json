@@ -1,0 +1,481 @@
+{
+  "92": {
+    "inputs": {
+      "filename_prefix": "comfyui",
+      "format": "auto",
+      "codec": "h264",
+      "codec.encoding": "re-encode",
+      "codec.encoding.crf": 16,
+      "video": [
+        "157",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "保存视频"
+    }
+  },
+  "119": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "120": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "121": {
+    "inputs": {
+      "samples": [
+        "156",
+        0
+      ],
+      "vae": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码（音频）"
+    }
+  },
+  "122": {
+    "inputs": {
+      "samples": [
+        "156",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "123": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "124": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 12,
+      "denoise": 1,
+      "model": [
+        "163",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基本调度器"
+    }
+  },
+  "125": {
+    "inputs": {
+      "noise": [
+        "129",
+        0
+      ],
+      "guider": [
+        "126",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "168",
+        0
+      ],
+      "latent_image": [
+        "136",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "126": {
+    "inputs": {
+      "model": [
+        "163",
+        0
+      ],
+      "conditioning": [
+        "136",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "127": {
+    "inputs": {
+      "unet_name": "minimax/minimax_h3_ref2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "128": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "129": {
+    "inputs": {
+      "noise_seed": 62237677945434
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "130": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "images": [
+        "164",
+        0
+      ],
+      "audio": [
+        "121",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "创建视频"
+    }
+  },
+  "131": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "147",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "数学表达式"
+    }
+  },
+  "136": {
+    "inputs": {
+      "prompt": [
+        "146",
+        0
+      ],
+      "width": [
+        "145",
+        1
+      ],
+      "height": [
+        "145",
+        2
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "128",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "audio_vae": [
+        "120",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "137",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "139",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "141",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "148",
+        0
+      ],
+      "ref_images.ref_image_4": [
+        "149",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 参考生成视频"
+    }
+  },
+  "137": {
+    "inputs": {
+      "image": "Untitled(3).jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "139": {
+    "inputs": {
+      "image": "Untitled(1).jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "141": {
+    "inputs": {
+      "image": "Untitled(4).jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "145": {
+    "inputs": {
+      "预设分辨率": "自定义",
+      "横竖对调": false,
+      "批量大小": 1,
+      "自定义宽": 864,
+      "自定义高": 480,
+      "缩放倍数": "32"
+    },
+    "class_type": "WJILatentPreset",
+    "_meta": {
+      "title": "📐 Latent预设 (Empty Latent Preset)"
+    }
+  },
+  "146": {
+    "inputs": {
+      "prompt": "subject_definitions:\n<Subject 1> 是 <Picture 1> 中的年轻女子，黑色长发，淡蓝色宽袖长袍，银色细发簪。\n<Subject 2> 是 <Picture 2> 中的年轻男子，束发，黑色长袍，深色皮革护腕。\n<Subject 3> 是 <Picture 3> 中的女子，红色长袍，拖曳长飘带。\n<Subject 4> 是 <Picture 4> 中的雪林场景，松枝覆雪，孤树红梅盛开，雪花飘落。\n\nsummary:\n[reference generation] 目标视频跟随 <Subject 1> 与 <Subject 2> 两名同门，穿过 <Subject 4> 的暴风雪，直到看见 <Subject 3> 在红梅树下等候。三个镜头从侧向跟拍中景，切到远景揭示，最后落在 <Subject 1> 开口呼唤的特写。\n\nretention_analysis:\n<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - 黑色长发、淡蓝宽袖长袍与银色发簪全程保留。\n<Subject 2> (appears in [Shot 1]): fully_preserved - 束发、黑色长袍与深色皮革护腕全程保留。\n<Subject 3> (appears in [Shot 2]): fully_preserved - 红色长袍与拖曳长飘带全程保留。\n<Subject 4> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 覆雪松林、盛开红梅与飘雪作为各镜头环境全程保留。\n\ndetailed_description:\n目标视频为电影感武侠风格，冷蓝灰光线，大雪纷飞，浅景深。\n[Shot 1] 中景侧向跟拍，<Subject 1> 与 <Subject 2> 在 <Subject 4> 齐膝深雪中前行，两侧覆雪松枝合拢，风卷雪花横穿画面。<Subject 1> 以宽袖挡风；<Subject 2> 落后半步。 <Subject 1> 骤然停步，眼中惊喜与如释重负，直视前方，镜头随其停住。\n[Shot 2] At 00:02.000，切至沿视线方向的远景并缓慢推进。<Subject 4> 孤树红梅之下，<Subject 3> 背对镜头静立，红袍与长飘带是雪地中唯一的饱和色，飘带被风掀起。\n[Shot 3] At 00:03.500，切至 <Subject 1> (S1) 正面特写，淡蓝长袍肩头积雪，眼眶含泪。<Subject 1> (S1) 以年轻女声、压抑而颤抖地开口，<d>[Chinese] 师姐，我们终于找到你了。</d> 她抿唇继续望向前方，风声渐起。\n\noverall_soundscape:\n全程呼啸风声与密集落雪，第一镜中有踩过深雪的闷响脚步声。\n\nnon_diegetic_music:\n克制的二胡独奏慢板，低音弦乐持续铺垫，在最终特写处轻轻推高。"
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "⚙️ CR Prompt Text"
+    }
+  },
+  "147": {
+    "inputs": {
+      "value": 10
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "148": {
+    "inputs": {
+      "image": "Untitled(2).jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "149": {
+    "inputs": {
+      "image": "Untitled(6).jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "156": {
+    "inputs": {
+      "offload_model": true,
+      "offload_cache": true,
+      "anything": [
+        "125",
+        0
+      ]
+    },
+    "class_type": "VRAMCleanup",
+    "_meta": {
+      "title": "🎈VRAM-Cleanup"
+    }
+  },
+  "157": {
+    "inputs": {
+      "clean_file_cache": true,
+      "clean_processes": true,
+      "clean_dlls": true,
+      "retry_times": 3,
+      "anything": [
+        "130",
+        0
+      ]
+    },
+    "class_type": "RAMCleanup",
+    "_meta": {
+      "title": "🎈RAM-Cleanup"
+    }
+  },
+  "161": {
+    "inputs": {
+      "lora_name": "minimax/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "strength_model": 0.75,
+      "model": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "162": {
+    "inputs": {
+      "model": [
+        "161",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+    "_meta": {
+      "title": "MiniMax H3 Mem Eff Sage Attention Patch"
+    }
+  },
+  "163": {
+    "inputs": {
+      "max_resolution": 1024,
+      "jpeg_quality": 100,
+      "suppress_default_preview": true,
+      "preview_frames": [
+        "131",
+        1
+      ],
+      "preview_fps": 10,
+      "tiny_vae": "taeh3.safetensors",
+      "model": [
+        "167",
+        0
+      ]
+    },
+    "class_type": "ModelPreviewOverrideKJ",
+    "_meta": {
+      "title": "Model Preview Override"
+    }
+  },
+  "164": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.scale": 2,
+      "quality": "ULTRA",
+      "images": [
+        "122",
+        0
+      ]
+    },
+    "class_type": "RTXVideoSuperResolution",
+    "_meta": {
+      "title": "RTX Video Super Resolution"
+    }
+  },
+  "165": {
+    "inputs": {
+      "shift_video": 12,
+      "shift_audio": 3,
+      "model": [
+        "162",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "ModelSamplingMiniMaxH3"
+    }
+  },
+  "166": {
+    "inputs": {
+      "model": [
+        "165",
+        0
+      ],
+      "head_chunks": 4
+    },
+    "class_type": "MiniMaxLowVRAMAttention",
+    "_meta": {
+      "title": "MiniMax H3 Low VRAM Attention"
+    }
+  },
+  "167": {
+    "inputs": {
+      "model": [
+        "166",
+        0
+      ],
+      "chunks": 2,
+      "seq_threshold": 4096
+    },
+    "class_type": "MiniMaxChunkFeedForward",
+    "_meta": {
+      "title": "MiniMax H3 Chunk FeedForward"
+    }
+  },
+  "168": {
+    "inputs": {
+      "sigmas": [
+        "124",
+        0
+      ],
+      "extra_steps": 2,
+      "start_at_sigma": 0.65,
+      "end_at_sigma": 0.0,
+      "spacing": "cosine"
+    },
+    "class_type": "H3SigmaRefiner",
+    "_meta": {
+      "title": "H3 Sigma Refiner"
+    }
+  }
+}

@@ -62,9 +62,10 @@
                 </select>
                 <button class="btn btn-outline btn-sm" onclick="genFrameAll('start')">🎨 整片出首帧</button>
                 <button class="btn btn-outline btn-sm" onclick="genFrameAll('end')">🎨 整片出尾帧</button>
-                <select id="clip-engine" onchange="setClipEngine(this.value)" title="片段引擎：Wan＝480P 快而便宜；H3＝768P＋2×超分、带音轨（只有 6000D 有，慢且贵）" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
+                <select id="clip-engine" onchange="setClipEngine(this.value)" title="片段引擎：Wan＝480P 快而便宜；H3＝首尾帧插值、768P＋2×超分、带音轨；H3 参考＝不吃首尾帧，直接用该镜素材图（最多 5 张）——后两者只有 6000D 有，慢且贵" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
                     <option value="wan">片段 · Wan 480P</option>
                     <option value="h3">片段 · H3 768P 音轨</option>
+                    <option value="h3ref">片段 · H3 参考5图</option>
                 </select>
                 <button class="btn btn-outline btn-sm" onclick="genClipAll()">🎬 整片出片段</button>
                 <button class="btn btn-outline btn-sm" onclick="genVoiceAll()">🔊 全部配音</button>
@@ -229,9 +230,10 @@ async function refreshFrames() { await loadFrames(); renderScenes(); }
 let CLIPS = {};                          // 镜号 → {clip_url, clip_engine, clip_duration_s, has_start, has_end}
 let CLIP_ENGINE = localStorage.getItem('clip_engine') || 'wan';
 function setClipEngine(v) {
-    CLIP_ENGINE = (v === 'h3') ? 'h3' : 'wan';
+    CLIP_ENGINE = (v === 'h3ref') ? 'h3ref' : ((v === 'h3') ? 'h3' : 'wan');
     localStorage.setItem('clip_engine', CLIP_ENGINE);
     if (CLIP_ENGINE === 'h3') { toast('H3 引擎：只走 6000D（¥6.46/h），5–11 分钟/条 —— 带音轨 + 2× 超分'); }
+    if (CLIP_ENGINE === 'h3ref') { toast('H3 多图参考：不吃首尾帧，直接用该镜素材图（最多 5 张）—— 只走 6000D（¥6.46/h），约 3 分钟/条，带音轨'); }
 }
 function applyClipEngine() { const s = document.getElementById('clip-engine'); if (s) { s.value = CLIP_ENGINE; } }
 async function loadClips() {
@@ -247,7 +249,7 @@ function clipCell(i) {
     const box = url
         ? '<video src="' + url + '" controls preload="metadata" style="width:100%;max-height:74px;border-radius:6px;background:#000;display:block;"></video>'
         : '<div style="height:64px;display:flex;align-items:center;justify-content:center;background:#f8fafc;border-radius:6px;color:#cbd5e1;font-size:11px;">未生成</div>';
-    const eng = url ? ('<span style="color:#64748b;font-size:10px;">' + ((c.clip_engine || 'wan') === 'h3' ? 'H3' : 'Wan') + '</span>') : '';
+    const eng = url ? ('<span style="color:#64748b;font-size:10px;">' + ((c.clip_engine || 'wan') === 'h3ref' ? 'H3参考' : ((c.clip_engine || 'wan') === 'h3' ? 'H3' : 'Wan')) + '</span>') : '';
     const dur = c.clip_duration_s ? ('<span style="color:#0f766e;font-size:11px;">' + c.clip_duration_s + 's</span>') : '';
     const tag = (eng || dur) ? ('<div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;">' + eng + dur + '</div>') : '';
     return '<div style="display:flex;flex-direction:column;gap:4px;">' + box

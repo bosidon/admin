@@ -1534,7 +1534,21 @@ def gen_script(article_content, llm_cfg, duration_target=None):
             _b.setdefault("i", _i)
             _b.setdefault("seconds", 5)
             _b.setdefault("line", "")
-            _b.setdefault("mood", "calm")
+            _b.setdefault("mood", "平静")              # 中文口径（老数据里的英文原样保留）
+            _b.setdefault("speaker", "")               # 谁在说：人物中文名 / 「旁白」
+            _b.setdefault("visual", "")                # 这节画面（中文一句话）
+            for _k in ("speaker", "visual", "line", "mood"):   # 非字符串 → 归零，防前端渲染出怪
+                if not isinstance(_b.get(_k), str):
+                    _b[_k] = ""
+    for _c in (data.get("characters") or []):           # 是否开口（缺省＝开口）
+        if isinstance(_c, dict):
+            _v = _c.get("speaks")
+            if _v is None:
+                _c["speaks"] = True
+            elif isinstance(_v, str):
+                _c["speaks"] = _v.strip().lower() not in ("false", "no", "0", "否", "不开口")
+            else:
+                _c["speaks"] = bool(_v)
     data.setdefault("title", "")
     data.setdefault("logline", "")
     if not data.get("total_duration_s"):

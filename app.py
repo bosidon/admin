@@ -525,7 +525,7 @@ VIDEO_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS video_scripts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL, title TEXT, logline TEXT,
   total_duration_s INTEGER, beats TEXT DEFAULT '[]', aspect TEXT DEFAULT '9:16',
-  duration_target INTEGER DEFAULT 15, style TEXT DEFAULT '', status TEXT DEFAULT 'draft',
+  duration_target INTEGER DEFAULT 60, style TEXT DEFAULT '', status TEXT DEFAULT 'draft',
   owner_id INTEGER, role_ids TEXT DEFAULT '[]',
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (article_id) REFERENCES articles(id));
@@ -534,7 +534,7 @@ CREATE TABLE IF NOT EXISTS script_assets (
   kind TEXT NOT NULL, name TEXT NOT NULL, desc TEXT DEFAULT '', slot TEXT DEFAULT 'front',
   aspect TEXT DEFAULT '1:1', prompt TEXT DEFAULT '', prompt_en TEXT DEFAULT '',
   material_id INTEGER, source TEXT DEFAULT '', status TEXT DEFAULT 'missing',
-  matched_role_id INTEGER, sort_order INTEGER DEFAULT 0,
+  matched_role_id INTEGER, sort_order INTEGER DEFAULT 0, speaks INTEGER DEFAULT 1,
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (script_id) REFERENCES video_scripts(id) ON DELETE CASCADE,
   UNIQUE (script_id, req_key));
@@ -582,6 +582,7 @@ def _ensure_video_schema():
         _db.executescript(VIDEO_SCHEMA_SQL)
         # 增量迁移（幂等）：已存在的表补新列，CREATE TABLE IF NOT EXISTS 不会补
         _mig = {'video_scripts': [('role_ids', "TEXT DEFAULT '[]'")],
+                'script_assets': [('speaks', 'INTEGER DEFAULT 1')],
                 'shot_renders': [('duration_s', 'REAL')]}
         for _t, _cols in _mig.items():
             _have = {r[1] for r in _db.execute('PRAGMA table_info(%s)' % _t)}
@@ -670,6 +671,7 @@ def asset_reqs_of(db, script_id):
     for a in rows:
         rid = a['matched_role_id'] if a['matched_role_id'] in roles else None
         out.append({'kind': a['kind'], 'name': a['name'], 'desc': a['desc'],
+                    'speaks': (bool(a['speaks']) if 'speaks' in a.keys() else True),
                     'slots': [a['slot']] if a['slot'] else [],
                     'needed_in_shots': sorted(shot_idx[s] for s in links.get(a['id'], []) if s in shot_idx),
                     'exists': bool(rid), 'matched_role_id': rid,
@@ -723,7 +725,10 @@ def script_obj_of(db, script_id):
     for a in _assets_rows(db, script_id):
         if a['kind'] in by and (a['kind'], a['name']) not in _seen:
             _seen.add((a['kind'], a['name']))      # 同名多槽位 = 多行 → 剧本列表里只算一个
-            by[a['kind']].append({'name': a['name'], 'desc': a['desc']})
+            _it = {'name': a['name'], 'desc': a['desc']}
+            if a['kind'] == 'persona' and 'speaks' in a.keys():
+                _it['speaks'] = bool(a['speaks'])   # 是否开口（仅人物有意义）
+            by[a['kind']].append(_it)
     return {'title': row['title'], 'logline': row['logline'],
             'total_duration_s': row['total_duration_s'],
             'characters': by['persona'], 'scenes': by['scene'], 'props': by['prop'],
@@ -759,7 +764,7 @@ def plan_payload(db, script_id):
 # ---------- 写入侧（各路由唯一出口；不直接用 SQL 碰表） ----------
 def upsert_asset(db, script_id, kind, name, desc='', slot='front', aspect='1:1', prompt='',
                  prompt_en='', material_id=None, source=None, status=None, matched_role_id=None,
-                 sort_order=0):
+                 sort_order=0, speaks=None):
     """★素材需求唯一写入点★ 按 (script_id, req_key) upsert；未传的字段保持原值（不冲掉已有成果）"""
     slot = (slot or 'front')
     key = _req_key(kind, name, slot)
@@ -778,6 +783,8 @@ def upsert_asset(db, script_id, kind, name, desc='', slot='front', aspect='1:1',
             sets.append('status=?'); vals.append(status)
         if matched_role_id is not None:
             sets.append('matched_role_id=?'); vals.append(matched_role_id)
+        if speaks is not None:                      # 是否开口（缺省不动，防冲掉已有标记）
+            sets.append('speaks=?'); vals.append(1 if speaks else 0)
         if sets:
             db.execute('UPDATE script_assets SET ' + ', '.join(sets) +
                        ", updated_at=datetime('now','localtime') WHERE script_id=? AND req_key=?",
@@ -785,11 +792,12 @@ def upsert_asset(db, script_id, kind, name, desc='', slot='front', aspect='1:1',
         return ex['id']
     cur = db.execute("""INSERT INTO script_assets
         (script_id, req_key, kind, name, desc, slot, aspect, prompt, prompt_en, material_id, source,
-         status, matched_role_id, sort_order, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+         status, matched_role_id, sort_order, speaks, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                      (script_id, key, kind, name, desc or '', slot, aspect or '1:1', prompt or '',
                       prompt_en or '', material_id, source or '',
-                      status or ('chosen' if material_id else 'missing'), matched_role_id, sort_order or 0))
+                      status or ('chosen' if material_id else 'missing'), matched_role_id, sort_order or 0,
+                      1 if speaks is None else (1 if speaks else 0)))
     return cur.lastrowid
 
 
@@ -847,7 +855,8 @@ def save_script_obj(db, script_id, obj):
         for it in (obj.get(key) or []):
             if isinstance(it, dict) and (it.get('name') or '').strip():
                 order += 1
-                upsert_asset(db, script_id, kind, it['name'], desc=it.get('desc') or '', sort_order=order)
+                upsert_asset(db, script_id, kind, it['name'], desc=it.get('desc') or '', sort_order=order,
+                             speaks=(it.get('speaks') if kind == 'persona' else None))
     # 本次未再提及的需求行不留幽灵 —— 两条保护缺一不可：
     # ① 只清 slot='front'（本函数自己产生的那一类；「素材需求」步骤产生的 side/back 行不动）
     # ② 用户/下游动过的行不删：已挂素材或已选源（material_id / status）、已被镜头关联（shot_assets）
@@ -1819,9 +1828,16 @@ def api_create_video_plan():
     existing = db.execute('SELECT id FROM video_scripts WHERE article_id=?', (article_id,)).fetchone()
     if existing:
         return jsonify({"ok": True, "id": existing['id'], "existed": True})
+    try:
+        _dt = int(data.get('duration_target') or 60)   # 目标时长默认 60（库里列默认是 15，不能吃那个默认）
+    except Exception:
+        _dt = 60
+    if _dt <= 0:
+        _dt = 60
     cur = db.execute(
-        "INSERT INTO video_scripts (article_id, title, status, created_at) VALUES (?, ?, ?, datetime('now','localtime'))",
-        (article_id, data.get('title', ''), 'draft')
+        "INSERT INTO video_scripts (article_id, title, status, duration_target, created_at)"
+        " VALUES (?, ?, ?, ?, datetime('now','localtime'))",
+        (article_id, data.get('title', ''), 'draft', _dt)
     )
     db.commit()
     return jsonify({"ok": True, "id": cur.lastrowid})

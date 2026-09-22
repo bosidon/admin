@@ -566,7 +566,9 @@ function renderScript(obj) {
         if (!Array.isArray(arr) || !arr.length) return '';
         return '<div style="margin-top:8px;"><b>' + label + '（' + arr.length + '）</b>'
             + arr.map(function (x) {
-                return '<div style="margin:4px 0 0 12px;">· <b>' + esc(x && x.name) + '</b>'
+                const mute = (x && x.speaks === false)
+                    ? '<span style="color:#f59e0b;">（不开口）</span>' : '';
+                return '<div style="margin:4px 0 0 12px;">· <b>' + esc(x && x.name) + '</b>' + mute
                     + '<span style="color:#64748b;"> — ' + esc(x && x.desc) + '</span></div>';
             }).join('') + '</div>';
     };
@@ -583,14 +585,18 @@ function renderScript(obj) {
             + '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;">'
             + '<thead><tr style="background:#eef2ff;">'
             + '<th style="padding:5px;border:1px solid #e2e8f0;width:38px;">#</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;width:64px;">时长</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;width:72px;">情绪</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;">旁白/台词</th></tr></thead><tbody>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;width:58px;">时长</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;width:78px;">谁在说</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;">旁白/台词</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;">画面</th>'
+            + '<th style="padding:5px;border:1px solid #e2e8f0;width:64px;">情绪</th></tr></thead><tbody>'
             + beats.map(function (b, i) {
                 return '<tr><td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + (i + 1) + '</td>'
                     + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.seconds) + 's</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.mood) + '</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;">' + esc(b && b.line) + '</td></tr>';
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.speaker) + '</td>'
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;">' + esc(b && b.line) + '</td>'
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;color:#475569;">' + esc(b && b.visual) + '</td>'
+                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.mood) + '</td></tr>';
             }).join('') + '</tbody></table></div>';
     }
     box.innerHTML = html;

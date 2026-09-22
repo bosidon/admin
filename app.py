@@ -543,6 +543,8 @@ CREATE TABLE IF NOT EXISTS storyboard_shots (
   shot_face TEXT DEFAULT 'front',
   scene_asset_id INTEGER REFERENCES script_assets(id) ON DELETE SET NULL, music_hint TEXT DEFAULT '',
   template_hint TEXT DEFAULT '', image_material_id INTEGER, audio_material_id INTEGER,
+  beat_idx INTEGER DEFAULT 0, camera_move TEXT DEFAULT '', end_state TEXT DEFAULT '',
+  end_image_material_id INTEGER,
   status TEXT DEFAULT 'pending',
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (script_id) REFERENCES video_scripts(id) ON DELETE CASCADE,
@@ -709,6 +711,8 @@ def shots_of(db, script_id):
                     'shot_type': s['shot_type'], 'characters': cast, 'scene': (sc['name'] if sc else ''),
                     'props': props, 'shot_face': s['shot_face'], 'music_hint': s['music_hint'],
                     'template_hint': s['template_hint'],
+                    'beat_idx': s['beat_idx'], 'camera_move': s['camera_move'],
+                    'end_state': s['end_state'], 'end_image_material_id': s['end_image_material_id'],
                     'id': s['id'], 'shot_idx': s['shot_idx'], 'status': s['status'],
                     'image_material_id': s['image_material_id'],
                     'audio_material_id': s['audio_material_id']})
@@ -899,21 +903,28 @@ def save_shots(db, script_id, shots):
         scene_id = _aid('scene', sh.get('scene'))
         ex = db.execute('SELECT id FROM storyboard_shots WHERE script_id=? AND shot_idx=?',
                         (script_id, idx)).fetchone()
+        _bi = sh.get('beat_idx')          # 对应剧本第几节（LLM 新口径；缺失/非法一律 0）
+        try:
+            _bi = int(_bi)
+        except Exception:
+            _bi = 0
         vals = (sh.get('visual') or '', sh.get('line') or sh.get('subtitle') or '',
                 sh.get('duration') or sh.get('duration_s'), sh.get('shot_type') or '',
                 sh.get('shot_face') or 'front', sh.get('music_hint') or '',
-                sh.get('template_hint') or '', scene_id)
+                sh.get('template_hint') or '', scene_id,
+                _bi, sh.get('camera_move') or '', sh.get('end_state') or '')
         if ex:
             sid = ex['id']
             db.execute("""UPDATE storyboard_shots SET visual=?, line=?, duration_s=?, shot_type=?,
                           shot_face=?, music_hint=?, template_hint=?, scene_asset_id=?,
+                          beat_idx=?, camera_move=?, end_state=?,
                           updated_at=datetime('now','localtime') WHERE id=?""", vals + (sid,))
             db.execute('DELETE FROM shot_assets WHERE shot_id=?', (sid,))
         else:
             sid = db.execute("""INSERT INTO storyboard_shots
                 (script_id, shot_idx, visual, line, duration_s, shot_type, shot_face, music_hint,
-                 template_hint, scene_asset_id, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                 template_hint, scene_asset_id, beat_idx, camera_move, end_state, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                              (script_id, idx) + vals).lastrowid
         keep.append(sid)
         if scene_id:
@@ -952,12 +963,19 @@ def set_shot_render(db, shot_id, kind, material_id=None, url='', duration_s=None
 
 
 def _ensure_video_cols():
-    """video_clips 的幂等列迁移（该表历史上手工建的；video_plans 已废弃，见 _ensure_video_schema）"""
+    """video_clips / storyboard_shots 的幂等列迁移（导期调用）
+    CREATE TABLE IF NOT EXISTS 不会给已有表补列，故逐个 ALTER；表还不存在则跳过（由 _ensure_video_schema 建表带上）"""
     db = sqlite3.connect(CONTENT_DATABASE)   # 导入期调用，不能用依赖 Flask 上下文的 get_content_db()
-    ccols = {r[1] for r in db.execute("PRAGMA table_info(video_clips)")}
-    for name, ddl in (("line", "TEXT"), ("visual", "TEXT"), ("audio_material_id", "INTEGER")):
-        if ccols and name not in ccols:
-            db.execute("ALTER TABLE video_clips ADD COLUMN %s %s" % (name, ddl))
+    _mig = (("video_clips", (("line", "TEXT"), ("visual", "TEXT"), ("audio_material_id", "INTEGER"))),
+            ("storyboard_shots", (("beat_idx", "INTEGER DEFAULT 0"), ("camera_move", "TEXT DEFAULT ''"),
+                                  ("end_state", "TEXT DEFAULT ''"), ("end_image_material_id", "INTEGER"))))
+    for _tbl, _cols in _mig:
+        ccols = {r[1] for r in db.execute("PRAGMA table_info(%s)" % _tbl)}
+        if not ccols:
+            continue
+        for name, ddl in _cols:
+            if name not in ccols:
+                db.execute("ALTER TABLE %s ADD COLUMN %s %s" % (_tbl, name, ddl))
     db.commit()
     db.close()
 

@@ -1571,6 +1571,10 @@ def gen_storyboard(script_text, llm_cfg, assets=None):
         sh.setdefault("shot_type", "中景"); sh.setdefault("visual_prompt", "")
         sh.setdefault("subtitle", ""); sh.setdefault("music_hint", "none")
         sh.setdefault("template_hint", "U02")
+        # 新分镜口径：运镜 + 尾帧落点 + 对应剧本节拍（缺失一律兜底）
+        sh.setdefault("beat_idx", i)
+        if not isinstance(sh.get("camera_move"), str): sh["camera_move"] = ""
+        if not isinstance(sh.get("end_state"), str): sh["end_state"] = ""
         # 兜底：素材类字段一律补齐（LLM 可能整个漏掉某键）
         if not isinstance(sh.get("characters"), list): sh["characters"] = []
         if not isinstance(sh.get("props"), list): sh["props"] = []

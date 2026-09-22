@@ -375,7 +375,8 @@ function genAssetByIdx(i) {
     const aspect = p.aspect || (kind === 'persona' ? '3:4' : (kind === 'scene' ? '16:9' : '1:1'));
     if (st) { st.textContent = '提交中…'; }
     fetch('/api/illustrate/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt, aspect: aspect, style: '', article_id: PLAN_ARTICLE_ID || 0 }) })
+        body: JSON.stringify({ prompt: prompt, aspect: aspect, style: '', article_id: PLAN_ARTICLE_ID || 0,
+            attach: { plan_id: PLAN_ID, req_key: p.req_key || '', kind: kind, name: p.name || '', slot: p.slot || 'front' } }) })
       .then(r => r.json()).then(j => {
         if (!j.ok) { if (st) { st.textContent = '失败：' + (j.error || ''); } return; }
         if (st) { st.textContent = '已排队…'; }
@@ -391,12 +392,12 @@ function pollAssetJob(jobId, i, p, kind) {
             const s2 = String(j.status || '').toLowerCase();
             if (['done', 'success', 'finished', 'completed'].indexOf(s2) >= 0) {
                 clearInterval(t);
-                const url = j.result_url || j.url || (j.result && (j.result.url || j.result.image || j.result.file)) || '';
+                const url = (Array.isArray(j.images) && j.images[0]) || j.result_url || j.url || (j.result && (j.result.url || j.result.image || j.result.file)) || '';
                 if (st) { st.textContent = '已出图，挂载中…'; }
                 fetch('/api/video-plans/' + PLAN_ID + '/asset-attach', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ kind: kind, name: p.name || '', slot: p.slot || 'front', url: url, material_id: j.material_id || null }) })
+                    body: JSON.stringify({ kind: kind, name: p.name || '', slot: p.slot || 'front', req_key: p.req_key || '', url: url, material_id: j.material_id || null }) })
                   .then(r => r.json()).then(k => {
-                    if (st) { st.textContent = k.ok ? ('✓ 已生成并挂到「' + (p.name || '') + '」') : ('挂载失败：' + (k.error || '')); }
+                    if (st) { st.textContent = k.ok ? (((k.req_attached) ? '✓ 已生成·需求行已挂「' : '✓ 已生成·已入库（需求行未匹配，可从素材库选）「') + (p.name || '') + '」') : ('挂载失败：' + (k.error || '')); }
                     if (k.ok) { load(); }
                   }).catch(function () { if (st) { st.textContent = '挂载请求失败'; } });
             } else if (['failed', 'error', 'canceled', 'cancelled'].indexOf(s2) >= 0) {

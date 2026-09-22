@@ -430,6 +430,40 @@ def recover_orphans():
 
 
 # ---------------- 调度器 ----------------
+def _maybe_auto_attach(jid):
+    """出图 job 完成且 payload.attach 存在 → 服务端自动挂素材需求行（关页面/断轮询也生效）"""
+    try:
+        j = get(jid) or {}
+        at = (j.get("payload") or {}).get("attach")
+        imgs = j.get("images") or []
+        if j.get("status") != "done" or not isinstance(at, dict) or not at.get("plan_id") or not imgs:
+            return
+        try:
+            oid = int(j.get("owner_id") or 0)
+        except Exception:
+            oid = 0
+        import app as _app                      # 同进程运行时导入（应用模块已加载，无环）
+        try:
+            _r = _conn().execute("SELECT id FROM materials WHERE file_path=?",
+                                 (imgs[0],)).fetchone()
+            mid = _r[0] if _r else None
+        except Exception:
+            mid = None
+        with _app.app.app_context():            # jsonify/_can_access_article 需要应用上下文（钩子线程无请求）
+            payload, code = _app._do_asset_attach(
+                int(at["plan_id"]),
+                {"kind": at.get("kind"), "name": at.get("name"), "slot": at.get("slot"),
+                 "req_key": at.get("req_key") or "", "url": imgs[0], "material_id": mid,
+                 "source": "ai"},
+                {"id": oid, "role": ""}, trusted=True)
+        if code == 200 and payload.get("ok"):
+            log(jid, "✅ 已自动挂到素材需求行（%s）" % (at.get("req_key") or at.get("name")))
+        else:
+            log(jid, "⚠️ 自动挂素材需求未成功：%s" % (payload.get("error") or payload))
+    except Exception as e:
+        log(jid, "⚠️ 自动挂素材需求失败：%s" % e)
+
+
 class Dispatcher:
     """按 kind 起并发的调度线程；并发上限可动态读（改设置立即生效）"""
 
@@ -481,6 +515,7 @@ class Dispatcher:
             cur = get(jid) or {}
             if cur.get("status") == "running":      # 跑完就收尾（取消只作用于排队中/会中断的任务）
                 update(jid, status="done", finished_at=_now(), stage="")
+                _maybe_auto_attach(jid)             # payload.attach → 服务端自动挂素材需求行（关页面也生效）
         except Exception as e:
             msg = str(e)[:300] or "未知错误"
             cur = get(jid) or {}

@@ -685,7 +685,8 @@ def asset_reqs_of(db, script_id):
 def asset_prompts_of(db, script_id):
     """旧 asset_prompts 形状（与 script_assets 一一对应）"""
     return [{'kind': a['kind'], 'name': a['name'], 'slot': a['slot'], 'aspect': a['aspect'],
-             'prompt': a['prompt'], 'prompt_en': a['prompt_en']} for a in _assets_rows(db, script_id)]
+             'prompt': a['prompt'], 'prompt_en': a['prompt_en'],
+             'req_key': a['req_key']} for a in _assets_rows(db, script_id)]
 
 
 def shots_of(db, script_id):
@@ -2519,6 +2520,10 @@ def _images_generate(data, force_txt2img=False):
             return _g
     payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect,
                "article_id": aid or None}
+    _at = data.get("attach")                 # 素材需求上下文 → job 完成后服务端自动挂载（关页面也生效）
+    if isinstance(_at, dict) and _at.get("plan_id"):
+        payload["attach"] = {k: (_at.get(k) or "") for k in
+                              ("plan_id", "req_key", "kind", "name", "slot")}
     res = enqueue_image_job('txt2img', aid or None, payload, 1,
                             owner=user_label(u), owner_id=u.get('id'))
     if res.get("error"):                  # 未配置实例池 / Token
@@ -3068,25 +3073,23 @@ def api_plan_voice_gen(plan_id):
     return jsonify({"ok": True, "done": done, "failed": failed, "voice": voice})
 
 
-@app.route('/api/video-plans/<int:plan_id>/asset-attach', methods=['POST'])
-def api_plan_asset_attach(plan_id):
+def _do_asset_attach(plan_id, d, u, trusted=False):
     """素材 Tab「AI 生成」出图后 → 挂到角色槽位（无角色则新建角色并挂图、加入本片素材包）
-    body: {kind?, name?, slot?('front'|'side'|'back'), role_id?, material_id?, url?}
+    body: {kind?, name?, slot?('front'|'side'|'back'), role_id?, material_id?, url?, req_key?}
+    路由与 jobs 完成钩子共用，返回 (dict, http_code)；trusted=True 供服务端钩子跳过登录/
+    越权复验（attach 上下文在发起时已校验，钩子线程无请求会话）。
     """
-    u = current_user()
     if not u:
-        return jsonify({"error": "未登录"}), 401
+        return {"error": "未登录"}, 401
     db = get_content_db()
     row = _script_row(db, plan_id)
     if not row:
-        return jsonify({"error": "不存在"}), 404
-    _g = _guard_article(row["article_id"])
-    if _g:
-        return _g
-    d = request.get_json(silent=True) or {}
+        return {"error": "不存在"}, 404
+    if not trusted and not _can_access_article(row["article_id"], u):
+        return {"error": "文案不存在"}, 404
     slot = (d.get("slot") or "front").strip()
     if slot not in ("front", "side", "back"):
-        return jsonify({"error": "非法槽位"}), 400
+        return {"error": "非法槽位"}, 400
     col = {"front": "front_material_id", "side": "side_material_id", "back": "back_material_id"}[slot]
     mid = d.get("material_id")
     if not mid and d.get("url"):                     # 允许用 url 反查素材 id
@@ -3099,22 +3102,22 @@ def api_plan_asset_attach(plan_id):
         except Exception:
             mid = None
     if not mid:
-        return jsonify({"error": "找不到该素材（material_id/url 都无效）"}), 400
+        return {"error": "找不到该素材（material_id/url 都无效）"}, 400
     rid = d.get("role_id")
     created = False
     if rid:
         r2 = db.execute("SELECT * FROM roles WHERE id=?", (int(rid),)).fetchone()
         if not r2:
-            return jsonify({"error": "角色不存在"}), 404
+            return {"error": "角色不存在"}, 404
         if not _is_admin(u) and r2["owner_id"] != u["id"]:
-            return jsonify({"error": "无权操作"}), 403
+            return {"error": "无权操作"}, 403
     else:
         kind = (d.get("kind") or "persona").strip()
         name = (d.get("name") or "").strip()[:80]
         if kind not in ROLE_KINDS:
-            return jsonify({"error": "非法类型：%s" % kind}), 400
+            return {"error": "非法类型：%s" % kind}, 400
         if not name:
-            return jsonify({"error": "缺少名称"}), 400
+            return {"error": "缺少名称"}, 400
         cur = db.execute("INSERT INTO roles (owner_id, kind, name, " + col + ", tags, note)"
                          " VALUES (?,?,?,?,'','')", (u["id"], kind, name, int(mid)))
         rid = cur.lastrowid
@@ -3130,6 +3133,7 @@ def api_plan_asset_attach(plan_id):
     db.execute("UPDATE roles SET " + col + "=?, updated_at=datetime('now','localtime') WHERE id=?",
                (int(mid), int(rid)))
     # 桥接需求行：素材库里选的 / AI 出的图，同步挂到对应素材需求项（素材 Tab 的唯一入口）
+    _req_ok = False
     try:
         _kind = (d.get("kind") or "persona").strip()
         _name = (d.get("name") or "").strip()[:80]
@@ -3144,11 +3148,20 @@ def api_plan_asset_attach(plan_id):
             db.execute("UPDATE script_assets SET material_id=?, source=?, status='chosen',"
                        " updated_at=datetime('now','localtime') WHERE id=?",
                        (int(mid), d.get("source") or "ai", _rq["id"]))
+            _req_ok = True
     except Exception:
-        pass
+        _req_ok = False
     db.commit()
     db.close()
-    return jsonify({"ok": True, "role_id": rid, "created": created, "slot": slot, "material_id": int(mid)})
+    return {"ok": True, "role_id": rid, "created": created, "slot": slot,
+            "material_id": int(mid), "req_attached": _req_ok}, 200
+
+
+@app.route('/api/video-plans/<int:plan_id>/asset-attach', methods=['POST'])
+def api_plan_asset_attach(plan_id):
+    payload, code = _do_asset_attach(plan_id, request.get_json(silent=True) or {},
+                                     current_user())
+    return jsonify(payload), code
 
 
 @app.route('/api/materials/download', methods=['POST'])

@@ -2474,8 +2474,10 @@ def api_materials_txt2img():
         aid = int(aid)
     except Exception:
         aid = 0
-    if aid and not _can_access_article(aid):
-        return jsonify({"error": "无权为该文案生成素材"}), 403
+    if aid:
+        _g = _guard_article(aid)          # 与文章配图一致：越权统一按「不存在」处理
+        if _g:
+            return _g
     payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect,
                "article_id": aid or None}
     jid, reused = jobstore.DISPATCHER.enqueue('txt2img', aid or None, payload, 1, priority=10,

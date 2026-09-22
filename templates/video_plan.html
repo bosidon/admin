@@ -35,7 +35,7 @@
         <button class="plan-tab" id="ptab-shots" onclick="switchTab('shots')">🎬 分镜</button>
     </div>
 
-    <!-- Tab 剧本：① 视频脚本（保留 #script textarea 可手改 + 新增可读展示区 #script-view） -->
+    <!-- Tab 剧本：① 视频脚本（上方表单直接编辑：人物/场景/道具/分节，无 JSON 框） -->
     <div id="blk-script" class="tab-pane active" style="margin-bottom:20px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">① 剧本（人物 / 场景 / 道具 / 分节）</label>
@@ -45,8 +45,6 @@
             </div>
         </div>
         <div id="script-view" style="margin-bottom:10px;padding:14px;background:#f8fafc;border-radius:8px;font-size:13px;line-height:1.8;"></div>
-        <textarea id="script" rows="10" placeholder="剧本 JSON（可手改后点「💾 保存剧本」）"
-            style="width:100%;padding:12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;line-height:1.7;font-family:inherit;resize:vertical;"></textarea>
     </div>
 
     <!-- Tab 素材：素材列表（剧本需要的素材） -->
@@ -506,7 +504,6 @@ async function load() {
     PLAN = d;
     document.getElementById('plan-title').textContent = d.title || '未命名视频';
     document.getElementById('plan-status').textContent = d.status || 'draft';
-    document.getElementById('script').value = d.script || '';
     try { SCRIPT_OBJ = JSON.parse(d.script || ''); } catch(e) { SCRIPT_OBJ = null; }
     if (!SCRIPT_OBJ || typeof SCRIPT_OBJ !== 'object' || Array.isArray(SCRIPT_OBJ)) { SCRIPT_OBJ = null; }
     renderScript(SCRIPT_OBJ);
@@ -538,68 +535,177 @@ async function load() {
 }
 
 async function saveAll() {
-    const r = await api('/api/video-plans/' + PLAN_ID, {
-        method: 'PUT',
-        body: JSON.stringify({
-            script: document.getElementById('script').value,
-            storyboard: JSON.stringify(SCENES),
-            status: SCENES.length ? 'storyboard_done' : 'script_done'
-        })
-    });
+    const so = collectForm();
+    const body = {
+        script: JSON.stringify(so),
+        storyboard: JSON.stringify(SCENES),
+        status: SCENES.length ? 'storyboard_done' : 'script_done'
+    };
+    if (so.title) { body.title = so.title; }
+    const r = await api('/api/video-plans/' + PLAN_ID, { method: 'PUT', body: JSON.stringify(body) });
     if (r.ok) { toast('✅ 已保存', 'success'); load(); }
-    else { toast('❌ ' + (r.error||'保存失败'), 'error'); }
+    else { toast('❌ ' + (r.error || '保存失败'), 'error'); }
 }
 
-// 剧本 JSON -> 可读文本（人物/场景/道具/分节）
-function renderScript(obj) {
+
+// ---------- 剧本：上方表单直接编辑（人物/场景/道具/分节），保存时组装回同一 JSON ----------
+function renderScript(src) {
     const box = document.getElementById('script-view');
     if (!box) return;
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-        box.innerHTML = '<span style="color:#94a3b8;font-size:12px;">尚无剧本 —— 点「🤖 AI 生成剧本」生成，'
-            + '或直接在下方 JSON 里手写后点「💾 保存剧本」</span>';
-        return;
-    }
+    const obj = (src && typeof src === 'object' && !Array.isArray(src))
+        ? src : { title: '', logline: '', characters: [], scenes: [], props: [], beats: [] };
     const esc = function (s) {
         return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     };
-    const listOf = function (arr, label) {
-        if (!Array.isArray(arr) || !arr.length) return '';
-        return '<div style="margin-top:8px;"><b>' + label + '（' + arr.length + '）</b>'
-            + arr.map(function (x) {
-                const mute = (x && x.speaks === false)
-                    ? '<span style="color:#f59e0b;">（不开口）</span>' : '';
-                return '<div style="margin:4px 0 0 12px;">· <b>' + esc(x && x.name) + '</b>' + mute
-                    + '<span style="color:#64748b;"> — ' + esc(x && x.desc) + '</span></div>';
-            }).join('') + '</div>';
+    const escq = function (s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
+    const S = function (extra) {
+        return 'style="padding:5px 7px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;' + (extra || '') + '"';
     };
-    let html = '<div style="font-size:15px;font-weight:700;">' + esc(obj.title || '（未命名剧本）') + '</div>';
-    if (obj.logline) { html += '<div style="color:#475569;margin-top:3px;">' + esc(obj.logline) + '</div>'; }
-    html += '<div style="color:#94a3b8;font-size:12px;margin-top:3px;">总时长 ' + esc(obj.total_duration_s || '—')
-        + ' 秒 · ' + ((Array.isArray(obj.beats) ? obj.beats : []).length) + ' 个分节</div>';
-    html += listOf(obj.characters, '人物');
-    html += listOf(obj.scenes, '场景');
-    html += listOf(obj.props, '道具');
-    const beats = Array.isArray(obj.beats) ? obj.beats : [];
-    if (beats.length) {
-        html += '<div style="margin-top:10px;"><b>分节（' + beats.length + '）</b>'
-            + '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;">'
-            + '<thead><tr style="background:#eef2ff;">'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;width:38px;">#</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;width:58px;">时长</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;width:78px;">谁在说</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;">旁白/台词</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;">画面</th>'
-            + '<th style="padding:5px;border:1px solid #e2e8f0;width:64px;">情绪</th></tr></thead><tbody>'
-            + beats.map(function (b, i) {
-                return '<tr><td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + (i + 1) + '</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.seconds) + 's</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.speaker) + '</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;">' + esc(b && b.line) + '</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;color:#475569;">' + esc(b && b.visual) + '</td>'
-                    + '<td style="padding:5px;border:1px solid #e2e8f0;text-align:center;">' + esc(b && b.mood) + '</td></tr>';
-            }).join('') + '</tbody></table></div>';
+    const arr = function (k) { return Array.isArray(obj[k]) ? obj[k] : []; };
+    const chars = arr('characters').map(function (c) { return (c && c.name) || ''; }).filter(Boolean);
+    let html = '';
+    html += '<div style="display:flex;gap:8px;align-items:center;">'
+        + '<input class="js-sf" data-f="title" value="' + escq(obj.title || '') + '" placeholder="剧本标题（必填）" ' + S('flex:1;padding:6px 9px;font-size:14px;') + '>'
+        + '<span style="color:#94a3b8;font-size:12px;white-space:nowrap;">总时长 <b id="sum-sec" style="color:#334155;">0</b> 秒 · 目标 '
+        + (PLAN && PLAN.duration_target ? esc(PLAN.duration_target) : '—') + ' 秒</span></div>';
+    html += '<div id="sum-warn" style="display:none;color:#dc2626;font-size:12px;margin-top:4px;"></div>';
+    html += '<textarea class="js-sf" data-f="logline" rows="2" placeholder="一句话（可空）" ' + S('width:100%;margin-top:7px;') + '>' + esc(obj.logline || '') + '</textarea>';
+    if (!(obj.title || '') && !arr('beats').length && !arr('characters').length
+        && !arr('scenes').length && !arr('props').length) {
+        html += '<div style="color:#94a3b8;font-size:12px;margin:6px 0;">尚无剧本 —— 点右上「🤖 AI 生成剧本」，或直接在下面手填后点「💾 保存剧本」</div>';
     }
+    const listBlock = function (key, label, withSpeaks) {
+        const items = arr(key);
+        let h = '<div style="margin-top:10px;"><div style="display:flex;justify-content:space-between;align-items:center;">'
+            + '<b style="font-size:13px;">' + label + '（' + items.length + '）</b>'
+            + '<button type="button" class="btn btn-outline btn-sm" onclick="addRow(\'' + key + '\')">＋ 加一行</button></div>';
+        if (!items.length) { h += '<div style="color:#94a3b8;font-size:12px;margin-top:4px;">（还没有）</div>'; }
+        items.forEach(function (x, i) {
+            x = x || {};
+            h += '<div style="display:flex;gap:6px;align-items:center;margin-top:5px;">'
+                + '<input class="js-sf" data-list="' + key + '" data-i="' + i + '" data-f="name" value="' + escq(x.name || '') + '" placeholder="名称（必填）" ' + S('width:150px;') + '>'
+                + '<input class="js-sf" data-list="' + key + '" data-i="' + i + '" data-f="desc" value="' + escq(x.desc || '') + '" placeholder="描述（中文，AI 出图照它画）" ' + S('flex:1;min-width:110px;') + '>'
+                + (withSpeaks ? '<label style="font-size:12px;white-space:nowrap;color:#475569;"><input type="checkbox" class="js-sf" data-list="' + key + '" data-i="' + i + '" data-f="speaks"' + (x.speaks === false ? '' : ' checked') + '> 开口</label>' : '')
+                + '<button type="button" onclick="delRow(\'' + key + '\',' + i + ')" title="删除本行" style="border:1px solid #e2e8f0;background:#fff;border-radius:6px;width:26px;height:26px;cursor:pointer;color:#94a3b8;">×</button>'
+                + '</div>';
+        });
+        return h + '</div>';
+    };
+    html += listBlock('characters', '人物', true);
+    html += listBlock('scenes', '场景', false);
+    html += listBlock('props', '道具', false);
+    const beats = arr('beats');
+    html += '<div style="margin-top:12px;"><div style="display:flex;justify-content:space-between;align-items:center;">'
+        + '<b style="font-size:13px;">分节（' + beats.length + '）</b>'
+        + '<button type="button" class="btn btn-outline btn-sm" onclick="addRow(\'beats\')">＋ 加一节</button></div>'
+        + '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;">'
+        + '<thead><tr style="background:#eef2ff;">'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;width:34px;">#</th>'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;width:66px;">时长</th>'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;width:96px;">谁在说</th>'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;">旁白/台词</th>'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;">画面</th>'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;width:78px;">情绪</th>'
+        + '<th style="padding:5px;border:1px solid #e2e8f0;width:32px;"></th></tr></thead><tbody>';
+    if (!beats.length) {
+        html += '<tr><td colspan="7" style="padding:8px;border:1px solid #e2e8f0;color:#94a3b8;">（还没有分节 —— 点 AI 生成，或「＋ 加一节」）</td></tr>';
+    }
+    beats.forEach(function (b, i) {
+        b = b || {};
+        const cur = String(b.speaker || '旁白').trim() || '旁白';
+        const opts = ['旁白'].concat(chars);
+        if (opts.indexOf(cur) < 0) { opts.push(cur); }
+        const optHtml = opts.map(function (o) {
+            const bad = (o !== '旁白' && chars.indexOf(o) < 0);
+            return '<option value="' + escq(o) + '"' + (o === cur ? ' selected' : '') + '>'
+                + esc(o) + (bad ? '（不在人物表）' : '') + '</option>';
+        }).join('');
+        html += '<tr>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;text-align:center;">' + (i + 1) + '</td>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;text-align:center;"><input type="number" min="1" max="15" class="js-sf" data-list="beats" data-i="' + i + '" data-f="seconds" value="' + escq(b.seconds == null ? '' : b.seconds) + '" oninput="updateSum()" ' + S('width:54px;text-align:center;') + '></td>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;"><select class="js-sf" data-list="beats" data-i="' + i + '" data-f="speaker" ' + S('width:100%;') + '>' + optHtml + '</select></td>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;"><input class="js-sf" data-list="beats" data-i="' + i + '" data-f="line" value="' + escq(b.line || '') + '" placeholder="台词（必填）" ' + S('width:100%;') + '></td>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;"><input class="js-sf" data-list="beats" data-i="' + i + '" data-f="visual" value="' + escq(b.visual || '') + '" placeholder="画面（AI 照它出图）" ' + S('width:100%;') + '></td>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;"><input class="js-sf" data-list="beats" data-i="' + i + '" data-f="mood" value="' + escq(b.mood || '') + '" placeholder="情绪" ' + S('width:100%;') + '></td>'
+            + '<td style="padding:4px;border:1px solid #e2e8f0;text-align:center;"><button type="button" onclick="delRow(\'beats\',' + i + ')" title="删除本节" style="border:1px solid #e2e8f0;background:#fff;border-radius:6px;width:24px;height:24px;cursor:pointer;color:#94a3b8;">×</button></td>'
+            + '</tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div style="color:#94a3b8;font-size:11px;margin-top:6px;">改完点右上「💾 保存剧本」。每节 1–15 秒；「谁在说」只能选人物表里的人或「旁白」。</div>';
     box.innerHTML = html;
+    updateSum();
+}
+
+// 合计秒数 vs 目标时长（红字提示，不拦截保存）
+function updateSum() {
+    let s = 0;
+    document.querySelectorAll('.js-sf[data-f="seconds"]').forEach(function (n) {
+        const v = parseInt(n.value, 10);
+        if (!isNaN(v)) { s += v; }
+    });
+    const el = document.getElementById('sum-sec');
+    if (el) { el.textContent = s; }
+    const w = document.getElementById('sum-warn');
+    const target = PLAN ? parseInt(PLAN.duration_target, 10) : 0;
+    if (w && target) {
+        if (s !== target) {
+            w.style.display = 'block';
+            w.textContent = '⚠ 分节合计 ' + s + ' 秒 ≠ 目标 ' + target + ' 秒（差 ' + (s > target ? '+' : '') + (s - target) + '）';
+        } else {
+            w.style.display = 'none';
+            w.textContent = '';
+        }
+    }
+}
+
+function addRow(key) {
+    const o = collectForm();
+    if (!Array.isArray(o[key])) { o[key] = []; }
+    if (key === 'beats') { o[key].push({ seconds: 5, speaker: '旁白', line: '', visual: '', mood: '' }); }
+    else if (key === 'characters') { o[key].push({ name: '', desc: '', speaks: true }); }
+    else { o[key].push({ name: '', desc: '' }); }
+    renderScript(o);
+}
+
+function delRow(key, i) {
+    const o = collectForm();
+    if (Array.isArray(o[key])) { o[key].splice(i, 1); }
+    renderScript(o);
+}
+
+// 表单 -> 剧本对象（DOM = 唯一草稿；未保存的改动都在 DOM 里）
+function collectForm() {
+    const base = (SCRIPT_OBJ && typeof SCRIPT_OBJ === 'object') ? SCRIPT_OBJ : {};
+    const o = Object.assign({}, base);
+    const g = function (f) {
+        const el = document.querySelector('.js-sf[data-f="' + f + '"]');
+        return el ? el.value : '';
+    };
+    o.title = (g('title') || '').trim();
+    o.logline = (g('logline') || '').trim();
+    ['characters', 'scenes', 'props', 'beats'].forEach(function (k) {
+        const src = Array.isArray(base[k]) ? base[k] : [];
+        const groups = {};
+        document.querySelectorAll('.js-sf[data-list="' + k + '"]').forEach(function (n) {
+            const i = n.getAttribute('data-i');
+            if (!groups[i]) { groups[i] = []; }
+            groups[i].push(n);
+        });
+        o[k] = Object.keys(groups).map(Number).sort(function (a, b) { return a - b; }).map(function (i) {
+            const row = Object.assign({}, src[i] || {});
+            groups[i].forEach(function (n) {
+                const f = n.getAttribute('data-f');
+                if (n.type === 'checkbox') { row[f] = n.checked; }
+                else if (f === 'seconds') { row[f] = (n.value === '') ? '' : parseInt(n.value, 10); }
+                else { row[f] = n.value; }
+            });
+            return row;
+        });
+    });
+    let sum = 0;
+    (o.beats || []).forEach(function (b) { if (typeof b.seconds === 'number') { sum += b.seconds; } });
+    o.total_duration_s = sum;
+    return o;
 }
 
 async function genScript() {
@@ -619,23 +725,43 @@ async function genScript() {
         return;
     }
     SCRIPT_OBJ = r.script;
-    document.getElementById('script').value = JSON.stringify(SCRIPT_OBJ, null, 2);
     renderScript(SCRIPT_OBJ);
     await load();                                        // 回读服务端，确认落库 + 状态同步
     toast('✅ 剧本已生成并保存（' + ((SCRIPT_OBJ.beats || []).length) + ' 个分节）', 'success');
 }
 
 async function saveScript() {
-    const raw = (document.getElementById('script').value || '').trim();
-    let obj = null;
-    try { obj = JSON.parse(raw); }
-    catch (e) { toast('❌ 剧本 JSON 解析失败：' + e.message, 'error'); return; }
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) { toast('❌ 剧本必须是 JSON 对象', 'error'); return; }
-    const r = await api('/api/video-plans/' + PLAN_ID, {
-        method: 'PUT', body: JSON.stringify({ script: raw })
+    const o = collectForm();
+    const errs = [];
+    if (!o.title) { errs.push('标题必填'); }
+    const names = ['旁白'].concat((o.characters || []).map(function (c) { return (c && c.name) || ''; }).filter(Boolean));
+    [['characters', '人物'], ['scenes', '场景'], ['props', '道具']].forEach(function (pair) {
+        (o[pair[0]] || []).forEach(function (x, i) {
+            if (!String((x && x.name) || '').trim()) { errs.push(pair[1] + '第 ' + (i + 1) + ' 行名称为空'); }
+        });
     });
-    if (r && r.ok) { SCRIPT_OBJ = obj; renderScript(obj); toast('✅ 剧本已保存', 'success'); }
-    else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
+    (o.beats || []).forEach(function (b, i) {
+        const n = i + 1;
+        if (!String((b && b.line) || '').trim()) { errs.push('第 ' + n + ' 节台词为空'); }
+        const sec = b ? b.seconds : '';
+        if (typeof sec !== 'number' || isNaN(sec) || sec < 1 || sec > 15) { errs.push('第 ' + n + ' 节时长须为 1–15 秒'); }
+        const sp = String((b && b.speaker) || '').trim();
+        if (names.indexOf(sp) < 0) { errs.push('第 ' + n + ' 节「谁在说」不在人物表：' + (sp || '空')); }
+    });
+    if (errs.length) {
+        toast('❌ ' + errs[0] + (errs.length > 1 ? '（共 ' + errs.length + ' 项待改）' : ''), 'error');
+        return;
+    }
+    const body = { script: JSON.stringify(o) };
+    if (o.title) { body.title = o.title; }   // 顶层 title → 服务端无条件 UPDATE（AI 生成路径仍只在为空时写入）
+    const r = await api('/api/video-plans/' + PLAN_ID, { method: 'PUT', body: JSON.stringify(body) });
+    if (r && r.ok) {
+        SCRIPT_OBJ = o;
+        toast('✅ 剧本已保存', 'success');
+        await load();   // 回读服务端：标题 / 分节 / 需求行是否真落库
+    } else {
+        toast('❌ ' + ((r && r.error) || '保存失败'), 'error');
+    }
 }
 
 async function genStoryboard() {
@@ -656,9 +782,6 @@ async function genStoryboard() {
         shot_face: s.shot_face || '',
         music_hint: s.music_hint || '', template_hint: s.template_hint || 'U02'
     }));
-    const _sbScriptText = (r.overview || '') + '\n\n' + SCENES.map(s => '【' + (s.shot_type || '') + '】' + s.line).join('\n');
-    // 已有剧本 JSON 时不覆盖剧本（剧本归 /script 接口 与「保存剧本」管）
-    if (!SCRIPT_OBJ) { document.getElementById('script').value = _sbScriptText; }
     document.getElementById('plan-status').textContent = 'storyboard_done';
     renderScenes();
     renderReqs();

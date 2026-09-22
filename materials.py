@@ -116,6 +116,27 @@ ANGLE_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
 EDIT_CLIP_DEFAULT = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 EDIT_VAE_DEFAULT = "qwen_image_vae.safetensors"
 
+# ── 分镜片段（首尾帧图生视频）：Wan2.1-I2V-14B-480P 原生节点链 ──
+CLIP_UNET_DEFAULT = "Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors"
+CLIP_TEXT_DEFAULT = "umt5_xxl_fp16.safetensors"
+CLIP_VAE_DEFAULT = "wan_2.1_vae.safetensors"
+CLIP_FPS = 16
+CLIP_MAX_LEN = 145                      # 单条上限（≈9 秒 @16fps）；再长要拆段
+CLIP_SIZES = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640),
+              "4:3": (640, 480), "3:4": (480, 640)}
+
+# ── 分镜片段 · H3 引擎（MiniMax-H3 首尾帧「音视频联合」模型，全池只有 6000D 装了它）──
+# 模板 = 6000D `/root/zealman-app/dist/U02-minimax_h3_lightX2v首尾帧图生视频加速版V2.json`
+# 已经入仓（wf/h3_u02_fl2v_v2.json）：整条链都在模板里，运行时只改输入，不手搓节点。
+H3_WF_DEFAULT = "wf/h3_u02_fl2v_v2.json"
+H3_FPS = 24                     # 模板固定 24fps；帧数由模板内的表达式按秒数换算（≡5 mod 17）
+H3_MAX_SEC = 10.0               # 单条上限；实测 5s ≈ 421s（带 2× 超分）
+H3_SIZES = {"9:16": (768, 1344), "16:9": (1344, 768), "1:1": (1024, 1024)}
+H3_TPL_NODES = {"first": "114", "last": "128", "preset": "122", "prompt": "136",
+                "vhs": "143", "supres": "144", "secs": "105:111", "seed": "105:15",
+                "steps": "105:9", "lora": "148", "decode": "145"}
+
+
 
 # 「风格化」：给编辑链路再追加一个编辑类 LoRA（纯文生图无效，必须走图生图）
 # 实测（2026-09-20，同一输入图 + 同一提示词 + 系统编辑参数 4 步，逐张看图判定）：
@@ -613,10 +634,14 @@ def frame_looks(reqs):
     return "；".join(parts)
 
 
-def frame_prompt(shot, reqs, frame="start", aspect="9:16", style=""):
+def frame_prompt(shot, reqs, frame="start", aspect="9:16", style="",
+                 main_label=None, ref_labels=None):
     """首帧/尾帧出图提词（全中文，便于调试）：
     首帧 = 素材外观 + 起始画面（动作 + 运镜起幅）
-    尾帧 = 同批素材外观 + 收尾状态 end_state + 「与首帧同人同景、只变机位与姿态」"""
+    尾帧 = 同批素材外观 + 收尾状态 end_state + 「与首帧同人同景、只变机位与姿态」
+    main_label / ref_labels = 实际送进模型的参考图「形态 + 顺序」（见 autogen._frame_target_rows）：
+    分槽单图时写死「第 N 张是谁」，只有真的拼了图才提「拼图从左到右」——
+    否则模型没有「谁对应谁」的依据，会把一个人的面部特征（如胡须）串到另一个人脸上（实测踩过）"""
     shot = shot or {}
     look = frame_looks(reqs)
     vis = (shot.get("visual") or "")
@@ -640,8 +665,43 @@ def frame_prompt(shot, reqs, frame="start", aspect="9:16", style=""):
     if look:
         p.append("画面中的人物、场景、道具必须与下列外观完全一致，不得改动长相、服装、场景与画风：" + look)
     if persons:
-        p.append("画面中必须出现 %d 个人物：%s；参考拼图里的人像从左到右依次就是这 %d 个人，"
-                 "每个人都要清晰可分辨，不得增减人数、不得把两个人物合成一张脸" % (len(persons), "、".join(persons), len(persons)))
+        _lbl = [l for l in (ref_labels or []) if isinstance(l, dict)]
+        _strip = next((l for l in _lbl if l.get("kind") == "strip"), None)
+        if _strip:
+            _nm = [n for n in (_strip.get("names") or []) if n]
+            p.append("画面中必须出现 %d 个人物：%s；参考拼图里的人像从左到右依次就是这 %d 个人（%s），"
+                     "每个人都要清晰可分辨，不得增减人数、不得把两个人物合成一张脸"
+                     % (len(persons), "、".join(persons), len(_nm) or len(persons),
+                        "、".join(_nm) or "、".join(persons)))
+        elif main_label or _lbl:
+            pairs, _i = [], 0
+            if main_label:
+                _i = 1
+                mk, mn = (main_label.get("kind") or ""), (main_label.get("name") or "")
+                if mk == "persona":
+                    pairs.append("第 1 张是人物「%s」" % mn)
+                elif mk == "prev":
+                    pairs.append("第 1 张是该镜的首帧画面（本帧底图，同人同景）")
+                else:
+                    pairs.append("第 1 张是场景「%s」（底图）" % mn)
+            for l in _lbl:
+                _i += 1
+                k, n = (l.get("kind") or ""), (l.get("name") or "")
+                if k == "persona":
+                    pairs.append("第 %d 张是人物「%s」" % (_i, n))
+                elif k == "prop":
+                    pairs.append("第 %d 张是道具「%s」" % (_i, n))
+                else:
+                    pairs.append("第 %d 张是「%s」" % (_i, n))
+            p.append("画面中必须出现 %d 个人物：%s；参考图与内容一一对应（%s），"
+                     "每个人物只能照着自己那张参考图画长相、胡须、发型与服装，"
+                     "禁止把另一个人物的胡须、眉毛、发际线等面部特征挪到这个人脸上，"
+                     "也不得把两个人物合成一张脸，不得增减人数"
+                     % (len(persons), "、".join(persons), "；".join(pairs)))
+        else:
+            p.append("画面中必须出现 %d 个人物：%s；每个人物只能照着自己那张参考图画长相、胡须、发型与服装，"
+                     "禁止把一个人物的面部特征挪到另一个人脸上，也不得把两个人物合成一张脸，不得增减人数"
+                     % (len(persons), "、".join(persons)))
     if shows:
         p.append("画面中必须出现的道具：" + "、".join(shows))
     if frame == "end":
@@ -823,8 +883,224 @@ def build_stitch_wf(imgs, mode="grid3", res=1080, pad=0, prefix="mat_stitch"):
     return wf
 
 
+def clip_size(aspect=None):
+    """片段的出图尺寸（Wan 480P 训练分辨率；比例按剧本 aspect）"""
+    return CLIP_SIZES.get((aspect or "9:16").strip(), (480, 832))
+
+
+def clip_length(duration_s, fps=CLIP_FPS, max_len=CLIP_MAX_LEN):
+    """时长 → 帧数：Wan 要求 length 满足 4n+1，再夹到 [17, max_len]"""
+    try:
+        fps = int(fps or CLIP_FPS)
+    except Exception:
+        fps = CLIP_FPS
+    if fps <= 0:
+        fps = CLIP_FPS
+    try:
+        dur = float(duration_s or 0)
+    except Exception:
+        dur = 0.0
+    if dur <= 0:
+        dur = 3.0
+    n = int(round(dur * fps))
+    n -= (n - 1) % 4                       # 归到最近的 4n+1
+    if n < 17:
+        n = 17
+    n = min(int(max_len or CLIP_MAX_LEN), n)
+    return n - ((n - 1) % 4)               # 夹完再归一次，保证仍是 4n+1
+
+
+def clip_prompt(shot, reqs=None, dur=5):
+    """片段提词：动作 + 运镜 + 落点（外观由首帧图决定，不再用文字重复描述外观）"""
+    shot = shot or {}
+    p = []
+    for k, pre in (("visual", ""), ("shot_type", "景别："), ("camera_move", "运镜：")):
+        v = (shot.get(k) or "").strip()
+        if v:
+            p.append(pre + v)
+    if (shot.get("line") or "").strip():
+        p.append("此段台词（只做说话的口型动作，画面里不要出现字幕或文字）：" + shot["line"].strip())
+    if (shot.get("end_state") or "").strip():
+        p.append("镜头结束时：" + shot["end_state"].strip())
+    p.append("人物的外貌、服装、发型与画面风格前后保持一致，动作连贯自然，中间不要跳变")
+    try:
+        p.append("整段约 %.0f 秒" % float(dur or 5))
+    except Exception:
+        pass
+    p.append("不要文字、不要字幕、不要水印、不要边框、不要画面撕裂、不要人物变形")
+    # 分镜字段自带句号 → 逐段去尾再拼，避免「。。」（同类修过 frame_prompt）
+    return "。".join([x.strip().rstrip("。；;. ") for x in p if x and x.strip()])
+
+
+def build_clip_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="shot_clip",
+                  width=480, height=832, length=49, fps=CLIP_FPS):
+    """首尾帧图生视频（ComfyUI 原生 Wan 节点链）：
+    LoadImage(首/尾) → WanFirstLastFrameToVideo → KSampler → VAEDecode → VHS_VideoCombine(mp4)
+
+    三个必对项（在别的实例上踩全过）：① length 必须 4n+1；② VHS 的 loop_count / pingpong /
+    save_output 是必填；③ CLIPLoader 的 type 必须是 wan，且文本编码器要用**原生** umt5_xxl_fp16
+    （umt5-xxl-enc-* 是 WanVideoWrapper 格式，核心 CLIPLoader 认不了 → KSampler 报矩阵形状错）"""
+    cfg = cfg or {}
+    imgs = list(imgs or [])
+    if len(imgs) < 2:
+        raise ValueError("首尾帧图生视频需要 2 张输入图（首帧 + 尾帧）")
+    unet = cfg.get("comfy_clip_unet") or CLIP_UNET_DEFAULT
+    clip_name = cfg.get("comfy_clip_text") or CLIP_TEXT_DEFAULT
+    vae = cfg.get("comfy_clip_vae") or CLIP_VAE_DEFAULT
+    try:
+        steps = int(cfg.get("comfy_clip_steps") or 20)
+    except Exception:
+        steps = 20
+    try:
+        cfgv = float(cfg.get("comfy_clip_cfg") or 6.0)
+    except Exception:
+        cfgv = 6.0
+    try:
+        length = int(length or 49)
+    except Exception:
+        length = 49
+    if (length - 1) % 4:
+        length = length - ((length - 1) % 4)
+    try:
+        fps = int(fps or CLIP_FPS)
+    except Exception:
+        fps = CLIP_FPS
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": clip_name, "type": "wan"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt or "", "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": neg or "", "clip": ["2", 0]}},
+        "6": {"class_type": "LoadImage", "inputs": {"image": imgs[0]}},
+        "7": {"class_type": "LoadImage", "inputs": {"image": imgs[1]}},
+        "8": {"class_type": "WanFirstLastFrameToVideo",
+              "inputs": {"positive": ["4", 0], "negative": ["5", 0], "vae": ["3", 0],
+                         "width": int(width or 480), "height": int(height or 832),
+                         "length": length, "batch_size": 1,
+                         "start_image": ["6", 0], "end_image": ["7", 0]}},
+        "9": {"class_type": "KSampler",
+              "inputs": {"seed": int(seed or 0), "steps": steps, "cfg": cfgv,
+                         "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                         "model": ["1", 0], "positive": ["8", 0], "negative": ["8", 1],
+                         "latent_image": ["8", 2]}},
+        "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+        "11": {"class_type": "VHS_VideoCombine",
+               "inputs": {"images": ["10", 0], "frame_rate": fps, "loop_count": 0,
+                          "filename_prefix": prefix, "format": "video/h264-mp4",
+                          "pingpong": False, "save_output": True,
+                          "crf": 16, "pix_fmt": "yuv420p"}},
+    }
+
+
+def h3_size(aspect=None):
+    return H3_SIZES.get((aspect or "9:16").strip(), (768, 1344))
+
+
+def h3_seconds(duration_s, max_sec=H3_MAX_SEC):
+    """H3 单条时长（秒）：按分镜时长，超上限就截到上限（模板里的表达式再换算成合法帧数）"""
+    try:
+        sec = float(duration_s or 0)
+    except Exception:
+        sec = 0.0
+    if sec <= 0:
+        sec = 5.0
+    return round(min(float(max_sec or H3_MAX_SEC), max(3.0, sec)), 2)
+
+
+def h3_template(cfg=None):
+    """读 H3 模板（API 格式）并深拷一份：只留节点键，保留 subgraph 子图 id（105:14 这类，丢了必报
+    KeyError）。路径可用设置项 comfy_h3_wf 覆盖（相对路径 = 项目根）。"""
+    import copy, json, re
+    cfg = cfg or {}
+    p = str(cfg.get("comfy_h3_wf") or H3_WF_DEFAULT).strip()
+    path = Path(p) if os.path.isabs(p) else (Path(__file__).resolve().parent / p)
+    if not path.is_file():
+        raise ValueError("H3 模板不存在：%s" % path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    wf = {k: v for k, v in raw.items() if re.match(r"^\d+(:\d+)*$", str(k))}
+    if not wf:
+        raise ValueError("H3 模板里没有节点（%s）" % path)
+    return copy.deepcopy(wf)
+
+
+def build_h3_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="shot_clip",
+                width=768, height=1344, seconds=5.0, fps=H3_FPS, steps=0, lora=0.0,
+                superres=-1):
+    """H3 首尾帧出片段（MiniMax-H3 FL2V turbo；音视频联合 → 产物带音轨）
+    模板整条链已固定：LoadImage(首/尾) → ImageResizeKJv2(lanczos crop 到 768×1344) →
+    MiniMaxH3ImageToVideo(宽高来自 WJILatentPreset、时长来自 PrimitiveFloat 表达式) →
+    SamplerCustomAdvanced(+H3SigmaRefiner) → VAEDecode/VAEDecodeAudio → 超分 → VHS_VideoCombine
+    运行时只改 6 处输入：首帧 / 尾帧 / 宽高 / 秒数 / 提示词 / 输出前缀（+ 可选 seed、步数、LoRA 强度、超分倍数）"""
+    cfg = cfg or {}
+    imgs = list(imgs or [])
+    if len(imgs) < 2:
+        raise ValueError("H3 首尾帧出片段需要 2 张输入图（首帧 + 尾帧）")
+    wf = h3_template(cfg)
+    N = H3_TPL_NODES
+    for k, tag in (("first", "首帧 LoadImage"), ("last", "尾帧 LoadImage"),
+                   ("preset", "WJILatentPreset"), ("prompt", "CR Prompt Text"),
+                   ("vhs", "VHS_VideoCombine"), ("secs", "PrimitiveFloat(秒)"),
+                   ("seed", "RandomNoise(seed)")):
+        if N[k] not in wf:
+            raise ValueError("H3 模板缺少节点 %s（%s）——模板版本变了，请重新导出" % (N[k], tag))
+    wf[N["first"]]["inputs"]["image"] = imgs[0]
+    wf[N["last"]]["inputs"]["image"] = imgs[1]
+    wf[N["preset"]]["inputs"]["自定义宽"] = int(width or 768)
+    wf[N["preset"]]["inputs"]["自定义高"] = int(height or 1344)
+    wf[N["prompt"]]["inputs"]["prompt"] = prompt or ""
+    wf[N["secs"]]["inputs"]["value"] = float(seconds or 5.0)
+    wf[N["seed"]]["inputs"]["noise_seed"] = int(seed or 0)
+    wf[N["vhs"]]["inputs"]["filename_prefix"] = prefix
+    wf[N["vhs"]]["inputs"]["frame_rate"] = int(fps or H3_FPS)
+    if steps and N["steps"] in wf:
+        wf[N["steps"]]["inputs"]["steps"] = int(steps)          # turbo LoRA 够用时 8 步
+    if lora and N["lora"] in wf:
+        wf[N["lora"]]["inputs"]["strength_model"] = float(lora)
+    # 超分：默认沿用模板（2×）；显式传 1 或 0 = 旁路（把 VHS 的输入直接接到解码后，跳过超分）
+    try:
+        sr = int(superres)
+    except Exception:
+        sr = -1
+    if sr >= 0:
+        if sr <= 1:
+            # 旁路超分：VHS 直接吃解码输出（145 = 解码后的清理节点），删掉 144/151
+            if N["vhs"] in wf and N["decode"] in wf:
+                wf[N["vhs"]]["inputs"]["images"] = [N["decode"], 0]
+            wf.pop(N["supres"], None)
+            wf.pop("151", None)
+        elif N["supres"] in wf and "resize_type.scale" in wf[N["supres"]]["inputs"]:
+            wf[N["supres"]]["inputs"]["resize_type.scale"] = sr
+    return wf
+
+
+def clip_prompt_h3(shot, reqs=None, dur=5):
+    """H3 提词：H3 用 qwen3vl-32B 文本编码器，中文可直接用；<Picture 1>/<Picture 2> = 首帧/尾帧"""
+    shot = shot or {}
+    p = ["subject_definitions:",
+         "<Picture 1> 是目标视频的第一帧，<Picture 2> 是最后一帧，两帧之间要自然连贯地过渡。"]
+    if (shot.get("visual") or "").strip():
+        p.append("画面内容：" + shot["visual"].strip())
+    for k, pre in (("shot_type", "景别："), ("camera_move", "运镜：")):
+        v = (shot.get(k) or "").strip()
+        if v:
+            p.append(pre + v)
+    if (shot.get("line") or "").strip():
+        p.append("此段台词（只做说话的口型动作，画面里不要出现字幕或文字）：" + shot["line"].strip())
+    if (shot.get("end_state") or "").strip():
+        p.append("镜头结束时：" + shot["end_state"].strip())
+    p.append("保持 <Picture 1> 里人物的外貌、服装、发型、场景与画面风格前后一致，动作连贯自然，中间不要跳变")
+    try:
+        p.append("整段约 %.0f 秒" % float(dur or 5))
+    except Exception:
+        pass
+    p.append("不要文字、不要字幕、不要水印、不要边框、不要画面撕裂、不要人物变形")
+    return "\n".join([x.strip() for x in p if x and x.strip()])
+
+
 def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat"):
-    """统一入口：action = cutout / edit / stitch"""
+    """统一入口：action = cutout / edit / stitch / clip / h3clip"""
     params = params or {}
     if action == "cutout":
         return build_cutout_wf(imgs[0], model=params.get("model") or "RMBG-2.0",
@@ -841,6 +1117,20 @@ def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat
         return build_stitch_wf(imgs, mode=params.get("mode") or "grid3",
                                res=params.get("res") or 1080,
                                pad=params.get("pad") or 0, prefix=prefix)
+    if action == "clip":
+        return build_clip_wf(imgs, prompt or params.get("prompt") or "",
+                             neg=params.get("negative") or "", seed=seed, cfg=cfg, prefix=prefix,
+                             width=params.get("width") or 480, height=params.get("height") or 832,
+                             length=params.get("length") or 49,
+                             fps=params.get("fps") or CLIP_FPS)
+    if action == "h3clip":
+        return build_h3_wf(imgs, prompt or params.get("prompt") or "",
+                           neg=params.get("negative") or "", seed=seed, cfg=cfg, prefix=prefix,
+                           width=params.get("width") or 768, height=params.get("height") or 1344,
+                           seconds=params.get("seconds") or 5.0,
+                           fps=params.get("fps") or H3_FPS,
+                           steps=params.get("steps") or 0, lora=params.get("lora") or 0.0,
+                           superres=params.get("superres", -1))
     raise ValueError("未知的加工类型：%s" % action)
 
 
@@ -867,7 +1157,9 @@ def needs_for(action, params=None, cfg=None, prompt="", n_imgs=1):
     """该加工动作需要的节点/模型（用占位图名调同一个 build_wf：纯内存、不联网、不上机器）"""
     params = params or {}
     n = max(1, int(n_imgs or 1))
-    tries = [n] + ([9, 4, 2] if action == "stitch" else [])   # 拼版对张数有硬要求（九宫格=9）
+    # 拼版/片段对张数有硬要求（九宫格=9；首尾帧视频=2）
+    tries = [n] + ([9, 4, 2] if action == "stitch"
+                    else ([2] if action in ("clip", "h3clip") else []))
     last = None
     for cnt in tries:
         imgs = ["__need_check_%d__.png" % i for i in range(cnt)]
@@ -910,6 +1202,13 @@ def options():
         "stitch": {"modes": STITCH_MODES, "resolutions": STITCH_RES, "pads": STITCH_PADS,
                    "max_images": STITCH_MAX,
                    "default": {"mode": "grid3", "res": 1080, "pad": 0}},
+        # 分镜片段两个引擎：wan = 快而便宜、无音轨；h3 = 慢而贵、带音轨 + 2× 超分（只有 6000D 装了）
+        "clip": {"engines": [
+            {"id": "wan", "name": "Wan 2.1 · 480P", "size": "480×832", "fps": CLIP_FPS,
+             "audio": False, "note": "任何出图机都能跑；约 5–15 分钟/条"},
+            {"id": "h3", "name": "MiniMax-H3 · 768P + 2×超分", "size": "768×1344 → 1536×2688",
+             "fps": H3_FPS, "audio": True, "note": "只有 6000D（¥6.46/h）；实测 5s≈421s，按 5–11 分钟/条报"}],
+            "default_engine": "wan", "max_sec": H3_MAX_SEC},
     }
 
 

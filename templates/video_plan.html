@@ -62,6 +62,11 @@
                 </select>
                 <button class="btn btn-outline btn-sm" onclick="genFrameAll('start')">🎨 整片出首帧</button>
                 <button class="btn btn-outline btn-sm" onclick="genFrameAll('end')">🎨 整片出尾帧</button>
+                <select id="clip-engine" onchange="setClipEngine(this.value)" title="片段引擎：Wan＝480P 快而便宜；H3＝768P＋2×超分、带音轨（只有 6000D 有，慢且贵）" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
+                    <option value="wan">片段 · Wan 480P</option>
+                    <option value="h3">片段 · H3 768P 音轨</option>
+                </select>
+                <button class="btn btn-outline btn-sm" onclick="genClipAll()">🎬 整片出片段</button>
                 <button class="btn btn-outline btn-sm" onclick="genVoiceAll()">🔊 全部配音</button>
                 <button class="btn btn-primary btn-sm" onclick="genStoryboard()">🤖 AI 生成分镜</button>
                 <button class="btn btn-outline btn-sm" onclick="addScene()">＋ 添加镜头</button>
@@ -76,6 +81,7 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;">素材</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:118px;">首帧图</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:118px;">尾帧图</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:146px;">片段</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
                 </tr>
@@ -133,7 +139,7 @@ function switchTab(name) {
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="9" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
@@ -143,6 +149,7 @@ function renderScenes() {
         <td style="padding:6px;border:1px solid #e2e8f0;">${assetCell(s)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;">${frameCell(i,'start')}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;">${frameCell(i,'end')}</td>
+        <td style="padding:6px;border:1px solid #e2e8f0;">${clipCell(i)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-outline btn-sm" onclick="genVoice(${i})" title="生成配音">🔊</button> <button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
@@ -217,6 +224,52 @@ async function attachFrameMaterial(k) {
     else { toast('❌ ' + ((r && r.error) || '挂载失败'), 'error'); }
 }
 async function refreshFrames() { await loadFrames(); renderScenes(); }
+
+// ==================== 分镜片段（首帧 + 尾帧 → 一条 mp4；首尾帧图生视频） ====================
+let CLIPS = {};                          // 镜号 → {clip_url, clip_engine, clip_duration_s, has_start, has_end}
+let CLIP_ENGINE = localStorage.getItem('clip_engine') || 'wan';
+function setClipEngine(v) {
+    CLIP_ENGINE = (v === 'h3') ? 'h3' : 'wan';
+    localStorage.setItem('clip_engine', CLIP_ENGINE);
+    if (CLIP_ENGINE === 'h3') { toast('H3 引擎：只走 6000D（¥6.46/h），5–11 分钟/条 —— 带音轨 + 2× 超分'); }
+}
+function applyClipEngine() { const s = document.getElementById('clip-engine'); if (s) { s.value = CLIP_ENGINE; } }
+async function loadClips() {
+    try {
+        const d = await api('/api/video-plans/' + PLAN_ID + '/shot-clip', { method: 'GET' });
+        CLIPS = {};
+        (d.shots || []).forEach(s => { CLIPS[s.shot_idx] = s; });
+    } catch (e) { CLIPS = {}; }
+}
+function clipCell(i) {
+    const c = CLIPS[i] || {};
+    const url = c.clip_url || '';
+    const box = url
+        ? '<video src="' + url + '" controls preload="metadata" style="width:100%;max-height:74px;border-radius:6px;background:#000;display:block;"></video>'
+        : '<div style="height:64px;display:flex;align-items:center;justify-content:center;background:#f8fafc;border-radius:6px;color:#cbd5e1;font-size:11px;">未生成</div>';
+    const eng = url ? ('<span style="color:#64748b;font-size:10px;">' + ((c.clip_engine || 'wan') === 'h3' ? 'H3' : 'Wan') + '</span>') : '';
+    const dur = c.clip_duration_s ? ('<span style="color:#0f766e;font-size:11px;">' + c.clip_duration_s + 's</span>') : '';
+    const tag = (eng || dur) ? ('<div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;">' + eng + dur + '</div>') : '';
+    return '<div style="display:flex;flex-direction:column;gap:4px;">' + box
+        + '<div style="display:flex;gap:4px;align-items:center;">'
+        + '<button class="btn btn-outline btn-sm" style="flex:1;padding:2px 6px;font-size:11px;" onclick="genClip(' + i + ')">' + (url ? '重出片段' : '🎬 出片段') + '</button>'
+        + '</div>' + tag + '</div>';
+}
+async function genClip(i) {
+    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-clip', {
+        method: 'POST', body: JSON.stringify({ shot_idx: i, engine: CLIP_ENGINE }) });
+    if (r && r.ok) { toast('已排队：第 ' + (i + 1) + ' 镜 · 片段（队列 ' + (r.queue_pos || 0) + '）—— 出视频较慢，去「任务」页看进度'); }
+    else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
+}
+async function genClipAll() {
+    if (!SCENES.length) { toast('还没有分镜', 'error'); return; }
+    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-clip', {
+        method: 'POST', body: JSON.stringify({ engine: CLIP_ENGINE }) });
+    if (r && r.ok) { toast('已排队 ' + r.targets + ' 条片段 —— 去「任务」页看进度'); }
+    else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
+}
+async function refreshClips() { await loadClips(); renderScenes(); }
+applyClipEngine();
 
 function addScene() { SCENES.push({visual:'', line:'', duration:5}); renderScenes(); }
 function delScene(i) { SCENES.splice(i,1); renderScenes(); }
@@ -599,6 +652,7 @@ async function load() {
     renderRolePack();
     renderReqs();
     await loadFrames();
+    await loadClips();
     renderScenes();
     // 加载原始文案
     const arts = await api('/api/articles');

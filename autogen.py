@@ -764,9 +764,18 @@ def needs_for_job(kind, payload=None):
         payload = payload or {}
         params = payload.get("params") or {}
         cfg = get_comfy_config()
-        if kind in ("cutout", "edit", "stitch", "shotframe"):
-            _n = 3 if kind == "shotframe" else (len(payload.get("ids") or []) or 1)
-            return mat.needs_for("edit" if kind == "shotframe" else kind, params=params, cfg=cfg,
+        if kind in ("cutout", "edit", "stitch", "shotframe", "shotclip"):
+            _n = 3 if kind == "shotframe" else (2 if kind == "shotclip"
+                                                else (len(payload.get("ids") or []) or 1))
+            _eng = str(payload.get("engine") or "").strip().lower()
+            if kind == "shotframe":
+                _act = "edit"
+            elif kind == "shotclip":
+                # 片段两引擎：wan = 首尾帧插值（任何出图机都有）；h3 = MiniMax-H3（只有 6000D 装了）
+                _act = "h3clip" if _eng == "h3" else "clip"
+            else:
+                _act = kind
+            return mat.needs_for(_act, params=params, cfg=cfg,
                                  prompt=params.get("prompt") or params.get("instruction") or "",
                                  n_imgs=_n)
         # images / txt2img：同一条出图链路（build_workflow）
@@ -1293,10 +1302,12 @@ def comfy_run_wf(base, wf, timeout=900, poll=3):
             for node in (entry.get("outputs") or {}).values():
                 for im in (node.get("images") or []):
                     out.append((im.get("filename"), im.get("subfolder", "")))
+                for gd in (node.get("gifs") or []):          # 视频产物（VHS_VideoCombine）
+                    out.append((gd.get("filename"), gd.get("subfolder", "")))
             if out:
                 return out
             if st.get("completed"):
-                raise RuntimeError("工作流执行完但没有图片输出")
+                raise RuntimeError("工作流执行完但没有输出（图片/视频皆无）")
     raise RuntimeError("加工超时（%ds）" % timeout)
 
 
@@ -2739,47 +2750,68 @@ def _frame_target_rows(conn, plan_id, targets, enc="auto"):
         props = [r for r in reqs_d if (r.get("link_role") or "") == "prop"]
         seed = int(hashlib.md5(("shotframe|%s|%s" % (plan_id, idx)).encode("utf-8"))
                    .hexdigest()[:8], 16)     # 同一镜首/尾帧同 seed（一致性）
-        people = [p for p in [_path(r.get("material_id")) for r in subs] if p]
-        propp = [p for p in [_path(r.get("material_id")) for r in props] if p]
+        people = [(p, r) for r in subs for p in [_path(r.get("material_id"))] if p]
+        propp = [(p, r) for r in props for p in [_path(r.get("material_id"))] if p]
 
-        _enc_mode, _enc_node, _enc_slots, _enc_names, _enc_ref_cap = mat.edit_enc(enc)
+        # 节点按「想送几张图」来选：1 底图 + 每个人物 1 槽 + 每个道具 1 槽
+        # （原先写 mat.edit_enc(enc) 不传张数 → auto 恒判 core(3 槽/参考 2) → 道具被丢，实测踩过）
+        _want = 1 + len(people) + len(propp)
+        _enc_mode, _enc_node, _enc_slots, _enc_names, _enc_ref_cap = mat.edit_enc(enc, _want)
         _cap = max(0, _enc_ref_cap)            # 参考图额度（core 2 / lrz5 3，按节点实测封顶）
 
         def _refs_for(main_p):
             """参考图额度 = 编码节点槽数 - 1（core 2 / lrz5 4 / lrz6 5）：每个出场人物各占 1 槽；
-            人物数超额度时才拼成 1 张横排参考图，剩下的额度留给关键道具"""
-            people_ = [p for p in people if p != main_p]
-            props_ = [p for p in propp if p != main_p]
-            out = []
+            人物数超额度时才拼成 1 张横排参考图，剩下的额度留给关键道具。
+            同时回吐「形态 + 顺序」标签 → 提词才能写对「第 N 张是谁」；实测教训：文案写「拼图」
+            但实际是分槽单图时，模型没有「谁对应谁」的依据，会把一个人的胡须串到另一个人脸上"""
+            people_ = [(p, r) for (p, r) in people if p != main_p]
+            props_ = [(p, r) for (p, r) in propp if p != main_p]
+            out, labs = [], []
             if people_ and len(people_) > _cap:
                 try:
-                    out.append(mat.stitch_refs(people_[:6], str(Path(tempfile.gettempdir()) /
+                    out.append(mat.stitch_refs([p for p, _ in people_[:6]], str(Path(tempfile.gettempdir()) /
                                ("hermes_refs_%s_%02d_%s.png" % (plan_id, idx, frame)))))
+                    labs.append({"kind": "strip",
+                                 "names": [(r.get("name") or "").strip() for _, r in people_[:6]]})
                     people_ = []
                 except Exception:
                     pass
-            out.extend(people_)
-            out.extend(props_)
-            return [p for p in out if p][:_cap]
+            for p, r in people_:
+                out.append(p)
+                labs.append({"kind": (r.get("kind") or "persona").strip() or "persona",
+                             "name": (r.get("name") or "").strip()})
+            for p, r in props_:
+                out.append(p)
+                labs.append({"kind": "prop", "name": (r.get("name") or "").strip()})
+            keep = [(p, l) for p, l in zip(out, labs) if p][:_cap]
+            return [p for p, _ in keep], [l for _, l in keep]
 
-        skip, main_p, refs = "", "", []
+        skip, main_p, refs, ref_labels, main_label = "", "", [], [], None
         if frame == "end":
             main_p = _path(shot_d.get("image_material_id"))
             if not main_p:
                 skip = "还没有首帧图（尾帧以首帧为底图）"
             else:
-                refs = _refs_for(main_p)
+                main_label = {"kind": "prev", "name": "该镜首帧画面"}
+                refs, ref_labels = _refs_for(main_p)
         else:
-            main_p = next((p for p in [_path(r.get("material_id")) for r in bgs] if p), "")
-            if not main_p:
-                main_p = next((p for p in [_path(r.get("material_id")) for r in subs] if p), "")
+            _bg = next(((p, r) for r in bgs for p in [_path(r.get("material_id"))] if p), None)
+            if _bg:
+                main_p = _bg[0]
+                main_label = {"kind": "scene", "name": (_bg[1].get("name") or "").strip()}
+            else:
+                _pp = next(((p, r) for r in subs for p in [_path(r.get("material_id"))] if p), None)
+                if _pp:
+                    main_p = _pp[0]
+                    main_label = {"kind": "persona", "name": (_pp[1].get("name") or "").strip()}
             if not main_p:
                 skip = "没有可用主体图（请先给该镜挂场景/人物素材并出图）"
             else:
-                refs = _refs_for(main_p)
+                refs, ref_labels = _refs_for(main_p)
         items.append({"shot_id": shot["id"], "idx": idx, "frame": frame, "seed": seed,
                       "main": main_p, "refs": refs, "aspect": aspect, "skip": skip,
-                      "prompt": mat.frame_prompt(shot_d, reqs_d, frame=frame, aspect=aspect)})
+                      "prompt": mat.frame_prompt(shot_d, reqs_d, frame=frame, aspect=aspect,
+                                                 main_label=main_label, ref_labels=ref_labels)})
     return items, (plan["article_id"] or 0)
 
 
@@ -2889,6 +2921,208 @@ def run_shotframe_job(job):
             _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
 
 
+def _clip_target_rows(conn, plan_id, targets, engine="wan"):
+    """解析片段目标 → [{shot_id, idx, dur, length, seconds, w, h, fps, engine, prompt, start, end, seed, skip}]
+    素材在另一个库（data/database.db），逐个取路径；首尾帧缺一不可（首尾帧插值靠两帧定形）
+    engine：wan = 480P 首尾帧插值（帧数按时长换算）；h3 = MiniMax-H3（768×1344→2×超分、带音轨，模板按秒数换算帧数）"""
+    import materials as mat
+    engine = str(engine or "wan").strip().lower()
+    h3 = (engine == "h3")
+    conn.row_factory = sqlite3.Row
+    plan = conn.execute("SELECT * FROM video_scripts WHERE id=?", (plan_id,)).fetchone()
+    if not plan:
+        raise RuntimeError("剧本 #%s 不存在" % plan_id)
+    aspect = (plan["aspect"] or "9:16")
+    _cfg = get_comfy_config()
+    if h3:
+        w, h = mat.h3_size(aspect)
+        fps = mat.H3_FPS
+    else:
+        w, h = mat.clip_size(aspect)
+        try:
+            fps = int(_cfg.get("comfy_clip_fps") or mat.CLIP_FPS)
+        except Exception:
+            fps = mat.CLIP_FPS
+    items = []
+    for t in targets:
+        try:
+            idx = int(t.get("shot_idx"))
+        except Exception:
+            raise RuntimeError("镜号不合法：%r" % (t.get("shot_idx"),))
+        shot = conn.execute("SELECT * FROM storyboard_shots WHERE script_id=? AND shot_idx=?",
+                            (plan_id, idx)).fetchone()
+        if not shot:
+            raise RuntimeError("镜号 %d 不存在" % idx)
+        shot_d = dict(shot)
+        reqs = conn.execute("""SELECT a.*, sa.role AS link_role FROM shot_assets sa
+                               JOIN script_assets a ON a.id = sa.asset_id
+                               WHERE sa.shot_id=? ORDER BY sa.sort_order, sa.id""",
+                            (shot["id"],)).fetchall()
+        reqs_d = [dict(r) for r in reqs]
+
+        def _path(mid):
+            if not mid:
+                return ""
+            try:
+                m = mat.get_material(mid) or {}
+            except Exception:
+                return ""
+            return str(mat.url_to_path(m.get("file_path") or "") or "")
+
+        start_p = _path(shot_d.get("image_material_id"))
+        end_p = _path(shot_d.get("end_image_material_id"))
+        skip = ""
+        if not start_p:
+            skip = "还没有首帧图"
+        elif not end_p:
+            skip = "还没有尾帧图（首尾帧插值要两帧都在）"
+        try:
+            dur = float(shot_d.get("duration_s") or 5)
+        except Exception:
+            dur = 5.0
+        if h3:
+            length = 0                                    # H3：帧数由模板里的表达式按秒数换算
+            seconds = mat.h3_seconds(dur)
+            prompt = mat.clip_prompt_h3(shot_d, reqs_d, dur)
+        else:
+            length = mat.clip_length(dur, fps=fps)
+            seconds = 0.0
+            prompt = mat.clip_prompt(shot_d, reqs_d, dur)
+        seed = int(hashlib.md5(("shotclip|%s|%s|%s" % (engine, plan_id, idx)).encode("utf-8"))
+                   .hexdigest()[:8], 16)
+        items.append({"shot_id": shot_d["id"], "idx": idx, "dur": dur, "length": length,
+                      "seconds": seconds, "w": w, "h": h, "fps": fps, "engine": engine,
+                      "seed": seed, "start": start_p, "end": end_p, "skip": skip,
+                      "prompt": prompt})
+    return items, (plan["article_id"] or 0)
+
+
+def run_shotclip_job(job):
+    """分镜片段：首帧 + 尾帧 → 一条 mp4（Wan2.1-I2V 首尾帧插值，原生节点链）
+    产物：素材库一条（type=video / category=shot_clip）+ shot_renders kind='video'
+    一次开机 → 做完 → 队列空才关机（与出图共用底座 / 同 GPU 域串行）"""
+    import materials as mat
+    jid = job["id"]
+    opts = job.get("payload") or {}
+    plan_id = int(opts.get("plan_id") or 0)
+    targets = opts.get("targets") or []
+    engine = str(opts.get("engine") or "wan").strip().lower()
+    if not plan_id or not targets:
+        raise RuntimeError("缺少 plan_id / targets")
+    cfg = get_comfy_config()
+    if not instance_uuids() or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置实例池 / Token，请去「设置」页填写")
+    conn = _content_db()
+    items, article_id = _clip_target_rows(conn, plan_id, targets, engine=engine)
+    runnable = [x for x in items if not x["skip"]]
+    for x in items:
+        if x["skip"]:
+            _log(jid, "跳过 %d 镜：%s" % (x["idx"] + 1, x["skip"]))
+    if not runnable:
+        conn.close()
+        raise RuntimeError("没有可出片段的目标：%s" % (items[0]["skip"] or "无"))
+    _it0 = runnable[0]
+    _set(jid, total=len(runnable), done=0)
+    if engine == "h3":
+        _log(jid, "分镜片段：%d 条（H3 引擎 %d×%d → 2×超分，约 %.1fs/条 @%dfps，带音轨，剧本 #%d）"
+             % (len(runnable), _it0["w"], _it0["h"], _it0["seconds"], _it0["fps"], plan_id))
+    else:
+        _log(jid, "分镜片段：%d 条（Wan 引擎 %d×%d / %d 帧 ≈ %.1fs @%dfps，剧本 #%d）"
+             % (len(runnable), _it0["w"], _it0["h"], _it0["length"],
+                _it0["length"] / float(_it0["fps"]), _it0["fps"], plan_id))
+    outdir = mat.out_dir(article_id)
+    done = 0
+    with instance_ctx(jid, lambda m: _log(jid, m), needs=needs_for_job("shotclip", opts)) as inst:
+        try:
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
+            if not base:
+                raise RuntimeError("拿不到 ComfyUI 地址")
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
+                raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)
+            _set(jid, stage="generating")
+            neg = load_negative_prompt()
+            for it in runnable:
+                if jobstore.canceled(jid):
+                    raise RuntimeError("已取消")
+                label = "%d 镜" % (it["idx"] + 1)
+                label = ("%s（H3 %.1fs 带音轨）" % (label, it["seconds"])) if engine == "h3" else \
+                        ("%s（%d 帧 ≈ %.1fs）" % (label, it["length"], it["length"] / float(it["fps"])))
+                _log(jid, "%s：出片段，首帧 %s / 尾帧 %s"
+                     % (label, it["start"].rsplit("/", 1)[-1], it["end"].rsplit("/", 1)[-1]))
+                if engine == "h3":
+                    # H3 模板里有 ImageResizeKJv2（lanczos + crop）会自己缩到 768×1344 → 直接传原图
+                    imgs = [comfy_upload(base, it["start"]), comfy_upload(base, it["end"])]
+                    wf = mat.build_wf("h3clip", imgs,
+                                      {"width": it["w"], "height": it["h"],
+                                       "seconds": it["seconds"], "fps": it["fps"]},
+                                      cfg=cfg, prompt=it["prompt"], seed=it["seed"],
+                                      prefix="shot_h3clip")
+                    _to = 3600            # H3 实测 5s≈421s，8s≈11 分钟 → 给 60 分钟
+                else:
+                    # 首尾帧先按片段尺寸裁切（只用于上传，落临时目录、用后即删）
+                    _s = mat.fit_cover(it["start"], str(Path(tempfile.gettempdir()) /
+                                       ("hermes_clip_%s_%02d_start.png" % (jid, it["idx"]))),
+                                       it["w"], it["h"])
+                    _e = mat.fit_cover(it["end"], str(Path(tempfile.gettempdir()) /
+                                       ("hermes_clip_%s_%02d_end.png" % (jid, it["idx"]))),
+                                       it["w"], it["h"])
+                    imgs = [comfy_upload(base, _s), comfy_upload(base, _e)]
+                    wf = mat.build_wf("clip", imgs,
+                                      {"negative": neg, "width": it["w"], "height": it["h"],
+                                       "length": it["length"], "fps": it["fps"]},
+                                      cfg=cfg, prompt=it["prompt"], seed=it["seed"],
+                                      prefix="shot_clip")
+                    _to = 2400            # Wan 首尾帧：5090 基线 260s/条 → 给 40 分钟
+                # 视频比出图慢得多（H3 6000D 基线 421s/条、Wan 5090 260s/条）
+                data = _run_wf_one(base, wf, timeout=_to, logger=lambda m: _log(jid, m))
+                for _tmp in (locals().get("_s") or "", locals().get("_e") or ""):
+                    try:
+                        if "hermes_" in str(_tmp):
+                            Path(_tmp).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                _tag = "h3" if engine == "h3" else "wan"
+                name = "shot%02d_%s_%08x.mp4" % (it["idx"] + 1, _tag, it["seed"] % (2 ** 32))
+                (outdir / name).write_bytes(data)
+                url = "%s/materials/%s/%s" % (mat.URL_PREFIX, article_id, name)
+                mid = mat.upsert(url, "video", name="分镜%d·片段" % (it["idx"] + 1),
+                                 category="shot_clip", source="shotclip", article_id=article_id,
+                                 owner_id=job.get("owner_id"), owner=job.get("owner") or "",
+                                 tags="分镜片段")
+                _rp = json.dumps({"shot_idx": it["idx"], "engine": engine, "seed": it["seed"],
+                                  "w": it["w"], "h": it["h"], "fps": it["fps"],
+                                  "length": it["length"], "seconds": it["seconds"],
+                                  "duration_s": round(it["dur"], 2)}, ensure_ascii=False)
+                # 一镜一条片段：按 (shot_id, kind='video') 幂等 upsert（重跑更新原行，不新增）
+                _ex = conn.execute("SELECT id FROM shot_renders WHERE shot_id=? AND kind='video'",
+                                   (it["shot_id"],)).fetchone()
+                if _ex:
+                    conn.execute("UPDATE shot_renders SET material_id=?, url=?, status='done',"
+                                 " params=?, duration_s=?, error='' WHERE id=?",
+                                 (mid, url, _rp, it["dur"], _ex[0]))
+                else:
+                    conn.execute("INSERT INTO shot_renders (shot_id, kind, material_id, url, status,"
+                                 " params, duration_s) VALUES (?,?,?,?,'done',?,?)",
+                                 (it["shot_id"], "video", mid, url, _rp, it["dur"]))
+                conn.commit()
+                done += 1
+                _set(jid, done=done, images=[url])
+                _log(jid, "%s 完成 → %s（素材 #%s）" % (label, name, mid))
+            _log(jid, "分镜片段全部完成：%d 条" % done)
+        except Exception as e:
+            _log(jid, "❌ 分镜片段失败：%s" % str(e)[:220])
+            raise RuntimeError(str(e)[:300])
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
+
+
 def register_jobs():
     """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
     jobstore.DISPATCHER.register("images", run_images_job, domain="gpu")   # 显存域：一块 GPU 串行
@@ -2898,6 +3132,7 @@ def register_jobs():
         jobstore.DISPATCHER.register(_k, run_material_job, domain="gpu")
     jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
     jobstore.DISPATCHER.register("shotframe", run_shotframe_job, domain="gpu")  # 分镜首/尾帧出图（同 GPU 域串行）
+    jobstore.DISPATCHER.register("shotclip", run_shotclip_job, domain="gpu")    # 分镜片段（首尾帧图生视频，同域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
     # 空闲守卫：按需线程（无常驻钩子），唯一出生点 = 有任务（acquire_ready_instance 入口）

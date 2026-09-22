@@ -1,0 +1,442 @@
+{
+  "114": {
+    "inputs": {
+      "image": "zhcnsuggestion_Real_3D_anime_character_Rinoa_Heartilly_from_Fin_74b2e9ee-d32f-4304-aa82-765dbdb6506d.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "122": {
+    "inputs": {
+      "预设分辨率": "自定义",
+      "横竖对调": false,
+      "批量大小": 1,
+      "自定义宽": 768,
+      "自定义高": 1344,
+      "缩放倍数": "32"
+    },
+    "class_type": "WJILatentPreset",
+    "_meta": {
+      "title": "📐 Latent预设 (Empty Latent Preset)"
+    }
+  },
+  "128": {
+    "inputs": {
+      "image": "zhcnsuggestion_Real_3D_anime_character_Rinoa_Heartilly_from_Fin_9e18b254-2e7a-44b8-a0e9-067bb5225dac.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "129": {
+    "inputs": {
+      "max_resolution": 1024,
+      "jpeg_quality": 100,
+      "suppress_default_preview": true,
+      "preview_frames": [
+        "105:107",
+        1
+      ],
+      "preview_fps": 10,
+      "tiny_vae": "taeh3.safetensors",
+      "model": [
+        "150",
+        0
+      ]
+    },
+    "class_type": "ModelPreviewOverrideKJ",
+    "_meta": {
+      "title": "Model Preview Override"
+    }
+  },
+  "136": {
+    "inputs": {
+      "prompt": "subject_definitions:\n<Picture 1> is the first frame of the target video, showing a realistic 3D-rendered young woman in a three-quarter over-shoulder pose, wearing a dark blue sleeveless dress with thin straps, standing in a meadow of small white daisies under cool soft daylight with shallow depth-of-field blur behind her.\n<Picture 2> is the last frame of the target video, showing the same young woman facing more toward the camera with a gentle smile, wearing a blue zip-front dress with a deeper neckline and a prominent gold zipper, bathed in warm golden-hour sunlight with soft warm light leaks across the flower field.\n<Subject 1> is the young woman in <Picture 1> and <Picture 2>, with very long straight dark hair, amber-brown eyes, fair skin, and a slender build.\n\nsummary:\n[keyframe completion] The target video interpolates from <Picture 1> to <Picture 2>, following <Subject 1> as she slowly turns from an over-shoulder glance toward the camera while ambient light in the meadow shifts from cool soft daylight to warm golden hour.\n\nretention_analysis:\n<Picture 1> ([Shot 1] first frame): fully_preserved - the over-shoulder composition, cool lighting, dark blue sleeveless dress, and white daisy meadow are retained as the opening anchor.\n<Picture 2> (final frame): fully_preserved - the front-facing pose, gentle smile, blue zip dress with gold zipper, and warm golden-hour lighting are retained as the closing anchor.\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): partially_preserved - identity, hairstyle, and meadow setting stay consistent while expression, garment detail, and lighting warmth evolve toward <Picture 2>.\n\ndetailed_description:\nThe target video is rendered in cinematic real-time 3D with soft portrait framing, shallow depth of field, and a subtly desaturated-to-warm color transition across the clip.\n[Shot 1] The shot begins from <Picture 1>. In a vertical medium close-up, <Subject 1> stands in a field of white daisies, her long dark hair falling over one shoulder as she glances back over it with a calm, neutral expression. Cool daylight washes the scene with soft blue-grey tones; the background meadow and bokeh flowers remain gently out of focus. A faint breeze stirs a few strands of her hair and ripples the nearest daisy heads. The camera holds with a very slow, almost imperceptible push-in, keeping her face and shoulders centered while preserving the over-shoulder framing of the first frame. Light wind rustle and quiet meadow ambience are audible.\n[Shot 2] At 00:02.500, the camera begins a slow arc to the right while continuing its gentle push-in. <Subject 1> gradually rotates her torso and head toward the lens; her expression softens, and warm amber light begins to bleed into the highlights on her hair and shoulders as if the sun is dipping toward golden hour. The dark blue fabric at her neckline subtly transitions toward the zip-front blue dress with a deeper neckline; gold zipper highlights catch the strengthening warm rim light. White daisies in the mid-ground sway lightly. Footstep-soft grass texture and continued breeze fill the soundscape.\n[Shot 3] At 00:04.500, the movement settles into the composition of <Picture 2>. <Subject 1> now faces the camera more directly with a gentle smile, the blue zip-front dress and gold zipper clearly visible, warm sunset tones enveloping her and the flower field with soft glowing haze and light leaks at the frame edges. Her eyes blink once naturally; a few hair strands drift across her cheek in the warm breeze. The camera eases to a near-static hold, ending on <Picture 2>. <Subject 1> (S1) murmurs in a soft, intimate tone, <d>[Chinese] 风刚好停在这里了。</d> as the ambient wind briefly stills around her.\n\noverall_soundscape:\nSoft meadow wind, distant insect chirps, and light grass rustle continue throughout the clip, with ambience warming slightly in the later shots.\n\nnon_diegetic_music:\nN/A"
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "⚙️ CR Prompt Text"
+    }
+  },
+  "141": {
+    "inputs": {
+      "width": 768,
+      "height": 1344,
+      "upscale_method": "lanczos",
+      "keep_proportion": "crop",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu",
+      "image": [
+        "114",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "142": {
+    "inputs": {
+      "width": 768,
+      "height": 1344,
+      "upscale_method": "lanczos",
+      "keep_proportion": "crop",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu",
+      "image": [
+        "128",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "143": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "comfyui",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 16,
+      "save_metadata": false,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "151",
+        0
+      ],
+      "audio": [
+        "105:23",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "144": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.scale": 2,
+      "quality": "ULTRA",
+      "images": [
+        "146",
+        0
+      ]
+    },
+    "class_type": "RTXVideoSuperResolution",
+    "_meta": {
+      "title": "RTX Video Super Resolution"
+    }
+  },
+  "145": {
+    "inputs": {
+      "offload_model": true,
+      "offload_cache": true,
+      "anything": [
+        "105:14",
+        0
+      ]
+    },
+    "class_type": "VRAMCleanup",
+    "_meta": {
+      "title": "🎈VRAM-Cleanup"
+    }
+  },
+  "146": {
+    "inputs": {
+      "samples": [
+        "145",
+        0
+      ],
+      "vae": [
+        "105:11",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "148": {
+    "inputs": {
+      "lora_name": "minimax/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "strength_model": 0.75,
+      "model": [
+        "105:6",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "105:11": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "105:24": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "105:13": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "105:6": {
+    "inputs": {
+      "unet_name": "minimax/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "105:111": {
+    "inputs": {
+      "value": 5
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (duration)"
+    }
+  },
+  "105:15": {
+    "inputs": {
+      "noise_seed": 479044338007328
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "105:17": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "105:107": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "105:111",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "数学表达式"
+    }
+  },
+  "105:104": {
+    "inputs": {
+      "prompt": [
+        "136",
+        0
+      ],
+      "width": [
+        "122",
+        1
+      ],
+      "height": [
+        "122",
+        2
+      ],
+      "length": [
+        "105:107",
+        1
+      ],
+      "clip": [
+        "105:13",
+        0
+      ],
+      "vae": [
+        "105:11",
+        0
+      ],
+      "first_frame": [
+        "141",
+        0
+      ],
+      "last_frame": [
+        "142",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "MiniMax H3 图像生成视频"
+    }
+  },
+  "105:9": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 12,
+      "denoise": 1,
+      "model": [
+        "129",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基本调度器"
+    }
+  },
+  "105:16": {
+    "inputs": {
+      "model": [
+        "129",
+        0
+      ],
+      "conditioning": [
+        "105:104",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "105:14": {
+    "inputs": {
+      "noise": [
+        "105:15",
+        0
+      ],
+      "guider": [
+        "105:16",
+        0
+      ],
+      "sampler": [
+        "105:17",
+        0
+      ],
+      "sigmas": [
+        "152",
+        0
+      ],
+      "latent_image": [
+        "105:104",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "105:23": {
+    "inputs": {
+      "samples": [
+        "145",
+        0
+      ],
+      "vae": [
+        "105:24",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码（音频）"
+    }
+  },
+  "149": {
+    "inputs": {
+      "model": [
+        "148",
+        0
+      ],
+      "head_chunks": 4
+    },
+    "class_type": "MiniMaxLowVRAMAttention",
+    "_meta": {
+      "title": "MiniMax H3 Low VRAM Attention"
+    }
+  },
+  "150": {
+    "inputs": {
+      "model": [
+        "149",
+        0
+      ],
+      "chunks": 2,
+      "seq_threshold": 4096
+    },
+    "class_type": "MiniMaxChunkFeedForward",
+    "_meta": {
+      "title": "MiniMax H3 Chunk FeedForward"
+    }
+  },
+  "151": {
+    "inputs": {
+      "clean_file_cache": true,
+      "clean_processes": true,
+      "clean_dlls": true,
+      "retry_times": 3,
+      "anything": [
+        "144",
+        0
+      ]
+    },
+    "class_type": "RAMCleanup",
+    "_meta": {
+      "title": "🎈RAM-Cleanup"
+    }
+  },
+  "152": {
+    "inputs": {
+      "sigmas": [
+        "105:9",
+        0
+      ],
+      "extra_steps": 2,
+      "start_at_sigma": 0.65,
+      "end_at_sigma": 0.0,
+      "spacing": "cosine"
+    },
+    "class_type": "H3SigmaRefiner",
+    "_meta": {
+      "title": "H3 Sigma Refiner"
+    }
+  }
+}

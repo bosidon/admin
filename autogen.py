@@ -9,6 +9,7 @@
 - 任务结束（成功/失败/超时）一律尝试关机，防止漏计费
 """
 import hashlib
+import io
 import json
 import re
 import random
@@ -2036,6 +2037,23 @@ def rewrite_plan_item(article_id, index, hint, llm_cfg):
 
 
 
+def enqueue_image_job(kind, article_id, payload, total, owner="", owner_id=""):
+    """统一入队底座：文章配图（kind=plan/images）与素材自由出图（kind=txt2img）共用
+
+    未配置实例池 / Token → 返回 {"error": ...}（由调用方决定 HTTP 码，配图链路 200 / 自由出图 400）；
+    否则入队，统一返回 {ok, job_id, kind, reused, queue_pos}。plan 不开机，跳过实例校验。
+    """
+    if kind != "plan":
+        cfg = get_comfy_config()
+        if not instance_uuids() or not cfg.get("comfy_api_token"):
+            return {"error": "未配置实例池 / Token，请去「设置」页填写"}
+    aid = int(article_id) if article_id else None
+    jid, reused = jobstore.DISPATCHER.enqueue(kind, aid, payload, total, priority=10,
+                                              owner=owner, owner_id=owner_id)
+    return {"ok": True, "job_id": jid, "kind": kind, "reused": reused,
+            "queue_pos": jobstore.queue_pos(jid)}
+
+
 # ============================================================
 # 统一生成任务（叠字卡 + 画面，一次开机一次关机）
 # ============================================================
@@ -2044,6 +2062,7 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
     """任务入队（幂等）：① 生成方案 → kind=plan；② 出图 → kind=images
     返回 {ok, job_id, kind, queue_pos, reused}；llm_cfg 仅为兼容旧调用保留
     （后台任务自己从 settings / .env 取 key，不再经前端传）
+    —— 薄封装：只做业务校验，入队交给 enqueue_image_job
     """
     if not _read_article_full(article_id):
         return {"error": "文章不存在"}
@@ -2052,20 +2071,13 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
     want_scenes = bool(opts.get("scenes"))
     if not (want_cards or want_scenes) and not plan_only:
         return {"error": "请至少勾选一组要出图的条目"}
-    if not plan_only:
-        cfg = get_comfy_config()
-        if not instance_uuids() or not cfg.get("comfy_api_token"):
-            return {"error": "未配置实例池 / Token，请去「设置」页填写"}
     kind = "plan" if plan_only else "images"
     payload = {"cards": want_cards, "scenes": want_scenes, "replan": bool(opts.get("replan")),
                "plan_only": plan_only, "card_size": card_size,
                "card_want": int(card_want or 0), "scene_count": int(scene_count or 0)}
     total = 0 if plan_only else ((int(card_want or 0) if want_cards else 0)
                                  + (int(scene_count or 0) if want_scenes else 0))
-    jid, reused = jobstore.DISPATCHER.enqueue(kind, article_id, payload, total, priority=10,
-                                              owner=owner, owner_id=owner_id)
-    return {"ok": True, "job_id": jid, "kind": kind, "reused": reused,
-            "queue_pos": jobstore.queue_pos(jid)}
+    return enqueue_image_job(kind, article_id, payload, total, owner=owner, owner_id=owner_id)
 
 
 # ============================================================
@@ -2243,8 +2255,77 @@ def _sync_materials(article_id, job=None):
             pass
 
 
+def _run_image_job_core(job, kind, build_one):
+    """出图执行底座：「文章配图」(kind=images) 与「素材自由出图」(kind=txt2img) 共用
+
+    统一负责：挑实例 → 等 ComfyUI 就绪 → jobstore.set_ready（精确用时起点，不含开机等待）
+    → stage=generating → 逐张 build_one(base, i) 落盘/进度 → 取消检查
+    → 失败按各自文案记日志并抛错 → finally 素材入库(配图) + 空闲关机收尾。
+    build_one(base, i) 返回 (bytes, name, material_row_or_None)；返回 None = 没有更多条目。
+    返回 (urls, rows)：本次落盘产物的 URL 列表与素材行，供调用方入库。
+    """
+    import materials as mat
+    jid = job["id"]
+    article_id = job.get("article_id")
+    if kind == "txt2img":                       # 自由出图：产物落在素材目录，URL 走素材前缀
+        out_dir = mat.out_dir(0)
+
+        def _url(name):
+            return "%s/materials/0/%s" % (mat.URL_PREFIX, name)
+    else:                                       # 文章配图：产物落在该文案的配图目录
+        out_dir = GEN_DIR / str(article_id)
+
+        def _url(name):
+            return "/static/generated/%d/%s" % (article_id, name)
+    urls, rows = [], []
+
+    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：按池顺序挑一台空闲可用的
+        try:
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
+            if not base:
+                raise RuntimeError("拿不到 ComfyUI 地址")
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
+                raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)          # 精确用时起点：开机等待不计入
+            if kind != "txt2img":
+                _log(jid, "ComfyUI 已就绪")
+            _set(jid, stage="generating")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            i = 0
+            while True:
+                if jobstore.canceled(jid):
+                    raise RuntimeError("已取消")
+                out = build_one(base, i)
+                if out is None:
+                    break
+                data, name, row = out
+                (out_dir / name).write_bytes(data)
+                urls.append(_url(name))
+                if row is not None:
+                    rows.append(row)
+                _set(jid, done=len(urls), images=list(urls))
+                i += 1
+            return urls, rows
+        except Exception as e:
+            _log(jid, ("❌ 文生图失败：%s" % str(e)[:220]) if kind == "txt2img"
+                 else ("❌ 生成失败：%s" % str(e)[:220]))
+            if kind != "txt2img":
+                # ⚠️ 固定文件名（同名覆盖）下**不许清理**：本次写出的文件就是该条目的正式文件，
+                # 删掉等于把用户唯一的图删了。失败只报错：文件保留、清单不动，重跑即覆盖。
+                _log(jid, "本次已出图 %d 张（同名覆盖，保留不动）；配图清单未做任何改动。"
+                     % len(urls))
+            raise RuntimeError(str(e)[:300])
+        finally:
+            if kind == "images":
+                _sync_materials(article_id, job)      # 素材库入库：失败只记日志，不影响出图
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
+
+
 def run_images_job(job):
-    """② 出图：一次开机 → 出完本任务 → 队列空了才关机"""
+    """② 出图：一次开机 → 出完本任务 → 队列空了才关机（薄封装：共用 _run_image_job_core）"""
     jid, article_id = job["id"], job.get("article_id")
     opts = job.get("payload") or {}
     want_cards = bool(opts.get("cards"))
@@ -2268,84 +2349,55 @@ def run_images_job(job):
     total = len(quotes) + len(scenes)
     _set(jid, quotes=plan["quotes"], scenes=plan["scenes"], style=style, total=total,
          want_cards=want_cards, want_scenes=want_scenes)
-    card_urls, scene_urls, done = [], [], 0
 
-    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：按池顺序挑一台空闲可用的（同台串行、跨台并行）
-        try:
-            _set(jid, stage="ready", host=inst)
-            base = base_for(inst, logger=lambda m: _log(jid, m))
-            if not base:
-                raise RuntimeError("拿不到 ComfyUI 地址")
-            _log(jid, "ComfyUI 地址：" + base)
-            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
-                raise RuntimeError("ComfyUI 300s 内未就绪")
-            jobstore.set_ready(jid)          # 精确用时起点：开机等待不计入
-            _log(jid, "ComfyUI 已就绪")
-            _set(jid, stage="generating")
+    def build_one(base, i):
+        """第 i 张：④ 叠字卡（AI 满版背景 + PIL 叠字）/ ⑤ 场景纯出图 → (bytes, name, None)"""
+        if i < len(quotes):
+            q = quotes[i]
+            cw, ch = SIZES.get(card_size, SIZES["xiaohongshu"])
+            bgp = _with_style(_clean_aspect_words(q.get("bg") or FALLBACK_BG), style)
+            _log(jid, "配图 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
+            fn, sub, meta = comfy_generate(base, bgp, cw, ch,
+                                           "qcbg_%d_%d" % (article_id, i), cfg)
+            bg = comfy_download(base, fn, sub)
+            card = compose_card_over_bg(bg, q["text"], size=card_size, qr_link=None)
+            name = "ai_%02d.png" % card_nos[i]
+            buf = io.BytesIO()
+            card.save(buf, "PNG", optimize=True)
+            _log(jid, "配图 %d 完成 → %s" % (i + 1, name))
+            _log_gen_meta(lambda m: _log(jid, m), article_id, name, "card", meta, style)
+            return (buf.getvalue(), name, None)
+        if i - len(quotes) < len(scenes):
+            n = i - len(quotes)
+            s = scenes[n]
+            w, h = ASPECT_SIZE.get(s["aspect"], ASPECT_SIZE["3:4"])
+            sp = _with_style(_clean_aspect_words(s["prompt"]), style)
+            _log(jid, "画面 %d/%d 生成中（%s → %dx%d）…"
+                 % (n + 1, len(scenes), s["aspect"], w, h))
+            fn, sub, meta = comfy_generate(base, sp, w, h, "zl_%d_%d" % (article_id, n), cfg)
+            data = comfy_download(base, fn, sub)
+            name = "ai_%02d.png" % scene_nos[n]
+            _log(jid, "画面 %d 完成 → %s" % (n + 1, name))
+            _log_gen_meta(lambda m: _log(jid, m), article_id, name, "scene", meta, style)
+            return (data, name, None)
+        return None
 
-            out_dir = GEN_DIR / str(article_id)
-            out_dir.mkdir(parents=True, exist_ok=True)
+    urls, _rows = _run_image_job_core(job, "images", build_one)
 
-            # ④ 叠字卡路径（旧契约方案）：AI 满版背景 + PIL 叠字
-            if quotes:
-                cw, ch = SIZES.get(card_size, SIZES["xiaohongshu"])
-                for i, q in enumerate(quotes):
-                    if jobstore.canceled(jid):
-                        raise RuntimeError("已取消")
-                    bgp = _with_style(_clean_aspect_words(q.get("bg") or FALLBACK_BG), style)
-                    _log(jid, "配图 %d/%d 出背景中（%dx%d）…" % (i + 1, len(quotes), cw, ch))
-                    fn, sub, meta = comfy_generate(base, bgp, cw, ch,
-                                                   "qcbg_%d_%d" % (article_id, i), cfg)
-                    bg = comfy_download(base, fn, sub)
-                    card = compose_card_over_bg(bg, q["text"], size=card_size, qr_link=None)
-                    name = "ai_%02d.png" % card_nos[i]
-                    card.save(str(out_dir / name), "PNG", optimize=True)
-                    card_urls.append("/static/generated/%d/%s" % (article_id, name))
-                    done += 1
-                    _set(jid, done=done, images=list(card_urls + scene_urls))
-                    _log(jid, "配图 %d 完成 → %s" % (i + 1, name))
-                    _log_gen_meta(lambda m: _log(jid, m), article_id, name, "card", meta, style)
+    # ⑥ 二维码图（跟在叠字卡后面，与旧顺序一致）
+    imgs = list(urls)
+    if quotes and link:
+        qname = "qr.png"
+        make_qrcode(link, box=400).save(str(GEN_DIR / str(article_id) / qname), "PNG",
+                                        optimize=True)
+        qr_url = "/static/generated/%d/%s" % (article_id, qname)
+        imgs = imgs[:len(quotes)] + [qr_url] + imgs[len(quotes):]
 
-            # ⑤ 场景/画面：纯出图
-            for i, s in enumerate(scenes):
-                if jobstore.canceled(jid):
-                    raise RuntimeError("已取消")
-                w, h = ASPECT_SIZE.get(s["aspect"], ASPECT_SIZE["3:4"])
-                sp = _with_style(_clean_aspect_words(s["prompt"]), style)
-                _log(jid, "画面 %d/%d 生成中（%s → %dx%d）…"
-                     % (i + 1, len(scenes), s["aspect"], w, h))
-                fn, sub, meta = comfy_generate(base, sp, w, h, "zl_%d_%d" % (article_id, i), cfg)
-                data = comfy_download(base, fn, sub)
-                name = "ai_%02d.png" % scene_nos[i]
-                (out_dir / name).write_bytes(data)
-                scene_urls.append("/static/generated/%d/%s" % (article_id, name))
-                done += 1
-                _set(jid, done=done, images=list(card_urls + scene_urls))
-                _log(jid, "画面 %d 完成 → %s" % (i + 1, name))
-                _log_gen_meta(lambda m: _log(jid, m), article_id, name, "scene", meta, style)
-
-            # ⑥ 二维码图
-            if card_urls and link:
-                qimg = make_qrcode(link, box=400)
-                qname = "qr.png"
-                qimg.save(str(out_dir / qname), "PNG", optimize=True)
-                card_urls.append("/static/generated/%d/%s" % (article_id, qname))
-
-            # ⑦ 入库：只增不删 —— 同名覆盖下同条目的 URL 恒定；旧引用/孤儿一律保留，绝不清组
-            if card_urls or scene_urls:
-                _merge_images(article_id, list(card_urls) + list(scene_urls))
-            _set(jid, images=list(card_urls + scene_urls), done=total)
-            _log(jid, "全部完成：配图 %d 张" % (len(quotes) + len(scenes)))
-        except Exception as e:
-            _log(jid, "❌ 生成失败：%s" % str(e)[:220])
-            # ⚠️ 固定文件名（同名覆盖）下**不许清理**：本次写出的文件就是该条目的正式文件，
-            # 删掉等于把用户唯一的图删了。失败只报错：文件保留、清单不动，重跑即覆盖。
-            _log(jid, "本次已出图 %d 张（同名覆盖，保留不动）；配图清单未做任何改动。"
-                 % (len(card_urls) + len(scene_urls)))
-            raise RuntimeError(str(e)[:300])
-        finally:
-            _sync_materials(article_id, job)
-            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
+    # ⑦ 入库：只增不删 —— 同名覆盖下同条目的 URL 恒定；旧引用/孤儿一律保留，绝不清组
+    if imgs:
+        _merge_images(article_id, imgs)
+    _set(jid, images=imgs, done=total)
+    _log(jid, "全部完成：配图 %d 张" % (len(quotes) + len(scenes)))
 
 
 def run_material_job(job):
@@ -2436,7 +2488,7 @@ def run_material_job(job):
 
 
 def run_txt2img_job(job):
-    """文生图：一句提词 → 1 张
+    """文生图：一句提词 → 1 张（薄封装：共用 _run_image_job_core）
     出图链路复用「文章配图」的 comfy_generate（同实例 / 同底模 / 同 LoRA / 同采样参数 / 同负面词）"""
     import hashlib
     import materials as mat
@@ -2454,40 +2506,33 @@ def run_txt2img_job(job):
     short = text if len(text) <= 24 else text[:24] + "…"
     _set(jid, total=1, done=0, style=style)
     _log(jid, "文生图：%s（风格 %s · %s）" % (short, style_label_map().get(style, style) or "-", aspect))
-    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：挑一台空闲可用的
-        try:
-            _set(jid, stage="ready", host=inst)
-            base = base_for(inst, logger=lambda m: _log(jid, m))
-            if not base:
-                raise RuntimeError("拿不到 ComfyUI 地址")
-            _log(jid, "ComfyUI 地址：" + base)
-            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
-                raise RuntimeError("ComfyUI 300s 内未就绪")
-            jobstore.set_ready(jid)          # 精确用时起点：开机等待不计入
-            _set(jid, stage="generating")
-            p = _with_style(_clean_aspect_words(text), style)      # 补画风英文词 + 去掉提词里的比例字样
-            _log(jid, "画面生成中（%s → %dx%d）…" % (aspect, w, h))
-            fn, sub, meta = comfy_generate(base, p, w, h, "t2i_%s" % jid[:6], cfg)
-            data = comfy_download(base, fn, sub)
-            # 文件名 = 提词+风格+比例的哈希 + 任务号 → 同一提词重跑不会覆盖旧图
-            hh = hashlib.md5(("%s|%s|%s" % (text, style, aspect)).encode("utf-8")).hexdigest()[:6]
-            name = "t2i_%s_%s.png" % (hh, jid[:4])
-            (mat.out_dir(0) / name).write_bytes(data)
-            url = "%s/materials/0/%s" % (mat.URL_PREFIX, name)
-            _aid = job.get("article_id") or None
-            _oid, _own = (mat.article_owner(_aid) if _aid else (None, ""))
-            if not _oid:                      # 文案无归属人 → 回落到操作人
-                _oid, _own = job.get("owner_id"), job.get("owner") or ""
-            mat.upsert(url, "image", name=short, source="txt2img", article_id=_aid,
-                       owner_id=_oid, owner=_own, tags="文生图")
-            _set(jid, done=1, images=[url])
-            _log_gen_meta(lambda m: _log(jid, m), 0, name, "t2i", meta, style)
-            _log(jid, "文生图完成 → " + name)
-        except Exception as e:
-            _log(jid, "❌ 文生图失败：%s" % str(e)[:220])
-            raise RuntimeError(str(e)[:300])
-        finally:
-            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
+    made = {}
+
+    def build_one(base, i):
+        """只有第 0 张：提词 + 风格 + 比例 → 1 张 PNG → (bytes, name, None)"""
+        if i > 0:
+            return None
+        p = _with_style(_clean_aspect_words(text), style)      # 补画风英文词 + 去掉提词里的比例字样
+        _log(jid, "画面生成中（%s → %dx%d）…" % (aspect, w, h))
+        fn, sub, meta = comfy_generate(base, p, w, h, "t2i_%s" % jid[:6], cfg)
+        data = comfy_download(base, fn, sub)
+        # 文件名 = 提词+风格+比例的哈希 + 任务号 → 同一提词重跑不会覆盖旧图
+        hh = hashlib.md5(("%s|%s|%s" % (text, style, aspect)).encode("utf-8")).hexdigest()[:6]
+        name = "t2i_%s_%s.png" % (hh, jid[:4])
+        made["name"], made["meta"] = name, meta
+        return (data, name, None)
+
+    urls, _rows = _run_image_job_core(job, "txt2img", build_one)
+
+    url = urls[0]
+    _aid = job.get("article_id") or None
+    _oid, _own = (mat.article_owner(_aid) if _aid else (None, ""))
+    if not _oid:                      # 文案无归属人 → 回落到操作人
+        _oid, _own = job.get("owner_id"), job.get("owner") or ""
+    mat.upsert(url, "image", name=short, source="txt2img", article_id=_aid,
+               owner_id=_oid, owner=_own, tags="文生图")
+    _log_gen_meta(lambda m: _log(jid, m), 0, made["name"], "t2i", made["meta"], style)
+    _log(jid, "文生图完成 → " + made["name"])
 
 
 def register_jobs():

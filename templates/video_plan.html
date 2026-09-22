@@ -269,8 +269,8 @@ function genAssetByIdx(i) {
     if (!prompt) { if (st) { st.textContent = '这条没有提词'; } return; }
     const aspect = p.aspect || (kind === 'persona' ? '3:4' : (kind === 'scene' ? '16:9' : '1:1'));
     if (st) { st.textContent = '提交中…'; }
-    fetch('/api/materials/txt2img', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt, aspect: aspect, article_id: PLAN_ARTICLE_ID || 0 }) })
+    fetch('/api/illustrate/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt, aspect: aspect, style: '', article_id: PLAN_ARTICLE_ID || 0 }) })
       .then(r => r.json()).then(j => {
         if (!j.ok) { if (st) { st.textContent = '失败：' + (j.error || ''); } return; }
         if (st) { st.textContent = '已排队…'; }

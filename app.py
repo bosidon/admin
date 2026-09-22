@@ -43,7 +43,7 @@ LLM_DEFAULTS = {
     "llm_model": "deepseek-chat",
 }
 from illustrate import stamp_qr
-from autogen import (start_generate, get_job, shutdown_instance, adl_status,
+from autogen import (start_generate, enqueue_image_job, get_job, shutdown_instance, adl_status,
                      read_plan, save_plan, PLAN_PROMPT_DEFAULT, rewrite_plan_item,
                      load_plan_prompt, load_plan_prompt_raw, save_plan_prompt, register_jobs, uid_ok,
                      get_comfy_config, resolve_base_url, comfy_object_info, check_comfy_config,
@@ -2028,30 +2028,79 @@ def api_save_image_script(article_id):
 
 
 # ============================================================
-# API - 一键生成配图（AutoDL ComfyUI · 按需开关机）
+# API - 唯一出图入口（文章配图 / 素材自由出图，按参数分流）
 # ============================================================
+def _images_generate(data, force_txt2img=False):
+    """唯一出图实现（两个路由共用，旧别名即薄转调）
+
+    ① 配图模式：body 带 cards / scenes / replan / plan_only 任一键 → article_id 必填
+       （缺 → 400「缺少 article_id」），platform → 卡尺寸/建议张数，opts → start_generate
+    ② 自由出图模式：无上述键且 prompt 非空 → 单张文生图（kind=txt2img，total=1），
+       article_id 可选（给了才校验越权 → 404「文案不存在」）
+    两者都没有 → 400「请填写提词或选择要出图的条目」
+    force_txt2img=True 供旧别名 /api/materials/txt2img 使用：永远走自由出图分支
+    （老契约：没提词时报「请填写提词」）
+    """
+    if not force_txt2img and any(k in data for k in ("cards", "scenes", "replan", "plan_only")):
+        article_id = data.get('article_id')
+        if not article_id:
+            return jsonify({"error": "缺少 article_id"}), 400
+        _g = _guard_article(article_id)
+        if _g:
+            return _g
+        row = get_content_db().execute('SELECT platform FROM articles WHERE id=?',
+                                       (int(article_id),)).fetchone()
+        card_size, card_want = PLATFORM_CARD.get(
+            (row['platform'] if row else '') or 'wechat', ('xiaohongshu', 3))
+        opts = {"cards": bool(data.get('cards')),
+                "scenes": bool(data.get('scenes')),
+                "replan": bool(data.get('replan')),
+                "plan_only": bool(data.get('plan_only'))}
+        u = current_user()
+        return jsonify(start_generate(int(article_id), opts, get_llm_config(),
+                                      card_size, card_want, int(data.get('count') or 3),
+                                      owner=user_label(u), owner_id=str(u.get("id") or "")))
+
+    u = current_user() or {}
+    prompt = (data.get('prompt') or '').strip()
+    style = (data.get('style') or '').strip()
+    aspect = (data.get('aspect') or '').strip()
+    if not prompt:
+        return jsonify({"error": "请填写提词" if force_txt2img
+                        else "请填写提词或选择要出图的条目"}), 400
+    if len(prompt) > 500:
+        return jsonify({"error": "提词太长（最多 500 字）"}), 400
+    if style and style not in style_types():
+        return jsonify({"error": "风格不存在"}), 400
+    if aspect not in ASPECT_SIZE:
+        return jsonify({"error": "比例不存在"}), 400
+    cfg = get_comfy_config()
+    if not instance_uuids() or not cfg.get('comfy_api_token'):
+        return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
+    aid = data.get('article_id') or 0
+    try:
+        aid = int(aid)
+    except Exception:
+        aid = 0
+    if aid:
+        _g = _guard_article(aid)          # 与文章配图一致：越权统一按「不存在」处理
+        if _g:
+            return _g
+    payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect,
+               "article_id": aid or None}
+    res = enqueue_image_job('txt2img', aid or None, payload, 1,
+                            owner=user_label(u), owner_id=u.get('id'))
+    if res.get("error"):                  # 未配置实例池 / Token
+        return jsonify(res), 400
+    if force_txt2img:                     # 老契约：旧别名返回只有这 4 个键（新入口/配图带 kind）
+        return jsonify({k: res[k] for k in ("ok", "job_id", "reused", "queue_pos")})
+    return jsonify(res)
+
+
 @app.route('/api/illustrate/generate', methods=['POST'])
 def api_illustrate_generate():
-    """启动生成任务（金句卡 + 场景配图，一次开机一次关机）"""
-    data = request.json or {}
-    article_id = data.get('article_id')
-    if not article_id:
-        return jsonify({"error": "缺少 article_id"}), 400
-    _g = _guard_article(article_id)
-    if _g:
-        return _g
-    row = get_content_db().execute('SELECT platform FROM articles WHERE id=?',
-                                   (int(article_id),)).fetchone()
-    card_size, card_want = PLATFORM_CARD.get(
-        (row['platform'] if row else '') or 'wechat', ('xiaohongshu', 3))
-    opts = {"cards": bool(data.get('cards')),
-            "scenes": bool(data.get('scenes')),
-            "replan": bool(data.get('replan')),
-            "plan_only": bool(data.get('plan_only'))}
-    u = current_user()
-    return jsonify(start_generate(int(article_id), opts, get_llm_config(),
-                                  card_size, card_want, int(data.get('count') or 3),
-                                  owner=user_label(u), owner_id=str(u.get("id") or "")))
+    """唯一出图入口：带 cards/scenes/replan/plan_only → 文章配图；只给 prompt → 自由出图"""
+    return _images_generate(request.get_json(silent=True) or {})
 
 
 @app.route('/api/illustrate/job/<job_id>')
@@ -2452,38 +2501,8 @@ def api_materials_upload():
 
 @app.route('/api/materials/txt2img', methods=['POST'])
 def api_materials_txt2img():
-    """文生图：提词 + 风格 + 比例 → GPU 队列（出图链路与「文章配图」同一套）"""
-    u = current_user() or {}
-    body = request.get_json(silent=True) or {}
-    prompt = (body.get('prompt') or '').strip()
-    style = (body.get('style') or '').strip()
-    aspect = (body.get('aspect') or '').strip()
-    if not prompt:
-        return jsonify({"error": "请填写提词"}), 400
-    if len(prompt) > 500:
-        return jsonify({"error": "提词太长（最多 500 字）"}), 400
-    if style and style not in style_types():
-        return jsonify({"error": "风格不存在"}), 400
-    if aspect not in ASPECT_SIZE:
-        return jsonify({"error": "比例不存在"}), 400
-    cfg = get_comfy_config()
-    if not instance_uuids() or not cfg.get('comfy_api_token'):
-        return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
-    aid = body.get('article_id') or 0
-    try:
-        aid = int(aid)
-    except Exception:
-        aid = 0
-    if aid:
-        _g = _guard_article(aid)          # 与文章配图一致：越权统一按「不存在」处理
-        if _g:
-            return _g
-    payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect,
-               "article_id": aid or None}
-    jid, reused = jobstore.DISPATCHER.enqueue('txt2img', aid or None, payload, 1, priority=10,
-                                             owner=user_label(u), owner_id=u.get('id'))
-    return jsonify({"ok": True, "job_id": jid, "reused": reused,
-                    "queue_pos": jobstore.queue_pos(jid)})
+    """薄别名 → 唯一出图入口的自由出图模式（入参/返回/错误码与旧契约逐字一致）"""
+    return _images_generate(request.get_json(silent=True) or {}, force_txt2img=True)
 
 
 TTS_VOICES = [

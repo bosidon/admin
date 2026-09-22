@@ -2474,8 +2474,12 @@ def run_txt2img_job(job):
             name = "t2i_%s_%s.png" % (hh, jid[:4])
             (mat.out_dir(0) / name).write_bytes(data)
             url = "%s/materials/0/%s" % (mat.URL_PREFIX, name)
-            mat.upsert(url, "image", name=short, source="txt2img", article_id=None,
-                       owner_id=job.get("owner_id"), owner=job.get("owner") or "", tags="文生图")
+            _aid = job.get("article_id") or None
+            _oid, _own = (mat.article_owner(_aid) if _aid else (None, ""))
+            if not _oid:                      # 文案无归属人 → 回落到操作人
+                _oid, _own = job.get("owner_id"), job.get("owner") or ""
+            mat.upsert(url, "image", name=short, source="txt2img", article_id=_aid,
+                       owner_id=_oid, owner=_own, tags="文生图")
             _set(jid, done=1, images=[url])
             _log_gen_meta(lambda m: _log(jid, m), 0, name, "t2i", meta, style)
             _log(jid, "文生图完成 → " + name)

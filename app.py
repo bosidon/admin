@@ -1825,7 +1825,7 @@ def video_plan_page(plan_id):
         _row = None
     if not _row or not _can_access_article(_row['article_id']):
         return _denied_page()
-    return render_template('video_plan.html', plan_id=plan_id)
+    return render_template('video_plan.html', plan_id=plan_id, article_id=_row['article_id'] or 0)
 
 # ============================================================
 # API - 配图（阶段2：二维码 / 素材选用 / AI 生图）
@@ -2469,8 +2469,16 @@ def api_materials_txt2img():
     cfg = get_comfy_config()
     if not instance_uuids() or not cfg.get('comfy_api_token'):
         return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
-    payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect}
-    jid, reused = jobstore.DISPATCHER.enqueue('txt2img', None, payload, 1, priority=10,
+    aid = body.get('article_id') or 0
+    try:
+        aid = int(aid)
+    except Exception:
+        aid = 0
+    if aid and not _can_access_article(aid):
+        return jsonify({"error": "无权为该文案生成素材"}), 403
+    payload = {"prompt": prompt, "style": style or get_default_style(), "aspect": aspect,
+               "article_id": aid or None}
+    jid, reused = jobstore.DISPATCHER.enqueue('txt2img', aid or None, payload, 1, priority=10,
                                              owner=user_label(u), owner_id=u.get('id'))
     return jsonify({"ok": True, "job_id": jid, "reused": reused,
                     "queue_pos": jobstore.queue_pos(jid)})

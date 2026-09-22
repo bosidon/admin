@@ -96,6 +96,7 @@
 {% block scripts %}
 <script>
 const PLAN_ID = {{ plan_id }};
+const PLAN_ARTICLE_ID = {{ article_id or 0 }};    // 素材归属：AI 生成素材挂到本文案名下
 let PLAN = null;
 let SCENES = [];
 // ===== 素材包 / 素材需求 =====
@@ -269,7 +270,7 @@ function genAssetByIdx(i) {
     const aspect = p.aspect || (kind === 'persona' ? '3:4' : (kind === 'scene' ? '16:9' : '1:1'));
     if (st) { st.textContent = '提交中…'; }
     fetch('/api/materials/txt2img', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt, aspect: aspect }) })
+        body: JSON.stringify({ prompt: prompt, aspect: aspect, article_id: PLAN_ARTICLE_ID || 0 }) })
       .then(r => r.json()).then(j => {
         if (!j.ok) { if (st) { st.textContent = '失败：' + (j.error || ''); } return; }
         if (st) { st.textContent = '已排队…'; }

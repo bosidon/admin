@@ -555,7 +555,7 @@ def fit_cover(src_path, out_path, w, h):
 
 
 def frame_looks(reqs):
-    """外观文字的唯一来源 = 素材需求行（中文 desc，缺失退 prompt_en）——
+    """外观文字的唯一来源 = 素材需求行的 desc（短外观；不带「纯色背景/半身像」等素材图构图指令）——
     分镜本身不再复述外观（避免同一人物两套形象描述）"""
     parts = []
     for r in (reqs or []):
@@ -581,12 +581,12 @@ def frame_prompt(shot, reqs, frame="start", aspect="9:16", style=""):
     if look:
         p.append("画面中的人物、场景、道具必须与下列外观完全一致，不得改动长相、服装、场景与画风：" + look)
     if frame == "end":
-        body = (shot.get("end_state") or "").strip() or "延续同一动作的收尾姿态，动作刚完成"
+        body = (shot.get("end_state") or "").strip().rstrip("。.；; ") or "延续同一动作的收尾姿态，动作刚完成"
         p.append("这是同一镜头连续画面里的「最后一帧」：" + body)
         p.append("必须与参考图（该镜首帧画面）保持同一人物、同一服装、同一场景、同一画面轴向，"
                  "只改变机位距离与角度以及该时刻的姿态，能和首帧自然衔接")
     else:
-        body = (shot.get("visual") or "").strip() or "镜头开始的静态画面"
+        body = (shot.get("visual") or "").strip().rstrip("。.；; ") or "镜头开始的静态画面"
         p.append("这是镜头的「第一帧」（起始画面）：" + body)
     if kind:
         p.append("景别：" + kind)

@@ -1481,9 +1481,9 @@ def gen_storyboard(script_text, llm_cfg, assets=None):
             sh["shot_face"] = "none"
     return data
 
-def gen_script(article_content, llm_cfg, duration_target=None):
+def gen_script(article_content, llm_cfg):
     """根据文案用 LLM 生成剧本 JSON（characters / scenes / props / beats）
-    目标时长通过提词占位符 {{DURATION}} 传入（默认 60 秒）"""
+    总时长由提词口径决定（文案写明就按文案，未写则模型自定）"""
     import os
     prompts_dir = os.path.dirname(os.path.abspath(__file__)) + "/prompts"
     prompt_md = open(prompts_dir + "/video_script.md", encoding="utf-8").read()
@@ -1493,14 +1493,7 @@ def gen_script(article_content, llm_cfg, duration_target=None):
     else:
         _sp, _up = "", prompt_md
     system_msg = _sp.strip() or "你是一位专业短视频编剧。只输出 JSON，不要其他文字。"
-    try:
-        _dur = int(duration_target or 0)
-    except Exception:
-        _dur = 0
-    if _dur <= 0:
-        _dur = 60
-    user_msg = _up.replace("{{DURATION}}", str(_dur))
-    user_msg = user_msg.replace("{{CONTENT}}", (article_content or "")[:8000])
+    user_msg = _up.replace("{{CONTENT}}", (article_content or "")[:8000])
     url = (llm_cfg.get("llm_base_url") or "https://api.deepseek.com/v1").rstrip("/")
     if "/chat/completions" not in url:
         url += "/chat/completions"

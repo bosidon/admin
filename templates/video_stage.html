@@ -80,7 +80,7 @@ function render() {
             <div style="font-weight:600;margin-bottom:8px;">${p.article_title || p.title || '未命名'}</div>
             <div style="font-size:12px;color:#64748b;margin-bottom:10px;">状态：${p.status}</div>
             <button class="btn btn-outline btn-sm" onclick="openSetup(${p.id})">${p.persona_id ? '修改人物/声音' : '制作视频'}</button>
-            <div style="font-size:12px;color:#0f766e;margin-top:8px;">🖼 ${p.persona_id ? (PER_NAME[p.persona_id] || ('形象 #' + p.persona_id)) : '未选形象'} · 🎙 ${p.voice_material_id ? '声音 #' + p.voice_material_id : '未选声音'} · ${p.aspect || '9:16'} · ${p.duration_target || 15}s</div>
+            <div style="font-size:12px;color:#0f766e;margin-top:8px;">🖼 ${p.persona_id ? (PER_NAME[p.persona_id] || ('形象 #' + p.persona_id)) : '未选形象'} · 🎙 ${p.voice_material_id ? '声音 #' + p.voice_material_id : '未选声音'} · ${p.aspect || '9:16'}</div>
         </div>`).join('');
     }
 }
@@ -109,7 +109,6 @@ async function openSetup(planId) {
     SETUP_PLAN = p;
     document.getElementById('setupTitle').textContent = (p.article_title || p.title || '未命名');
     document.getElementById('setupAspect').value = p.aspect || '9:16';
-    document.getElementById('setupDuration').value = String(p.duration_target || 15);
     const pe = document.getElementById('setupPersona'), ve = document.getElementById('setupVoice');
     pe.dataset.mid = p.persona_id || '';
     ve.dataset.mid = p.voice_material_id || '';
@@ -143,8 +142,7 @@ async function saveSetup() {
     const body = {
         persona_id: parseInt(document.getElementById('setupPersona').dataset.mid || '0', 10) || null,
         voice_material_id: parseInt(document.getElementById('setupVoice').dataset.mid || '0', 10) || null,
-        aspect: document.getElementById('setupAspect').value,
-        duration_target: parseInt(document.getElementById('setupDuration').value, 10) || 15
+        aspect: document.getElementById('setupAspect').value
     };
     if (!body.persona_id) { return toast('请先选择人物形象', 'error'); }
     const r = await api('/api/video-plans/' + SETUP_PLAN.id, {method: 'PUT', body: JSON.stringify(body)});
@@ -198,8 +196,6 @@ loadPerNames();
       <span>🎙 声音</span><button id="setupVoice" class="btn btn-outline btn-sm" data-mid="" onclick="pick('voice','audio')">未选择</button></div>
     <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
       <span>📐 画幅</span><select id="setupAspect" style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px;"><option value="9:16">9:16 竖版</option><option value="16:9">16:9 横版</option></select></div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
-      <span>⏱ 目标时长</span><select id="setupDuration" style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px;"><option value="15">15 秒</option><option value="30">30 秒</option><option value="45">45 秒</option><option value="60">60 秒</option></select></div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
       <button class="btn btn-outline btn-sm" onclick="closeSetup()">取消</button><button class="btn btn-sm" onclick="saveSetup()">保存</button></div>
   </div>

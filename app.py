@@ -525,7 +525,6 @@ VIDEO_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS video_scripts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL, title TEXT, logline TEXT,
   total_duration_s INTEGER, beats TEXT DEFAULT '[]', aspect TEXT DEFAULT '9:16',
-  duration_target INTEGER DEFAULT 60, style TEXT DEFAULT '', status TEXT DEFAULT 'draft',
   owner_id INTEGER, role_ids TEXT DEFAULT '[]',
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (article_id) REFERENCES articles(id));
@@ -1797,7 +1796,7 @@ def api_list_video_plans():
     _u = current_user()
     # 列表只取必要列；旧接口里的 JSON 列以空值占位，前端无需改（详细内容走 /<id> 接口）
     _sql = '''
-        SELECT v.id, v.article_id, v.title, v.status, v.aspect, v.duration_target,
+        SELECT v.id, v.article_id, v.title, v.status, v.aspect,
                v.logline, v.created_at, v.updated_at,
                '' AS script, '[]' AS storyboard, '[]' AS asset_reqs, '[]' AS asset_prompts,
                '' AS role_ids, NULL AS persona_material_id, NULL AS persona_id,
@@ -1828,16 +1827,10 @@ def api_create_video_plan():
     existing = db.execute('SELECT id FROM video_scripts WHERE article_id=?', (article_id,)).fetchone()
     if existing:
         return jsonify({"ok": True, "id": existing['id'], "existed": True})
-    try:
-        _dt = int(data.get('duration_target') or 60)   # 目标时长默认 60（库里列默认是 15，不能吃那个默认）
-    except Exception:
-        _dt = 60
-    if _dt <= 0:
-        _dt = 60
     cur = db.execute(
-        "INSERT INTO video_scripts (article_id, title, status, duration_target, created_at)"
-        " VALUES (?, ?, ?, ?, datetime('now','localtime'))",
-        (article_id, data.get('title', ''), 'draft', _dt)
+        "INSERT INTO video_scripts (article_id, title, status, created_at)"
+        " VALUES (?, ?, ?, datetime('now','localtime'))",
+        (article_id, data.get('title', ''), 'draft')
     )
     db.commit()
     return jsonify({"ok": True, "id": cur.lastrowid})
@@ -1923,10 +1916,9 @@ def api_gen_script(plan_id):
     art = db.execute("SELECT content_md FROM articles WHERE id=?", (row["article_id"],)).fetchone()
     if not art or not (art["content_md"] or "").strip():
         return jsonify({"error": "文案内容为空"}), 400
-    _dur = row["duration_target"] if "duration_target" in row.keys() else None
     try:
         from autogen import gen_script, get_llm_config
-        script = gen_script(art["content_md"], get_llm_config(), duration_target=_dur)
+        script = gen_script(art["content_md"], get_llm_config())
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500      # 失败不写库
     _st = (row["status"] or "draft")
@@ -2035,7 +2027,7 @@ def api_update_video_plan(plan_id):
     if _g:
         return _g
     sets, vals = [], []
-    for f in ('status', 'title', 'role_ids', 'aspect', 'duration_target'):
+    for f in ('status', 'title', 'role_ids', 'aspect'):
         if f in data:
             _v = data[f]
             if f == 'role_ids' and not isinstance(_v, str):

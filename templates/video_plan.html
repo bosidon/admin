@@ -566,8 +566,7 @@ function renderScript(src) {
     let html = '';
     html += '<div style="display:flex;gap:8px;align-items:center;">'
         + '<input class="js-sf" data-f="title" value="' + escq(obj.title || '') + '" placeholder="剧本标题（必填）" ' + S('flex:1;padding:6px 9px;font-size:14px;') + '>'
-        + '<span style="color:#94a3b8;font-size:12px;white-space:nowrap;">总时长 <b id="sum-sec" style="color:#334155;">0</b> 秒 · 目标 '
-        + (PLAN && PLAN.duration_target ? esc(PLAN.duration_target) : '—') + ' 秒</span></div>';
+        + '<span style="color:#94a3b8;font-size:12px;white-space:nowrap;">总时长 <b id="sum-sec" style="color:#334155;">0</b> 秒</span></div>';
     html += '<div id="sum-warn" style="display:none;color:#dc2626;font-size:12px;margin-top:4px;"></div>';
     html += '<textarea class="js-sf" data-f="logline" rows="2" placeholder="一句话（可空）" ' + S('width:100%;margin-top:7px;') + '>' + esc(obj.logline || '') + '</textarea>';
     if (!(obj.title || '') && !arr('beats').length && !arr('characters').length
@@ -636,7 +635,7 @@ function renderScript(src) {
     updateSum();
 }
 
-// 合计秒数 vs 目标时长（红字提示，不拦截保存）
+// 合计秒数 vs 剧本自报总时长 total_duration_s（红字提示，不拦截保存）
 function updateSum() {
     let s = 0;
     document.querySelectorAll('.js-sf[data-f="seconds"]').forEach(function (n) {
@@ -646,11 +645,11 @@ function updateSum() {
     const el = document.getElementById('sum-sec');
     if (el) { el.textContent = s; }
     const w = document.getElementById('sum-warn');
-    const target = PLAN ? parseInt(PLAN.duration_target, 10) : 0;
-    if (w && target) {
-        if (s !== target) {
+    const declared = (typeof SCRIPT_OBJ !== 'undefined' && SCRIPT_OBJ && SCRIPT_OBJ.total_duration_s) ? parseInt(SCRIPT_OBJ.total_duration_s, 10) : 0;
+    if (w && declared) {
+        if (s !== declared) {
             w.style.display = 'block';
-            w.textContent = '⚠ 分节合计 ' + s + ' 秒 ≠ 目标 ' + target + ' 秒（差 ' + (s > target ? '+' : '') + (s - target) + '）';
+            w.textContent = '⚠ 分节合计 ' + s + ' 秒 ≠ 剧本自报 ' + declared + ' 秒（差 ' + (s > declared ? '+' : '') + (s - declared) + '）';
         } else {
             w.style.display = 'none';
             w.textContent = '';

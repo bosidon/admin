@@ -232,7 +232,7 @@ function renderReqs() {
     box.innerHTML = REQS.map(function (q, qi) {
         const exists = !!q.exists;
         const attached = !!q.material_id;
-        const rid = (q.id === undefined || q.id === null) ? ('x' + qi) : q.id;
+        const rid = String((q.id === undefined || q.id === null) ? ('x' + qi) : q.id);
         const pm = PROMPTS.filter(p => (p.kind || '') === (q.kind || '') && p.name === q.name
                                        && (!q.slot || !p.slot || p.slot === q.slot));
         pm.forEach(p => { if (USED.indexOf(p) < 0) USED.push(p); });
@@ -296,7 +296,7 @@ function updateSelCount() {
     if (el) { el.textContent = SEL_REQ.size ? ('已选 ' + SEL_REQ.size + ' 项') : ''; }
 }
 function toggleSelectAll() {
-    const all = REQS.map(function (q, i) { return (q.id === undefined || q.id === null) ? ('x' + i) : q.id; });
+    const all = REQS.map(function (q, i) { return String((q.id === undefined || q.id === null) ? ('x' + i) : q.id); });
     const wantAll = SEL_REQ.size < all.length;
     SEL_REQ.clear();
     if (wantAll) { all.forEach(id => SEL_REQ.add(id)); }
@@ -331,7 +331,7 @@ async function genAssetsBatch() {
 
 // ③ 从素材库选择（列表走 /api/library，缩略图走 /api/materials/thumb）
 async function pickMaterialFor(rid) {
-    const q = REQS.find(function (x, i) { return ((x.id === undefined || x.id === null) ? ('x' + i) : x.id) === rid; });
+    const q = REQS.find(function (x, i) { return String((x.id === undefined || x.id === null) ? ('x' + i) : x.id) === String(rid); });
     if (!q) { return; }
     const rows = await api('/api/library?type=image');     // type 只认 all/image/audio/video（不能传 kind）
     LIB_PICK = (Array.isArray(rows) ? rows : []).filter(function (m) {
@@ -352,7 +352,7 @@ async function pickMaterialFor(rid) {
 
 // ② 素材归属：挂到该需求行（后端同时把素材挂到角色槽位、并把素材归到本文案名下）
 async function attachMaterial(rid, k) {
-    const q = REQS.find(function (x, i) { return ((x.id === undefined || x.id === null) ? ('x' + i) : x.id) === rid; });
+    const q = REQS.find(function (x, i) { return String((x.id === undefined || x.id === null) ? ('x' + i) : x.id) === String(rid); });
     const m = LIB_PICK[k];
     if (!q || !m) { closeModal(); return; }
     const r = await api('/api/video-plans/' + PLAN_ID + '/asset-attach', {

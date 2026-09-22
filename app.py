@@ -526,7 +526,8 @@ CREATE TABLE IF NOT EXISTS video_scripts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL, title TEXT, logline TEXT,
   total_duration_s INTEGER, beats TEXT DEFAULT '[]', aspect TEXT DEFAULT '9:16',
   duration_target INTEGER DEFAULT 15, style TEXT DEFAULT '', status TEXT DEFAULT 'draft',
-  owner_id INTEGER, created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
+  owner_id INTEGER, role_ids TEXT DEFAULT '[]',
+  created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (article_id) REFERENCES articles(id));
 CREATE TABLE IF NOT EXISTS script_assets (
   id INTEGER PRIMARY KEY AUTOINCREMENT, script_id INTEGER NOT NULL, req_key TEXT NOT NULL,
@@ -540,7 +541,8 @@ CREATE TABLE IF NOT EXISTS script_assets (
 CREATE TABLE IF NOT EXISTS storyboard_shots (
   id INTEGER PRIMARY KEY AUTOINCREMENT, script_id INTEGER NOT NULL, shot_idx INTEGER NOT NULL,
   visual TEXT DEFAULT '', line TEXT DEFAULT '', duration_s REAL, shot_type TEXT DEFAULT '',
-  shot_face TEXT DEFAULT 'front', scene_asset_id INTEGER, music_hint TEXT DEFAULT '',
+  shot_face TEXT DEFAULT 'front',
+  scene_asset_id INTEGER REFERENCES script_assets(id) ON DELETE SET NULL, music_hint TEXT DEFAULT '',
   template_hint TEXT DEFAULT '', image_material_id INTEGER, audio_material_id INTEGER,
   status TEXT DEFAULT 'pending',
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
@@ -555,8 +557,9 @@ CREATE TABLE IF NOT EXISTS shot_assets (
   UNIQUE (shot_id, asset_id, role));
 CREATE TABLE IF NOT EXISTS shot_renders (
   id INTEGER PRIMARY KEY AUTOINCREMENT, shot_id INTEGER NOT NULL, kind TEXT DEFAULT 'image',
-  material_id INTEGER, url TEXT DEFAULT '', status TEXT DEFAULT 'queued', params TEXT DEFAULT '{}',
-  error TEXT DEFAULT '', created_at DATETIME DEFAULT (datetime('now','localtime')),
+  material_id INTEGER, url TEXT DEFAULT '', duration_s REAL, status TEXT DEFAULT 'queued',
+  params TEXT DEFAULT '{}', error TEXT DEFAULT '',
+  created_at DATETIME DEFAULT (datetime('now','localtime')),
   FOREIGN KEY (shot_id) REFERENCES storyboard_shots(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_scripts_article   ON video_scripts(article_id);
 CREATE INDEX IF NOT EXISTS idx_scripts_status    ON video_scripts(status);
@@ -577,6 +580,14 @@ def _ensure_video_schema():
     _db = sqlite3.connect(CONTENT_DATABASE)
     try:
         _db.executescript(VIDEO_SCHEMA_SQL)
+        # 增量迁移（幂等）：已存在的表补新列，CREATE TABLE IF NOT EXISTS 不会补
+        _mig = {'video_scripts': [('role_ids', "TEXT DEFAULT '[]'")],
+                'shot_renders': [('duration_s', 'REAL')]}
+        for _t, _cols in _mig.items():
+            _have = {r[1] for r in _db.execute('PRAGMA table_info(%s)' % _t)}
+            for _n, _d in _cols:
+                if _have and _n not in _have:
+                    _db.execute('ALTER TABLE %s ADD COLUMN %s %s' % (_t, _n, _d))
         _db.commit()
     finally:
         _db.close()
@@ -687,8 +698,10 @@ def script_obj_of(db, script_id):
     if not row:
         return {}
     by = {'persona': [], 'scene': [], 'prop': []}
+    _seen = set()
     for a in _assets_rows(db, script_id):
-        if a['kind'] in by:
+        if a['kind'] in by and (a['kind'], a['name']) not in _seen:
+            _seen.add((a['kind'], a['name']))      # 同名多槽位 = 多行 → 剧本列表里只算一个
             by[a['kind']].append({'name': a['name'], 'desc': a['desc']})
     return {'title': row['title'], 'logline': row['logline'],
             'total_duration_s': row['total_duration_s'],
@@ -706,7 +719,8 @@ def plan_payload(db, script_id):
     if not row:
         return None
     d = dict(row)
-    d['role_ids'] = json.dumps(role_ids_of(db, script_id), ensure_ascii=False)
+    _sel = _sjson(row['role_ids'], []) if 'role_ids' in row.keys() else []
+    d['role_ids'] = json.dumps(sorted(set(_sel or []) | set(role_ids_of(db, script_id))), ensure_ascii=False)
     d['script'] = json.dumps(script_obj_of(db, script_id), ensure_ascii=False)
     d['storyboard'] = json.dumps(shots_of(db, script_id), ensure_ascii=False)
     d['asset_requirements'] = asset_reqs_of(db, script_id)
@@ -716,6 +730,179 @@ def plan_payload(db, script_id):
     d['persona_id'] = None
     d['voice_material_id'] = None
     return d
+
+
+# ============================================================
+# 视频剧本（新表结构）写入侧
+# ============================================================
+# ---------- 写入侧（各路由唯一出口；不直接用 SQL 碰表） ----------
+def upsert_asset(db, script_id, kind, name, desc='', slot='front', aspect='1:1', prompt='',
+                 prompt_en='', material_id=None, source=None, status=None, matched_role_id=None,
+                 sort_order=0):
+    """★素材需求唯一写入点★ 按 (script_id, req_key) upsert；未传的字段保持原值（不冲掉已有成果）"""
+    slot = (slot or 'front')
+    key = _req_key(kind, name, slot)
+    ex = db.execute('SELECT id FROM script_assets WHERE script_id=? AND req_key=?', (script_id, key)).fetchone()
+    if ex:
+        sets, vals = [], []
+        for col, val in (('desc', desc), ('aspect', aspect), ('prompt', prompt), ('prompt_en', prompt_en)):
+            if val not in (None, ''):
+                sets.append(col + '=?')
+                vals.append(val)
+        if material_id is not None:
+            sets.append('material_id=?'); vals.append(material_id)
+        if source:
+            sets.append('source=?'); vals.append(source)
+        if status:
+            sets.append('status=?'); vals.append(status)
+        if matched_role_id is not None:
+            sets.append('matched_role_id=?'); vals.append(matched_role_id)
+        if sets:
+            db.execute('UPDATE script_assets SET ' + ', '.join(sets) +
+                       ", updated_at=datetime('now','localtime') WHERE script_id=? AND req_key=?",
+                       vals + [script_id, key])
+        return ex['id']
+    cur = db.execute("""INSERT INTO script_assets
+        (script_id, req_key, kind, name, desc, slot, aspect, prompt, prompt_en, material_id, source,
+         status, matched_role_id, sort_order, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                     (script_id, key, kind, name, desc or '', slot, aspect or '1:1', prompt or '',
+                      prompt_en or '', material_id, source or '',
+                      status or ('chosen' if material_id else 'missing'), matched_role_id, sort_order or 0))
+    return cur.lastrowid
+
+
+def save_assets(db, script_id, reqs, prompts=None):
+    """素材需求 + 提词 → script_assets；一个需求项的多个 slots = 多行（1 行 = 1 槽位）"""
+    pmap = {}
+    for p in (prompts or []):
+        if isinstance(p, dict):
+            pmap[((p.get('kind') or 'persona'), _norm_name(p.get('name')), (p.get('slot') or 'front'))] = p
+    seen, order = [], 0
+    for q in (reqs or []):
+        if not isinstance(q, dict):
+            continue
+        kind = q.get('kind') or 'persona'
+        name = (q.get('name') or '').strip()
+        if not name:
+            continue
+        slots = q.get('slots') if isinstance(q.get('slots'), list) and q.get('slots') else ['front']
+        for slot in slots:
+            p = pmap.get((kind, _norm_name(name), slot)) or {}
+            order += 1
+            upsert_asset(db, script_id, kind, name, desc=q.get('desc') or '', slot=slot,
+                         aspect=p.get('aspect') or q.get('aspect') or '1:1',
+                         prompt=p.get('prompt') or q.get('prompt') or '',
+                         prompt_en=p.get('prompt_en') or q.get('prompt_en') or '',
+                         matched_role_id=q.get('matched_role_id'), sort_order=order)
+            seen.append(_req_key(kind, name, slot))
+    # 重新生成时不留幽灵：未被再次提及、且用户没动过（无素材、未选源）的行才清
+    if seen:
+        # 先解开镜头对需求行的引用（storyboard_shots.scene_asset_id 外键为 NO ACTION，
+        # 直接删被引用行会被 SQLite 拦死；新库 DDL 已是 ON DELETE SET NULL）
+        db.execute('UPDATE storyboard_shots SET scene_asset_id=NULL WHERE scene_asset_id IN'
+                   ' (SELECT id FROM script_assets WHERE script_id=? AND req_key NOT IN (%s))'
+                   % ','.join('?' * len(seen)), [script_id] + seen)
+        db.execute('DELETE FROM script_assets WHERE script_id=? AND req_key NOT IN (%s)'
+                   " AND material_id IS NULL AND (status IS NULL OR status IN ('','missing'))"
+                   % ','.join('?' * len(seen)), [script_id] + seen)
+    return len(seen)
+
+
+def save_script_obj(db, script_id, obj):
+    """剧本对象 → video_scripts 主字段 + 三类素材需求行（persona/scene/prop）"""
+    obj = obj if isinstance(obj, dict) else {}
+    beats = obj.get('beats') if isinstance(obj.get('beats'), list) else []
+    db.execute("""UPDATE video_scripts SET logline=?, beats=?,
+                  total_duration_s=COALESCE(NULLIF(?,''), total_duration_s),
+                  updated_at=datetime('now','localtime') WHERE id=?""",
+               (obj.get('logline') or '', json.dumps(beats, ensure_ascii=False),
+                obj.get('total_duration_s'), script_id))
+    if (obj.get('title') or '').strip():
+        db.execute("UPDATE video_scripts SET title=? WHERE id=? AND (title IS NULL OR title='')",
+                   (obj['title'].strip(), script_id))
+    order = 0
+    for kind, key in (('persona', 'characters'), ('scene', 'scenes'), ('prop', 'props')):
+        for it in (obj.get(key) or []):
+            if isinstance(it, dict) and (it.get('name') or '').strip():
+                order += 1
+                upsert_asset(db, script_id, kind, it['name'], desc=it.get('desc') or '', sort_order=order)
+    return obj
+
+
+def save_shots(db, script_id, shots):
+    """旧 storyboard 数组 → storyboard_shots + shot_assets（characters/scene/props 关联需求行）"""
+    assets = {}
+    for a in _assets_rows(db, script_id):
+        assets[(a['kind'], _norm_name(a['name']))] = a['id']
+
+    def _aid(kind, name):
+        nm = (name or '').strip()
+        if not nm:
+            return None
+        k = (kind, _norm_name(nm))
+        if k not in assets:
+            assets[k] = upsert_asset(db, script_id, kind, nm)
+        return assets[k]
+
+    keep = []
+    for i, sh in enumerate(shots or []):
+        sh = sh if isinstance(sh, dict) else {}
+        idx = int(sh.get('shot_idx')) if isinstance(sh.get('shot_idx'), int) else i
+        scene_id = _aid('scene', sh.get('scene'))
+        ex = db.execute('SELECT id FROM storyboard_shots WHERE script_id=? AND shot_idx=?',
+                        (script_id, idx)).fetchone()
+        vals = (sh.get('visual') or '', sh.get('line') or sh.get('subtitle') or '',
+                sh.get('duration') or sh.get('duration_s'), sh.get('shot_type') or '',
+                sh.get('shot_face') or 'front', sh.get('music_hint') or '',
+                sh.get('template_hint') or '', scene_id)
+        if ex:
+            sid = ex['id']
+            db.execute("""UPDATE storyboard_shots SET visual=?, line=?, duration_s=?, shot_type=?,
+                          shot_face=?, music_hint=?, template_hint=?, scene_asset_id=?,
+                          updated_at=datetime('now','localtime') WHERE id=?""", vals + (sid,))
+            db.execute('DELETE FROM shot_assets WHERE shot_id=?', (sid,))
+        else:
+            sid = db.execute("""INSERT INTO storyboard_shots
+                (script_id, shot_idx, visual, line, duration_s, shot_type, shot_face, music_hint,
+                 template_hint, scene_asset_id, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                             (script_id, idx) + vals).lastrowid
+        keep.append(sid)
+        if scene_id:
+            db.execute("INSERT OR IGNORE INTO shot_assets (shot_id, asset_id, role) VALUES (?,?,'background')",
+                       (sid, scene_id))
+        for nm in (sh.get('characters') or []):
+            aid = _aid('persona', nm)
+            if aid:
+                db.execute("INSERT OR IGNORE INTO shot_assets (shot_id, asset_id, role) VALUES (?,?,'subject')",
+                           (sid, aid))
+        for nm in (sh.get('props') or []):
+            aid = _aid('prop', nm)
+            if aid:
+                db.execute("INSERT OR IGNORE INTO shot_assets (shot_id, asset_id, role) VALUES (?,?,'prop')",
+                           (sid, aid))
+    if keep:
+        db.execute('DELETE FROM storyboard_shots WHERE script_id=? AND id NOT IN (%s)'
+                   % ','.join('?' * len(keep)), [script_id] + keep)
+    return len(keep)
+
+
+def set_shot_render(db, shot_id, kind, material_id=None, url='', duration_s=None,
+                    status='done', params=None, error=''):
+    """镜头产物（图/视频/配音）唯一写入点：按 (shot_id, kind) upsert"""
+    _p = json.dumps(params or {}, ensure_ascii=False)
+    ex = db.execute('SELECT id FROM shot_renders WHERE shot_id=? AND kind=?', (shot_id, kind)).fetchone()
+    if ex:
+        db.execute("""UPDATE shot_renders SET material_id=?, url=?, duration_s=COALESCE(?,duration_s),
+                      status=?, params=?, error=? WHERE id=?""",
+                   (material_id, url, duration_s, status, _p, error, ex['id']))
+        return ex['id']
+    return db.execute("""INSERT INTO shot_renders
+        (shot_id, kind, material_id, url, duration_s, status, params, error, created_at)
+        VALUES (?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                      (shot_id, kind, material_id, url, duration_s, status, _p, error)).lastrowid
+
 
 def _ensure_video_cols():
     """video_clips 的幂等列迁移（该表历史上手工建的；video_plans 已废弃，见 _ensure_video_schema）"""
@@ -1616,18 +1803,16 @@ def api_get_video_plan(plan_id):
 @app.route('/api/video-plans/<int:plan_id>/storyboard', methods=['POST'])
 def api_gen_storyboard(plan_id):
     db = get_content_db()
-    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row: return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
     if _g: return _g
-    # 输入 = 剧本（video_plans.script 里的剧本 JSON）；还没生成剧本 → 提示先点「AI 生成剧本」
-    _script = ((row["script"] or "") if "script" in row.keys() else "").strip()
-    if not _script.startswith("{"):
+    # 输入 = 剧本（新表组装：video_scripts + script_assets）；还没生成剧本 → 提示先点「AI 生成剧本」
+    _sobj = script_obj_of(db, plan_id)
+    _script = json.dumps(_sobj, ensure_ascii=False)
+    if not _sobj or not (_sobj.get("beats") or _sobj.get("characters") or _sobj.get("scenes")):
         return jsonify({"error": "请先生成剧本（点🤖 AI 生成剧本）"}), 400
-    try:
-        _rids = json.loads((row["role_ids"] if "role_ids" in row.keys() else "") or "[]")
-    except Exception:
-        _rids = []
+    _rids = _sjson(row["role_ids"], []) if "role_ids" in row.keys() else []
     _roles = _roles_of(_rids)
     _assets = _role_assets_text(_roles) or "（素材包为空：镜头里的素材只能用剧本里已列出的人物/场景/道具）"
     try:
@@ -1655,21 +1840,12 @@ def api_gen_storyboard(plan_id):
     _has_prompts = isinstance(_prompts, list)    # → 只有真的带该字段才覆盖（别冲掉「素材」Tab 的成果）
     _reqs = _reqs if _has_reqs else []
     _prompts = _prompts if _has_prompts else []
-    # script 列归「剧本」管（/api/video-plans/<id>/script）；已是剧本 JSON 时不覆盖
-    _cur_script = (row["script"] or "") if "script" in row.keys() else ""
-    _cols, _vals = [], []
-    if not _cur_script.strip().startswith("{"):
-        _cols.append("script=?")
-        _vals.append("\n".join(lines))
-    _cols += ["storyboard=?", "status='storyboard_done'", "total_duration_s=?",
-              "updated_at=datetime('now','localtime')"]
-    _vals += [json.dumps(shots, ensure_ascii=False), total]
-    if _has_reqs:
-        _cols.append("asset_reqs=?"); _vals.append(json.dumps(_reqs, ensure_ascii=False))
-    if _has_prompts:
-        _cols.append("asset_prompts=?"); _vals.append(json.dumps(_prompts, ensure_ascii=False))
-    _vals.append(plan_id)
-    db.execute('UPDATE video_plans SET ' + ", ".join(_cols) + " WHERE id=?", _vals)
+    # 落库：分镜 → storyboard_shots + shot_assets；素材需求/提词 → script_assets
+    save_shots(db, plan_id, shots)
+    if _has_reqs or _has_prompts:
+        save_assets(db, plan_id, _reqs, _prompts)
+    db.execute("UPDATE video_scripts SET status='storyboard_done', total_duration_s=?,"
+               " updated_at=datetime('now','localtime') WHERE id=?", (total, plan_id))
     db.commit(); db.close()
     _resp = {"ok": True, "shots": shots, "overview": overview, "total_duration_s": total}
     if _has_reqs:
@@ -1680,11 +1856,11 @@ def api_gen_storyboard(plan_id):
 
 @app.route('/api/video-plans/<int:plan_id>/script', methods=['POST'])
 def api_gen_script(plan_id):
-    """AI 生成剧本（characters/scenes/props/beats）→ 落库 video_plans.script + status=scripted"""
+    """AI 生成剧本（characters/scenes/props/beats）→ 落库 video_scripts + script_assets，status=scripted"""
     if not current_user():
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
@@ -1701,9 +1877,9 @@ def api_gen_script(plan_id):
         return jsonify({"error": str(e)[:200]}), 500      # 失败不写库
     _st = (row["status"] or "draft")
     _new_st = _st if _st in ("scripted", "storyboard_done") else "scripted"   # status 只前进不倒退
-    db.execute("UPDATE video_plans SET script=?, status=?,"
-               "updated_at=datetime('now','localtime') WHERE id=?",
-               (json.dumps(script, ensure_ascii=False), _new_st, plan_id))
+    save_script_obj(db, plan_id, script)          # → video_scripts 主字段 + script_assets 需求行
+    db.execute("UPDATE video_scripts SET status=?, updated_at=datetime('now','localtime') WHERE id=?",
+               (_new_st, plan_id))
     db.commit(); db.close()
     return jsonify({"ok": True, "script": script})
 
@@ -1743,17 +1919,14 @@ def api_gen_asset_reqs(plan_id):
     if not u:
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
     if _g:
         return _g
-    try:
-        _sobj = json.loads(row["script"] or "")
-    except Exception:
-        _sobj = None
-    if not isinstance(_sobj, dict) or not _sobj:
+    _sobj = script_obj_of(db, plan_id)
+    if not _sobj:
         return jsonify({"error": "请先生成剧本"}), 400
     # 现有角色库（admin 全看，其他只看自己）
     if _is_admin(u):
@@ -1774,9 +1947,7 @@ def api_gen_asset_reqs(plan_id):
         q["matched_role_id"] = (m.get("id") if m else None)
         q["matched_role_name"] = (m.get("name") if m else None)
     prompts = out.get("asset_prompts") or []
-    db.execute("UPDATE video_plans SET asset_reqs=?, asset_prompts=?,"
-               "updated_at=datetime('now','localtime') WHERE id=?",
-               (json.dumps(reqs, ensure_ascii=False), json.dumps(prompts, ensure_ascii=False), plan_id))
+    save_assets(db, plan_id, reqs, prompts)       # → script_assets（1 行 = 1 槽位）
     db.commit(); db.close()
     return jsonify({"ok": True, "asset_requirements": reqs, "asset_prompts": prompts})
 
@@ -1803,23 +1974,40 @@ def api_update_video_plan(plan_id):
         _d0["role_ids"] = json.dumps(_keep, ensure_ascii=False)
     data = request.json or {}
     db = get_content_db()
-    _row = db.execute('SELECT article_id FROM video_plans WHERE id=?', (plan_id,)).fetchone()
+    _row = db.execute('SELECT article_id FROM video_scripts WHERE id=?', (plan_id,)).fetchone()
     if not _row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(_row['article_id'])
     if _g:
         return _g
     sets, vals = [], []
-    for f in ('script', 'storyboard', 'status', 'title', 'role_ids',
-              'persona_id', 'voice_material_id', 'aspect', 'duration_target'):
+    for f in ('status', 'title', 'role_ids', 'aspect', 'duration_target'):
         if f in data:
+            _v = data[f]
+            if f == 'role_ids' and not isinstance(_v, str):
+                _v = json.dumps(_v, ensure_ascii=False)
             sets.append(f + '=?')
-            vals.append(data[f])
-    if not sets:
+            vals.append(_v)
+    if 'script' in data:                     # 剧本对象 → video_scripts 主字段 + 需求行
+        try:
+            _so = json.loads(data['script']) if isinstance(data['script'], str) else data['script']
+        except Exception:
+            _so = None
+        if isinstance(_so, dict):
+            save_script_obj(db, plan_id, _so)
+    if 'storyboard' in data:                 # 分镜数组 → storyboard_shots + shot_assets
+        try:
+            _sh = json.loads(data['storyboard']) if isinstance(data['storyboard'], str) else data['storyboard']
+        except Exception:
+            _sh = None
+        if isinstance(_sh, list):
+            save_shots(db, plan_id, _sh)
+    # 旧列 persona_id / voice_material_id 已废弃：配音按镜头存 storyboard_shots + shot_renders
+    if not (sets or 'script' in data or 'storyboard' in data):
         return jsonify({"error": "无更新字段"}), 400
-    sets.append("updated_at=datetime('now','localtime')")
-    vals.append(plan_id)
-    db.execute('UPDATE video_plans SET ' + ', '.join(sets) + ' WHERE id=?', vals)
+    if sets:
+        db.execute('UPDATE video_scripts SET ' + ', '.join(sets) +
+                   ", updated_at=datetime('now','localtime') WHERE id=?", vals + [plan_id])
     db.commit()
     return jsonify({"ok": True})
 
@@ -2726,7 +2914,7 @@ def api_plan_voice_list(plan_id):
     if not current_user():
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
@@ -2734,7 +2922,11 @@ def api_plan_voice_list(plan_id):
         return _g
     mdb = materialstore._conn()
     clips = []
-    for c in db.execute("SELECT * FROM video_clips WHERE plan_id=? ORDER BY shot_idx", (plan_id,)).fetchall():
+    for c in db.execute("""SELECT s.shot_idx AS shot_idx, s.audio_material_id AS audio_material_id,
+                                  s.status AS status, r.duration_s AS duration_s
+                           FROM storyboard_shots s
+                           LEFT JOIN shot_renders r ON r.shot_id = s.id AND r.kind = 'audio'
+                           WHERE s.script_id=? ORDER BY s.shot_idx""", (plan_id,)).fetchall():
         url, mid = "", c["audio_material_id"]
         if mid:
             try:
@@ -2754,7 +2946,7 @@ def api_plan_voice_gen(plan_id):
     if not current_user():
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
@@ -2764,16 +2956,7 @@ def api_plan_voice_gen(plan_id):
     voice = (d.get("voice") or "").strip() or TTS_VOICES[0][0]
     if voice not in [v for v, _ in TTS_VOICES]:
         return jsonify({"error": "不支持的声音"}), 400
-    try:
-        _o = json.loads(row["storyboard"] or "{}")
-    except Exception:
-        _o = {}
-    if isinstance(_o, dict):
-        shots = _o.get("shots") or []
-    elif isinstance(_o, list):
-        shots = _o
-    else:
-        shots = []
+    shots = shots_of(db, plan_id)          # 分镜来自 storyboard_shots（新表，不再是 JSON 列）
     if not shots:
         return jsonify({"error": "请先生成分镜"}), 400
     want = d.get("shot_idx")
@@ -2819,13 +3002,20 @@ def api_plan_voice_gen(plan_id):
                 mid = None
         except Exception:
             mid = None
-        ex = db.execute("SELECT id FROM video_clips WHERE plan_id=? AND shot_idx=?", (plan_id, i)).fetchone()
+        # 配音落到镜头：storyboard_shots.audio_material_id + shot_renders(kind='audio')
+        ex = db.execute("SELECT id FROM storyboard_shots WHERE script_id=? AND shot_idx=?", (plan_id, i)).fetchone()
         if ex:
-            db.execute("UPDATE video_clips SET line=?, visual=?, audio_material_id=?, duration_s=? WHERE id=?",
-                       (line, sh.get("visual_prompt") or "", mid, dur, ex["id"]))
+            sid = ex["id"]
+            db.execute("UPDATE storyboard_shots SET line=?,"
+                       " visual=COALESCE(NULLIF(visual,''),?), audio_material_id=?, status='voice_done',"
+                       " updated_at=datetime('now','localtime') WHERE id=?",
+                       (line, sh.get("visual_prompt") or "", mid, sid))
         else:
-            db.execute("INSERT INTO video_clips (plan_id, shot_idx, line, visual, audio_material_id, duration_s, status, created_at) VALUES (?,?,?,?,?,?,'voice_done',datetime('now','localtime'))",
-                       (plan_id, i, line, sh.get("visual_prompt") or "", mid, dur))
+            sid = db.execute("INSERT INTO storyboard_shots (script_id, shot_idx, line, visual,"
+                             " audio_material_id, status, created_at)"
+                             " VALUES (?,?,?,?,?,'voice_done',datetime('now','localtime'))",
+                             (plan_id, i, line, sh.get("visual_prompt") or "", mid)).lastrowid
+        set_shot_render(db, sid, "audio", material_id=mid, url=rel, duration_s=dur, status="done")
         done.append({"shot_idx": i, "material_id": mid, "duration_s": dur, "url": rel})
     db.commit()
     db.close()
@@ -2841,7 +3031,7 @@ def api_plan_asset_attach(plan_id):
     if not u:
         return jsonify({"error": "未登录"}), 401
     db = get_content_db()
-    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    row = _script_row(db, plan_id)
     if not row:
         return jsonify({"error": "不存在"}), 404
     _g = _guard_article(row["article_id"])
@@ -2889,10 +3079,27 @@ def api_plan_asset_attach(plan_id):
             _rids = []
         if int(rid) not in _rids:
             _rids.append(int(rid))
-            db.execute("UPDATE video_plans SET role_ids=?, updated_at=datetime('now','localtime') WHERE id=?",
+            db.execute("UPDATE video_scripts SET role_ids=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (json.dumps(_rids, ensure_ascii=False), plan_id))
     db.execute("UPDATE roles SET " + col + "=?, updated_at=datetime('now','localtime') WHERE id=?",
                (int(mid), int(rid)))
+    # 桥接需求行：素材库里选的 / AI 出的图，同步挂到对应素材需求项（素材 Tab 的唯一入口）
+    try:
+        _kind = (d.get("kind") or "persona").strip()
+        _name = (d.get("name") or "").strip()[:80]
+        _rq = None
+        if d.get("req_key"):
+            _rq = db.execute("SELECT id FROM script_assets WHERE script_id=? AND req_key=?",
+                             (plan_id, d["req_key"])).fetchone()
+        if not _rq and _name:
+            _rq = db.execute("SELECT id FROM script_assets WHERE script_id=? AND kind=? AND name=? AND slot=?",
+                             (plan_id, _kind, _name, slot)).fetchone()
+        if _rq:
+            db.execute("UPDATE script_assets SET material_id=?, source=?, status='chosen',"
+                       " updated_at=datetime('now','localtime') WHERE id=?",
+                       (int(mid), d.get("source") or "ai", _rq["id"]))
+    except Exception:
+        pass
     db.commit()
     db.close()
     return jsonify({"ok": True, "role_id": rid, "created": created, "slot": slot, "material_id": int(mid)})

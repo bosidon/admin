@@ -3055,7 +3055,8 @@ def api_plan_shot_frame(plan_id):
     cfg = get_comfy_config()
     if not instance_uuids() or not cfg.get('comfy_api_token'):
         return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
-    payload = {"plan_id": plan_id, "targets": targets, "params": {}}
+    payload = {"plan_id": plan_id, "targets": targets,
+               "params": {"enc": (body.get("enc") or "auto")}}
     jid, reused = jobstore.DISPATCHER.enqueue('shotframe', row["article_id"], payload, len(targets),
                                              priority=10, owner=user_label(u), owner_id=u.get('id'))
     return jsonify({"ok": True, "job_id": jid, "reused": reused, "targets": len(targets),

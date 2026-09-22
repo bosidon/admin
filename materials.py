@@ -86,6 +86,29 @@ STITCH_RES = [1080, 1440, 2048]
 STITCH_PADS = [0, 10, 20, 40]
 STITCH_MAX = 9                 # 长图最多 9 张
 
+# 图生图 / 首尾帧的文本编码节点：槽位 = 主体图 1 + 参考图 N（节点能力，不许越界）
+EDIT_ENCS = {
+    "core": {"node": "TextEncodeQwenImageEditPlus",          "slots": 3, "ref_cap": 2,
+             "names": ["image1", "image2", "image3"]},
+    # lrz5 有 5 个槽，但实测喂满 5 张（1 主体 + 4 参考）会出点块状伪影、场景与人数全丢
+    # → 参考额度按实测封在 3（即总输入 4 张），槽位够不等于能用
+    "lrz5": {"node": "TextEncodeQwenImageEditPlus_lrzjason",  "slots": 5, "ref_cap": 3,
+             "names": ["image1", "image2", "image3", "image4", "image5"]},
+    # 注：TextEncodeQwenImageEditPlusAdvance_lrzjason 看着有 6 个图槽，实际源码把 vae_images 硬解包成 3 个输出
+    #     （nodes.py: o_image1,o_image2,o_image3 = vae_images）→ 喂第 4 张就报
+    #     "too many values to unpack (expected 3)"（已真机复现）。它不是 6 槽，只是 3 槽 + 摆位选择 → 不采用。
+}
+
+
+def edit_enc(enc="auto", n=0):
+    """选文本编码节点：core(3 槽) / lrz5(5 槽) / lrz6(Advance 6 槽)。
+    auto = 输入图 ≤3 张用官方核心节点，>3 张用 5 槽变体；节点不存在时由实例能力校验（wf_needs）拦下"""
+    mode = (enc or "auto").strip().lower()
+    if mode not in EDIT_ENCS:
+        mode = "core" if int(n or 0) <= 3 else "lrz5"
+    d = EDIT_ENCS[mode]
+    return mode, d["node"], d["slots"], list(d["names"]), d["ref_cap"]
+
 # Qwen-Image-Edit 默认件（可用 settings 的 comfy_edit_unet / comfy_edit_lora / comfy_edit_steps 覆盖）
 EDIT_UNET_DEFAULT = "qwen_image_edit_2511_fp8_e4m3fn.safetensors"
 EDIT_LORA_DEFAULT = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
@@ -668,9 +691,10 @@ def build_cutout_wf(img, model="RMBG-2.0", background="Alpha", color="#FFFFFF",
 
 
 def build_edit_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="mat_edit",
-                  use_angle_lora=False, style=""):
+                  use_angle_lora=False, style="", enc="auto"):
     """图生图（Qwen-Image-Edit 2511 + Lightning 4步）：
-    LoadImage×N → TextEncodeQwenImageEditPlus(可带参考图) → ReferenceLatent → KSampler → SaveImage"""
+    LoadImage×N → 文本编码节点(带参考图) → ReferenceLatent → KSampler → SaveImage
+    enc = core(3 槽) / lrz5(5 槽) / lrz6(6 槽) / auto（按输入图数自动挑）"""
     cfg = cfg or {}
     unet = cfg.get("comfy_edit_unet") or EDIT_UNET_DEFAULT
     lora = cfg.get("comfy_edit_lora") or EDIT_LORA_DEFAULT
@@ -714,8 +738,9 @@ def build_edit_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="mat_edit",
                                    "strength_clip": 1.0, "model": model_ref, "clip": clip_ref}}
         model_ref, clip_ref = [str(nid), 0], [str(nid), 1]
         nid += 1
+    _enc_mode, _enc_node, _enc_slots, _enc_names, _enc_refcap = edit_enc(enc, len(imgs or []))
     img_refs = []
-    for nm in (imgs or [])[:3]:
+    for nm in (imgs or [])[:_enc_slots]:
         wf[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": nm}}
         img_refs.append([str(nid), 0])
         nid += 1
@@ -725,13 +750,15 @@ def build_edit_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="mat_edit",
                     "inputs": {"pixels": img_refs[0], "vae": ["3", 0]}}
     lat_ref = [str(nid), 0]
     nid += 1
-    pos = {"class_type": "TextEncodeQwenImageEditPlus",
+    pos = {"class_type": _enc_node,
            "inputs": {"clip": clip_ref, "prompt": prompt, "vae": ["3", 0]}}
-    neg_in = {"class_type": "TextEncodeQwenImageEditPlus",
+    neg_in = {"class_type": _enc_node,
               "inputs": {"clip": clip_ref, "prompt": neg or "", "vae": ["3", 0]}}
     for i, ref in enumerate(img_refs):
-        pos["inputs"]["image%d" % (i + 1)] = ref
-        neg_in["inputs"]["image%d" % (i + 1)] = ref
+        if i >= len(_enc_names):
+            break
+        pos["inputs"][_enc_names[i]] = ref          # lrz6 的槽位名不是 imageN，按登记表映射
+        neg_in["inputs"][_enc_names[i]] = ref
     wf[str(nid)] = pos
     pos_id = str(nid)
     nid += 1
@@ -808,7 +835,8 @@ def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat
                              neg=params.get("negative") or "", seed=seed, cfg=cfg,
                              prefix=prefix,
                              use_angle_lora=(params.get("mode") == "angle"),
-                             style=params.get("style") or "")
+                             style=params.get("style") or "",
+                             enc=params.get("enc") or "auto")
     if action == "stitch":
         return build_stitch_wf(imgs, mode=params.get("mode") or "grid3",
                                res=params.get("res") or 1080,

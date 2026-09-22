@@ -2694,10 +2694,10 @@ def run_txt2img_job(job):
     _log(jid, "文生图完成 → " + made["name"])
 
 
-def _frame_target_rows(conn, plan_id, targets):
+def _frame_target_rows(conn, plan_id, targets, enc="auto"):
     """解析首/尾帧出图目标 → [{shot_id, idx, frame, prompt, main, refs, seed, aspect, skip}]
     主图决定产物画幅：首帧 = 该镜背景图（无则第 1 张人物图）；尾帧 = 该镜首帧图
-    参考图最多 2 张（图生图总输入上限 3 = 1 主体 + 2 参考）"""
+    参考图上限 = 文本编码节点槽数 - 1（core 2 / lrz5 4 / lrz6 5）；超额度时把人物拼成 1 张参考图"""
     import materials as mat
     conn.row_factory = sqlite3.Row
     plan = conn.execute("SELECT * FROM video_scripts WHERE id=?", (plan_id,)).fetchone()
@@ -2742,21 +2742,25 @@ def _frame_target_rows(conn, plan_id, targets):
         people = [p for p in [_path(r.get("material_id")) for r in subs] if p]
         propp = [p for p in [_path(r.get("material_id")) for r in props] if p]
 
+        _enc_mode, _enc_node, _enc_slots, _enc_names, _enc_ref_cap = mat.edit_enc(enc)
+        _cap = max(0, _enc_ref_cap)            # 参考图额度（core 2 / lrz5 3，按节点实测封顶）
+
         def _refs_for(main_p):
-            """参考图上限 2 张（节点 TextEncodeQwenImageEditPlus 只有 image1-3 = 主体 1 + 参考 2）：
-            人物 ≥2 个时拼成 1 张横排参考图，多出的额度给关键道具"""
-            others = [p for p in people if p != main_p]
+            """参考图额度 = 编码节点槽数 - 1（core 2 / lrz5 4 / lrz6 5）：每个出场人物各占 1 槽；
+            人物数超额度时才拼成 1 张横排参考图，剩下的额度留给关键道具"""
+            people_ = [p for p in people if p != main_p]
+            props_ = [p for p in propp if p != main_p]
             out = []
-            if len(others) >= 2:
+            if people_ and len(people_) > _cap:
                 try:
-                    out.append(mat.stitch_refs(others[:4], str(Path(tempfile.gettempdir()) /
+                    out.append(mat.stitch_refs(people_[:6], str(Path(tempfile.gettempdir()) /
                                ("hermes_refs_%s_%02d_%s.png" % (plan_id, idx, frame)))))
+                    people_ = []
                 except Exception:
-                    out.extend(others)
-            else:
-                out.extend(others)
-            out.extend([p for p in propp if p != main_p])
-            return [p for p in out if p][:2]
+                    pass
+            out.extend(people_)
+            out.extend(props_)
+            return [p for p in out if p][:_cap]
 
         skip, main_p, refs = "", "", []
         if frame == "end":
@@ -2795,7 +2799,8 @@ def run_shotframe_job(job):
     if not instance_uuids() or not cfg.get("comfy_api_token"):
         raise RuntimeError("未配置实例池 / Token，请去「设置」页填写")
     conn = _content_db()
-    items, article_id = _frame_target_rows(conn, plan_id, targets)
+    _enc = ((opts.get("params") or {}).get("enc") or opts.get("edit_node") or "auto")
+    items, article_id = _frame_target_rows(conn, plan_id, targets, enc=_enc)
     runnable = [x for x in items if not x["skip"]]
     for x in items:
         if x["skip"]:
@@ -2824,14 +2829,15 @@ def run_shotframe_job(job):
                 if jobstore.canceled(jid):
                     raise RuntimeError("已取消")
                 label = "%d 镜·%s" % (it["idx"] + 1, "尾帧" if it["frame"] == "end" else "首帧")
-                _log(jid, "%s：出图（主体图 %s / 参考图 %d 张）" % (label, it["main"].rsplit("/", 1)[-1], len(it["refs"])))
+                _log(jid, "%s：出图（编码 %s / 主体图 %s / 参考图 %d 张）"
+                     % (label, _enc, it["main"].rsplit("/", 1)[-1], len(it["refs"])))
                 # 裁切后的源图只用于上传 ComfyUI，落临时目录（不要写进素材目录）
                 src = mat.fit_cover(it["main"], str(Path(tempfile.gettempdir()) /
                                      ("hermes_shotframe_%s_%02d_%s.png" % (jid, it["idx"], it["frame"]))), w, h)
                 imgs = [comfy_upload(base, src)]
                 for rp in it["refs"]:
                     imgs.append(comfy_upload(base, rp))
-                wf = mat.build_wf("edit", imgs, {"negative": neg}, cfg=cfg,
+                wf = mat.build_wf("edit", imgs, {"negative": neg, "enc": _enc}, cfg=cfg,
                                   prompt=it["prompt"], seed=it["seed"], prefix="shot_frame")
                 data = _run_wf_one(base, wf, logger=lambda m: _log(jid, m))
                 for _tmp in [src] + list(it["refs"]):      # 裁切图/参考拼图都是用后即弃的临时件

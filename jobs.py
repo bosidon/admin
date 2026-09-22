@@ -10,6 +10,7 @@
 - 启动自愈：recover_orphans() 把上次残留的 running/queued 标成 interrupted
 """
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -87,6 +88,15 @@ def init():
         ON jobs(kind) WHERE status = 'running' AND kind = 'images';
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_article ON jobs(article_id, created_at);
+    CREATE TABLE IF NOT EXISTS instance_caps (
+        uuid TEXT PRIMARY KEY,               -- 实例 uuid（AutoDL）
+        base TEXT DEFAULT '',                -- ComfyUI 地址（记录用）
+        nodes TEXT DEFAULT '[]',             -- 实况：/object_info 的 class_type 全集
+        models TEXT DEFAULT '{}',            -- 实况：unet/clip/vae/lora/ckpt 枚举
+        missing_nodes TEXT DEFAULT '[]',     -- 提交失败得知缺的节点（黑名单，先避开）
+        checked_at TEXT,                     -- 建档时间（空 = 未建档）
+        fail_count INTEGER DEFAULT 0
+    );
     """)
     # 轻量列迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，新增字段要显式 ALTER
     cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
@@ -104,6 +114,100 @@ def init():
             c.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (col, ddl))
     c.commit()
     c.close()
+
+
+
+# ------------------------------------------------------------
+# 实例能力档案：出图机的 ComfyUI 环境不一样（各台装的节点/模型不同）
+#   判断顺序：missing_nodes 命中 → 确定不行；nodes 有实况 → 求包含；无实况 → 未知
+# ------------------------------------------------------------
+def caps_get(uuid):
+    """读档案；无档案返回 None（= 未知，需要开机后自检建档）"""
+    c = _conn()
+    try:
+        r = c.execute("SELECT * FROM instance_caps WHERE uuid=?", (str(uuid or ""),)).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        for k in ("nodes", "missing_nodes"):
+            try:
+                d[k] = json.loads(d.get(k) or "[]")
+            except Exception:
+                d[k] = []
+        try:
+            d["models"] = json.loads(d.get("models") or "{}")
+        except Exception:
+            d["models"] = {}
+        return d
+    finally:
+        c.close()
+
+
+def caps_upsert(uuid, base="", nodes=None, models=None):
+    """写档案。nodes 有实况 → 覆盖并把 missing_nodes 清空（实况优先于历史失败）"""
+    uuid = str(uuid or "")
+    if not uuid:
+        return
+    c = _conn()
+    try:
+        with _LOCK:
+            c.execute("INSERT OR IGNORE INTO instance_caps (uuid) VALUES (?)", (uuid,))
+            if nodes is not None:
+                c.execute("UPDATE instance_caps SET base=?, nodes=?, models=?, missing_nodes='[]',"
+                          " checked_at=?, fail_count=0 WHERE uuid=?",
+                          (base or "", json.dumps(sorted(set(nodes)), ensure_ascii=False),
+                           json.dumps(models or {}, ensure_ascii=False), _now(), uuid))
+            else:
+                c.execute("UPDATE instance_caps SET base=?, checked_at=? WHERE uuid=?",
+                          (base or "", _now(), uuid))
+            c.commit()
+    finally:
+        c.close()
+
+
+def caps_missing(uuid, nodes):
+    """提交失败得知该实例缺哪些节点 → 记黑名单（实况 nodes 里同时剔除），下次直接跳过"""
+    uuid = str(uuid or "")
+    nodes = [str(n) for n in (nodes or []) if str(n or "").strip()]
+    if not uuid or not nodes:
+        return
+    c = _conn()
+    try:
+        with _LOCK:
+            c.execute("INSERT OR IGNORE INTO instance_caps (uuid) VALUES (?)", (uuid,))
+            r = c.execute("SELECT nodes, missing_nodes FROM instance_caps WHERE uuid=?", (uuid,)).fetchone()
+            def _ld(v):
+                try:
+                    return json.loads(v or "[]")
+                except Exception:
+                    return []
+            have = [n for n in _ld(r["nodes"] if r else "[]") if n not in nodes]
+            miss = sorted(set(_ld(r["missing_nodes"] if r else "[]")) | set(nodes))
+            c.execute("UPDATE instance_caps SET nodes=?, missing_nodes=?, checked_at=?,"
+                      " fail_count=IFNULL(fail_count,0)+1 WHERE uuid=?",
+                      (json.dumps(have, ensure_ascii=False), json.dumps(miss, ensure_ascii=False),
+                       _now(), uuid))
+            c.commit()
+    finally:
+        c.close()
+
+
+def caps_ok(uuid, need_nodes):
+    """这台机器能满足任务需要的节点吗？
+    True 满足 / False 确定不满足（跳过，不开机）/ None 未知（无档案 → 允许开机后自检）
+    模型不进判据：实例间有 fit_name 同名不同目录的适配逻辑，硬判会误杀"""
+    need = {str(n) for n in (need_nodes or []) if n}
+    if not need:
+        return True
+    d = caps_get(uuid)
+    if not d or not d.get("checked_at"):
+        return None
+    if need & set(d.get("missing_nodes") or []):
+        return False
+    have = set(d.get("nodes") or [])
+    if not have:
+        return None
+    return need <= have
 
 
 def _now():
@@ -409,10 +513,28 @@ def canceled(job_id):
     return bool(j) and (j["status"] == "canceled" or "取消中" in (j.get("error") or ""))
 
 
+_MISS_NODE_RE = re.compile(r"Node '([^']+)' not found")
+
+
+def _caps_feedback(job, msg):
+    """提交失败信息里带「Node 'X' not found」→ 把 X 记进该实例档案（黑名单）
+    下次选机器时 caps_ok() 直接跳过这台，不会再第二次踩同一个坑"""
+    try:
+        uuid = str((get(job.get("id")) or {}).get("host") or job.get("host") or "")
+        m = _MISS_NODE_RE.search(msg or "")
+        if uuid and m:
+            caps_missing(uuid, [m.group(1)])
+            log(job["id"], "📝 已记录：实例 %s 缺节点 %s（后续任务自动跳过该机器）" % (uuid, m.group(1)))
+    except Exception:
+        pass
+
+
 def _is_infra_error(msg):
     """基础设施类错误（实例离线/开机失败/地址拿不到）→ 可自动重排队；代码类错误不重试"""
     kws = ("实例已离线", "等待空闲实例超时", "未就绪", "拿不到 ComfyUI 地址", "无库存",
-           "开机失败", "Connection", "Max retries", "timed out", "请求超时", "生成超时")
+           "开机失败", "Connection", "Max retries", "timed out", "请求超时", "生成超时",
+           # 该实例缺节点/模型 = 环境问题（换一台机器就能跑）→ 允许自动换台重排队
+           "missing_node_type", "not found", "未安装")
     return any(k in msg for k in kws)
 
 
@@ -547,6 +669,7 @@ class Dispatcher:
         except Exception as e:
             msg = str(e)[:300] or "未知错误"
             cur = get(jid) or {}
+            _caps_feedback(job, msg)              # 缺节点类失败 → 写进实例档案，后续换台绕开
             if cur.get("status") != "running":
                 return
             if _is_infra_error(msg):

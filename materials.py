@@ -701,6 +701,43 @@ def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat
     raise ValueError("未知的加工类型：%s" % action)
 
 
+_MODEL_FIELDS = ("unet_name", "clip_name", "vae_name", "lora_name", "ckpt_name", "model_name")
+
+
+def wf_needs(wf):
+    """从一份 workflow 里取出「要实例具备什么」：节点类型集合 + 模型名集合
+    节点是硬判据（没装就是 HTTP 400）；模型只用于日志告警 —— 实例间有 fit_name
+    「同名文件在不同子目录」的适配逻辑，硬判会把本来能跑的机器误杀"""
+    nodes, models = set(), set()
+    for n in (wf or {}).values():
+        if not isinstance(n, dict):
+            continue
+        if n.get("class_type"):
+            nodes.add(str(n["class_type"]))
+        for k, v in (n.get("inputs") or {}).items():
+            if k in _MODEL_FIELDS and isinstance(v, str) and v.strip():
+                models.add(v.strip())
+    return {"nodes": sorted(nodes), "models": sorted(models)}
+
+
+def needs_for(action, params=None, cfg=None, prompt="", n_imgs=1):
+    """该加工动作需要的节点/模型（用占位图名调同一个 build_wf：纯内存、不联网、不上机器）"""
+    params = params or {}
+    n = max(1, int(n_imgs or 1))
+    tries = [n] + ([9, 4, 2] if action == "stitch" else [])   # 拼版对张数有硬要求（九宫格=9）
+    last = None
+    for cnt in tries:
+        imgs = ["__need_check_%d__.png" % i for i in range(cnt)]
+        try:
+            wf = build_wf(action, imgs, params=params, cfg=cfg or {},
+                          prompt=prompt or params.get("prompt") or "", seed=0,
+                          prefix="__need_check__")
+            return wf_needs(wf)
+        except Exception as e:            # 张数不符 → 换一个张数再试
+            last = e
+    raise last or ValueError("推导失败")
+
+
 def make_prompt(action, params):
     """编辑：把用户输入套进子模式模板，并追加「风格化」指令；拼版/抠图无需提示词"""
     params = params or {}

@@ -751,18 +751,91 @@ def _slot_drop():
             _SLOT["n"] -= 1
 
 
-def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300):
+# 环境自检：每台最多验一次（验完就建档：合格 → 用；不合格 → 下次按档案直接跳过）
+# 收敛靠档案，不靠固定台数上限 —— 固定上限会让池内靠后的机器永远验不到
+
+
+def needs_for_job(kind, payload=None):
+    """该任务要求实例具备什么（节点为主）—— 用占位参数调同一份 workflow 构建函数，纯内存
+    推导不出来就返回 None = 不做环境判断，退回旧行为（只按池序试）"""
+    try:
+        import materials as mat
+        payload = payload or {}
+        params = payload.get("params") or {}
+        cfg = get_comfy_config()
+        if kind in ("cutout", "edit", "stitch"):
+            return mat.needs_for(kind, params=params, cfg=cfg,
+                                 prompt=params.get("prompt") or params.get("instruction") or "",
+                                 n_imgs=len(payload.get("ids") or []) or 1)
+        # images / txt2img：同一条出图链路（build_workflow）
+        return mat.wf_needs(build_workflow("need_check", 768, 1024, 0, cfg, "__need_check__", ""))
+    except Exception:
+        return None
+
+
+def check_instance_needs(uuid, base, need_nodes):
+    """拉一次该实例 /object_info：写能力档案 + 判断节点是否齐全
+    返回 (True 齐全 / False 缺节点 / None 连不上无法判断)"""
+    try:
+        r = requests.get(base.rstrip("/") + "/object_info", timeout=20)
+        oi = r.json()
+        if not isinstance(oi, dict) or not oi:
+            return None, "object_info 内容异常"
+    except Exception as e:
+        return None, "连不上 ComfyUI（%s）" % str(e)[:50]
+    try:
+        jobstore.caps_upsert(uuid, base, list(oi.keys()), _enums_from_oi(oi))
+    except Exception:
+        pass
+    miss = [n for n in (need_nodes or []) if n not in oi]
+    if miss:
+        return False, "缺节点 " + ",".join(miss[:5])
+    return True, ""
+
+
+def _self_check_after_boot(uuid, need_nodes, log, wait_s=120):
+    """开机后自检：等 ComfyUI 端口起来（最多 wait_s 秒）再查节点是否齐全
+    返回 (True 齐全 / False 确定缺 / None 判断不了 → 按可用处理，不阻断）"""
+    base = base_for(uuid, logger=lambda m: None)
+    if not base:
+        return None, "拿不到 ComfyUI 地址"
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        state, why = check_instance_needs(uuid, base, need_nodes)
+        if state is None:
+            time.sleep(5)
+            continue
+        return state, why
+    return None, "ComfyUI %d 秒内未响应 /object_info" % wait_s
+
+
+def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=None):
     """挑一台「空闲且可用」的实例并锁住（返回 uuid, lock）
     顺序：池内正在 running 的优先（秒级可用）→ 其余按池序尝试开机（无库存重试）
     全忙/开不起来 → 等待（可被取消）；调用方负责 lock.release() + _slot_drop()"""
-    t0, warned = time.time(), False
+    start_idle_watch()          # ⭐ 空闲守卫唯一出生点：有任务（无任务+无开机 → 线程自己退出）
+    need_nodes = list((needs or {}).get("nodes") or [])
+    t0, warned, tried = time.time(), False, set()   # tried：本轮已自检过的实例（防同一台反复开机）
     while True:
         if jobstore.canceled(job_id):
             raise RuntimeError("已取消")
         pool = instance_pool()
         if not pool:
             raise RuntimeError("未配置应用实例（设置页「实例池」）")
-        cands = pool  # 候选 = 池内全部实例；并发仍由 _slot_take()/parallel_limit() 控制，换台才看得到全池
+        # A：按能力档案先筛掉「确定干不了这活」的机器（模型不进判据，避免误杀能跑的机器）
+        cands, skipped = [], []
+        for _x in pool:
+            if jobstore.caps_ok(_x["uuid"], need_nodes) is False:
+                _d = jobstore.caps_get(_x["uuid"]) or {}
+                _miss = sorted(set(_d.get("missing_nodes") or []) & set(need_nodes))
+                skipped.append("%s（缺 %s）" % (_x["uuid"], ",".join(_miss) or "节点"))
+            else:
+                cands.append(_x)
+        if not cands:
+            raise RuntimeError("池内没有满足该任务的实例（需要 %s）：%s"
+                              % (",".join(need_nodes) or "-", "；".join(skipped)))
+        if skipped and not warned:
+            log("按能力档案跳过 %d 台：%s" % (len(skipped), "；".join(skipped)))
         if _slot_take():
             # ① 先挑已经在 running 且锁空闲的（不用等开机）
             for x in cands:
@@ -787,11 +860,32 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300):
                     _ensure_instance(x["uuid"], job_id, log,
                                      timeout=(boot_timeout if not left else min(120, boot_timeout)),
                                      stock_tries=(10 if not left else 1))   # 还有候选 → 无库存立刻换台
-                    return x["uuid"], lk
                 except Exception as e:
                     log("实例 %s 不可用（%s）%s" % (x["uuid"], str(e)[:70],
                                                 "→ 换下一台" if left else ""))
                     lk.release()
+                    continue
+                # B：开机后自检——没档案的机器必须验；环境不符立刻关机换下一台（不等出图失败）
+                if need_nodes and jobstore.caps_ok(x["uuid"], need_nodes) is None:
+                    if x["uuid"] in tried:                # 同一台第二次仍无档案 → 建档失败，停手
+                        lk.release()
+                        _slot_drop()                      # 报错退出前把并行名额还回去
+                        jobstore.update(job_id, stage="booting", host="")
+                        raise RuntimeError("实例 %s 连续两次没能通过环境自检（需要 %s），"
+                                           "先停手不再继续开机" % (x["uuid"], ",".join(need_nodes)))
+                    tried.add(x["uuid"])
+                    _state, _why = _self_check_after_boot(x["uuid"], need_nodes, log)
+                    if _state is False:
+                        log("实例 %s 环境不符（%s）→ 关机换下一台" % (x["uuid"], _why))
+                        try:
+                            adl_power_off(x["uuid"])
+                        except Exception as e2:
+                            log("关机失败：%s（请到 AutoDL 控制台确认）" % str(e2)[:60])
+                        lk.release()
+                        jobstore.update(job_id, stage="booting", host="")
+                        continue
+                    log("实例 %s 环境自检通过（%s）" % (x["uuid"], ",".join(need_nodes)))
+                return x["uuid"], lk
             _slot_drop()
         if not warned:
             jobstore.update(job_id, stage="waiting")
@@ -803,13 +897,13 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300):
 
 
 class _InstanceCtx:
-    """with instance_ctx(jid, log) as inst: —— 进场拿实例（含开机），退场释放锁与并行名额"""
-    def __init__(self, job_id, log):
-        self.job_id, self.log = job_id, log
+    """with instance_ctx(jid, log, needs) as inst: —— 进场拿实例（含开机+环境自检），退场释放锁与名额"""
+    def __init__(self, job_id, log, needs=None):
+        self.job_id, self.log, self.needs = job_id, log, needs
         self.uuid = self.lock = None
 
     def __enter__(self):
-        self.uuid, self.lock = acquire_ready_instance(self.job_id, self.log)
+        self.uuid, self.lock = acquire_ready_instance(self.job_id, self.log, needs=self.needs)
         return self.uuid
 
     def __exit__(self, *exc):
@@ -821,8 +915,8 @@ class _InstanceCtx:
         return False
 
 
-def instance_ctx(job_id, log):
-    return _InstanceCtx(job_id, log)
+def instance_ctx(job_id, log, needs=None):
+    return _InstanceCtx(job_id, log, needs)
 
 
 # ------------------------------------------------------------
@@ -839,19 +933,23 @@ def instance_enums(base, ttl=600):
     if hit and (now - hit[0]) < ttl:
         return hit[1]
     oi = requests.get(key.rstrip("/") + "/object_info", timeout=90).json()
+    d = _enums_from_oi(oi)
+    _ENUM_CACHE[key] = (now, d)
+    return d
 
+
+def _enums_from_oi(oi):
+    """从 /object_info 抽模型枚举（unet/clip/vae/lora/ckpt）——实例间目录结构可能不同"""
     def enum(node, field):
         try:
             return list(oi[node]["input"]["required"][field][0])
         except Exception:
             return []
-    d = {"unet_name": enum("UNETLoader", "unet_name"),
-         "clip_name": enum("CLIPLoader", "clip_name"),
-         "vae_name": enum("VAELoader", "vae_name"),
-         "lora_name": enum("LoraLoader", "lora_name"),
-         "ckpt_name": enum("CheckpointLoaderSimple", "ckpt_name")}
-    _ENUM_CACHE[key] = (now, d)
-    return d
+    return {"unet_name": enum("UNETLoader", "unet_name"),
+            "clip_name": enum("CLIPLoader", "clip_name"),
+            "vae_name": enum("VAELoader", "vae_name"),
+            "lora_name": enum("LoraLoader", "lora_name"),
+            "ckpt_name": enum("CheckpointLoaderSimple", "ckpt_name")}
 
 
 def fit_name(kind, name, base):
@@ -2136,8 +2234,8 @@ def _idle_limit_min():
 def idle_shutdown_check(log=None, force=False):
     """空闲关机：队列空 且 距最后一次 GPU 任务结束已超过设定空闲分钟 → 关掉池内运行中的实例
 
+    按口径「开机的就管」：不区分实例是谁开的（含用户手动开机）。
     force=True 忽略空闲时长（测试/手动用）。返回 (是否有关机动作, 说明)。
-    修掉的旧漏洞：原实现只在「任务收尾那一刻」判断，若此后没有新任务就永远不关。
     """
     log = log or (lambda m: None)
     try:
@@ -2170,12 +2268,81 @@ def idle_shutdown_check(log=None, force=False):
 
 
 def _shutdown_if_idle(job_id, instance_uuid, log):
-    """任务收尾：交给统一的空闲判定（0 分钟 = 立即关；>0 则由看门狗到点关）"""
+    """任务收尾：0 分钟 = 立即关；>0 交给守卫线程（它到点关机后自己退出）"""
     _m = _idle_limit_min()
     log("任务结束，检查空闲关机（空闲 %d 分钟）…" % _m)
-    _ok, _why = idle_shutdown_check(log=log)
+    if _m <= 0:
+        _ok, _why = idle_shutdown_check(log=log)
+    else:
+        _ok, _why = False, "已交守卫线程：%d 分钟无新任务则关机" % _m
     if not _ok:
         log("本次未关机：%s" % _why)
+
+
+# ------------------------------------------------------------
+# ⭐ 空闲守卫线程（按需起、自己退，不常驻）
+#   ① 无任务 + 无开机 → 线程退出
+#   ② 开机的（池内任何 running 实例，含用户手动开机）+ 空闲达阈值 → 关机 → 线程退出
+#   ③ 有新任务 → 空闲起点由 last_gpu_activity(MAX created/started/finished) 自动重置
+#   出生点：有任务（acquire_ready_instance）/ 进程启动时发现已有开机（register_jobs）
+#   阈值每次轮询重读；轮询间隔 60s
+# ------------------------------------------------------------
+_GUARD = {"th": None, "lock": threading.Lock()}
+_GUARD_TICK = 60                    # 轮询间隔 60s（线程只在「有开机」期间存在）
+
+
+def _running_instances():
+    """池内当前 running 的实例 uuid（含用户手动开机；「开机」即纳入守卫）"""
+    out = []
+    try:
+        for x in instance_pool():
+            u = (x or {}).get("uuid")
+            if not u:
+                continue
+            try:
+                if (adl_status(u).get("data") or "") == "running":
+                    out.append(u)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def start_idle_watch():
+    """起守卫线程（已在跑则不动）。出生点：有任务 / 进程启动时发现已有开机"""
+    with _GUARD["lock"]:
+        th = _GUARD["th"]
+        if th and th.is_alive():
+            return False
+        _GUARD["th"] = threading.Thread(target=_idle_watch_loop, daemon=True, name="idle-guard")
+        _GUARD["th"].start()
+        return True
+
+
+def _idle_watch_loop():
+    """先查后睡：无事立刻退出（进程启动拉起时不会空转）"""
+    _first = True
+    try:
+        while True:
+            if not _first:
+                time.sleep(_GUARD_TICK)
+            _first = False
+            if jobstore.gpu_active_count() > 0:
+                continue                                # ③ 有任务：空闲起点自动重置
+            if not _running_instances():
+                break                                   # ① 无任务、无开机 → 线程退出
+            _last = jobstore.last_gpu_activity() or 0
+            _lim = _idle_limit_min()                    # ⭐ 阈值每次轮询重读（设置页改了立即生效）
+            if int(time.time() - _last) < _lim * 60:
+                continue                                # ② 未到阈值
+            idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
+            break                                       # ② 关完 → 线程退出
+    except Exception as e:
+        print("[空闲守卫] 异常退出：%s" % str(e)[:160], flush=True)
+    finally:
+        with _GUARD["lock"]:
+            _GUARD["th"] = None
 
 
 
@@ -2261,7 +2428,8 @@ def _run_image_job_core(job, kind, build_one):
             return "/static/generated/%d/%s" % (article_id, name)
     urls, rows = [], []
 
-    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：按池顺序挑一台空闲可用的
+    with instance_ctx(jid, lambda m: _log(jid, m),
+                          needs=needs_for_job(kind, job.get("payload"))) as inst:   # 多实例：先按能力档案筛掉干不了这活的机器，再挑空闲的
         try:
             _set(jid, stage="ready", host=inst)
             base = base_for(inst, logger=lambda m: _log(jid, m))
@@ -2402,7 +2570,8 @@ def run_material_job(job):
     _set(jid, total=total, done=0)
     _log(jid, "%s：%d 张素材" % (title, len(rows)))
     results, done = [], 0
-    with instance_ctx(jid, lambda m: _log(jid, m)) as inst:   # 多实例：挑一台空闲可用的
+    with instance_ctx(jid, lambda m: _log(jid, m),
+                          needs=needs_for_job(kind, opts)) as inst:   # 多实例：先按能力档案筛掉干不了这活的机器，再挑空闲的
         try:
             _set(jid, stage="ready", host=inst)
             base = base_for(inst, logger=lambda m: _log(jid, m))
@@ -2529,7 +2698,5 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
-    # 空闲关机归一进调度器：job-dispatcher 线程统一计时（1s tick、60s 到点触发）
-    # 回调在独立线程里跑，AutoDL HTTP 不会推迟任务派发；异常只记录、不影响派发
-    jobstore.DISPATCHER.every(60, lambda: idle_shutdown_check(
-        log=lambda m: print("[空闲关机] " + str(m), flush=True)), name="idle-shutdown")
+    # 空闲守卫：按需线程（无常驻钩子），唯一出生点 = 有任务（acquire_ready_instance 入口）
+    # 规则：无任务+无开机→退出；开机的（任何 running 实例）空闲达阈值→关机后退出；阈值每轮重读

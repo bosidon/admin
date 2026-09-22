@@ -762,7 +762,7 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300):
         pool = instance_pool()
         if not pool:
             raise RuntimeError("未配置应用实例（设置页「实例池」）")
-        cands = pool[:max(1, parallel_limit())]
+        cands = pool  # 候选 = 池内全部实例；并发仍由 _slot_take()/parallel_limit() 控制，换台才看得到全池
         if _slot_take():
             # ① 先挑已经在 running 且锁空闲的（不用等开机）
             for x in cands:

@@ -52,6 +52,10 @@ DEFAULTS = {
     "comfy_auto_shutdown": "1",
     "comfy_idle_shutdown_min": "5",   # 任务完成后空闲多少分钟自动关机（0 = 立即关）
     "comfy_instances": "",          # 实例池：每行一台 `uuid|备注`，顺序=优先级；为空则回落 comfy_instance_uuid
+    # 分镜片段（H3）超分与编码：模板里写死 2× / ULTRA / crf16，这里做成设置页可调
+    "comfy_h3_superres": "2",       # 关（旁路）｜倍率 1.0–4.0（如 2 / 1.5）｜目标尺寸（如 1080x1920）
+    "comfy_h3_sr_quality": "ULTRA",  # RTX VSR 质量档：LOW / MEDIUM / HIGH / ULTRA
+    "comfy_h3_crf": "16",           # 片段编码质量（数字越小越清晰、体积越大）
 }
 
 # aspect → (宽, 高)，与 illustrate.py 的 SIZES 对齐

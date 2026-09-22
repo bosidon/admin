@@ -100,6 +100,20 @@
     </div>
 
     <div class="form-group">
+        <label class="form-label">分镜片段（H3）超分与画质</label>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+            <input type="text" class="form-input" id="comfy-h3-superres" placeholder="超分：关 / 2 / 1.5 / 1080x1920">
+            <select class="form-input" id="comfy-h3-sr-quality">
+                <option value="ULTRA">超分质量 ULTRA</option>
+                <option value="HIGH">超分质量 HIGH</option>
+                <option value="MEDIUM">超分质量 MEDIUM</option>
+                <option value="LOW">超分质量 LOW</option>
+            </select>
+            <input type="text" class="form-input" id="comfy-h3-crf" placeholder="编码画质 crf 16">
+        </div>
+    </div>
+
+    <div class="form-group">
         <label class="form-label">负面提示词（留空则用提词文件里的「# 负面提示词」段，再空用内置默认）</label>
         <input type="text" class="form-input" id="comfy-neg" placeholder="模糊, 低质量, 文字错误, 错别字, 多余的文字, 水印, 重复文字, 变形, 杂乱, 引号, 双引号">
     </div>
@@ -213,7 +227,10 @@ async function saveComfy(msg) {
         comfy_denoise: document.getElementById('comfy-denoise').value.trim(),
         comfy_neg: document.getElementById('comfy-neg').value.trim(),
         comfy_auto_shutdown: document.getElementById('comfy-auto-shutdown').checked ? '1' : '0',
-        comfy_idle_shutdown_min: String(Math.max(0, parseInt(document.getElementById('comfy-idle-min').value || '0', 10) || 0))
+        comfy_idle_shutdown_min: String(Math.max(0, parseInt(document.getElementById('comfy-idle-min').value || '0', 10) || 0)),
+        comfy_h3_superres: document.getElementById('comfy-h3-superres').value.trim(),
+        comfy_h3_sr_quality: document.getElementById('comfy-h3-sr-quality').value,
+        comfy_h3_crf: document.getElementById('comfy-h3-crf').value.trim()
     };
     await api('/api/settings', {method: 'POST', body: JSON.stringify(data)});
     toast(msg || '生图配置已保存');
@@ -357,6 +374,9 @@ async function loadSettings() {
     document.getElementById('comfy-neg').value = settings['comfy_neg'] || '';
     document.getElementById('comfy-auto-shutdown').checked = (settings['comfy_auto_shutdown'] || '1') === '1';
     document.getElementById('comfy-idle-min').value = settings['comfy_idle_shutdown_min'] || '5';
+    document.getElementById('comfy-h3-superres').value = settings['comfy_h3_superres'] || '2';
+    document.getElementById('comfy-h3-sr-quality').value = settings['comfy_h3_sr_quality'] || 'ULTRA';
+    document.getElementById('comfy-h3-crf').value = settings['comfy_h3_crf'] || '16';
     try {
         const mc = await api('/api/models/groups');
         MODEL_GROUPS = (mc && mc.groups) || [];

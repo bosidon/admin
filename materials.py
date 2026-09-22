@@ -13,6 +13,7 @@
 - 加工产物另存 static/generated/materials/<文章ID>/，与配图目录隔离，互不干扰
 """
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -132,6 +133,8 @@ H3_WF_DEFAULT = "wf/h3_u02_fl2v_v2.json"
 H3_FPS = 24                     # 模板固定 24fps；帧数由模板内的表达式按秒数换算（≡5 mod 17）
 H3_MAX_SEC = 10.0               # 单条上限；实测 5s ≈ 421s（带 2× 超分）
 H3_SIZES = {"9:16": (768, 1344), "16:9": (1344, 768), "1:1": (1024, 1024)}
+_H3_SR_DIM_RE = re.compile(r"^(\d{2,5})\s*[x×*]\s*(\d{2,5})$")   # 超分「目标尺寸」写法：1080x1920
+
 H3_TPL_NODES = {"first": "114", "last": "128", "preset": "122", "prompt": "136",
                 "vhs": "143", "supres": "144", "secs": "105:111", "seed": "105:15",
                 "steps": "105:9", "lora": "148", "decode": "145"}
@@ -1027,7 +1030,7 @@ def h3_template(cfg=None):
 
 def build_h3_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="shot_clip",
                 width=768, height=1344, seconds=5.0, fps=H3_FPS, steps=0, lora=0.0,
-                superres=-1):
+                superres=None, sr_quality="", crf=None):
     """H3 首尾帧出片段（MiniMax-H3 FL2V turbo；音视频联合 → 产物带音轨）
     模板整条链已固定：LoadImage(首/尾) → ImageResizeKJv2(lanczos crop 到 768×1344) →
     MiniMaxH3ImageToVideo(宽高来自 WJILatentPreset、时长来自 PrimitiveFloat 表达式) →
@@ -1058,20 +1061,62 @@ def build_h3_wf(imgs, prompt, neg="", seed=0, cfg=None, prefix="shot_clip",
         wf[N["steps"]]["inputs"]["steps"] = int(steps)          # turbo LoRA 够用时 8 步
     if lora and N["lora"] in wf:
         wf[N["lora"]]["inputs"]["strength_model"] = float(lora)
-    # 超分：默认沿用模板（2×）；显式传 1 或 0 = 旁路（把 VHS 的输入直接接到解码后，跳过超分）
+    # 超分（RTX VSR）与编码质量：设置页可调，模板里的值只是出厂默认
+    # comfy_h3_superres 三种写法：关（旁路）｜倍率（1.0–4.0，如 2 / 1.5）｜目标尺寸（如 1080x1920）
+    # comfy_h3_sr_quality：LOW / MEDIUM / HIGH / ULTRA（节点枚举）；comfy_h3_crf：编码质量（小 = 清晰 = 大）
+    def _refs_to(node_id):
+        """有哪些节点直接吃 node_id 的输出（用于旁路超分时连带摘掉它后面的清理节点）"""
+        out = []
+        for _k, _v in wf.items():
+            if not isinstance(_v, dict):
+                continue
+            for _ik, _iv in (_v.get("inputs") or {}).items():
+                if isinstance(_iv, (list, tuple)) and len(_iv) == 2 and str(_iv[0]) == str(node_id):
+                    out.append(_k)
+        return out
+
+    _srp = str(superres).strip().lower() if superres is not None else ""
+    if _srp in ("", "-1", "-1.0", "auto", "none_", "default"):
+        _srp = str(cfg.get("comfy_h3_superres") or "").strip().lower()
+    _spec = _srp
+    _srq = str(sr_quality or cfg.get("comfy_h3_sr_quality") or "").strip().upper()
     try:
-        sr = int(superres)
+        _crf = int(crf) if crf not in (None, "") else int(cfg.get("comfy_h3_crf") or 0)
     except Exception:
-        sr = -1
-    if sr >= 0:
-        if sr <= 1:
-            # 旁路超分：VHS 直接吃解码输出（145 = 解码后的清理节点），删掉 144/151
-            if N["vhs"] in wf and N["decode"] in wf:
-                wf[N["vhs"]]["inputs"]["images"] = [N["decode"], 0]
-            wf.pop(N["supres"], None)
-            wf.pop("151", None)
-        elif N["supres"] in wf and "resize_type.scale" in wf[N["supres"]]["inputs"]:
-            wf[N["supres"]]["inputs"]["resize_type.scale"] = sr
+        _crf = 0
+    if _spec in ("关", "off", "none", "0", "1", "1.0"):
+        # 旁路：VHS 直接吃解码输出（超分源从连线读，模板改名/改号也不会指错）
+        _sp = N["supres"]
+        if _sp in wf:
+            _src = (wf[_sp].get("inputs") or {}).get("images")
+            for _k in _refs_to(_sp):
+                if _k != N["vhs"]:
+                    wf.pop(_k, None)
+            wf.pop(_sp, None)
+            if _src and N["vhs"] in wf:
+                wf[N["vhs"]]["inputs"]["images"] = _src
+    elif _spec:
+        _sp = N["supres"]
+        if _sp in wf:
+            _ins = wf[_sp]["inputs"]
+            _m = _H3_SR_DIM_RE.match(_spec)
+            if _m:                                  # 目标尺寸，如 1080x1920
+                _ins["resize_type"] = "target dimensions"
+                _ins["resize_type.width"] = int(_m.group(1))
+                _ins["resize_type.height"] = int(_m.group(2))
+                _ins.pop("resize_type.scale", None)
+            else:
+                try:
+                    _ins["resize_type"] = "scale by multiplier"
+                    _ins["resize_type.scale"] = float(_spec)
+                    _ins.pop("resize_type.width", None)
+                    _ins.pop("resize_type.height", None)
+                except Exception:
+                    pass
+            if _srq:
+                _ins["quality"] = _srq
+    if _crf and N["vhs"] in wf:
+        wf[N["vhs"]]["inputs"]["crf"] = int(_crf)
     return wf
 
 
@@ -1130,7 +1175,8 @@ def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat
                            seconds=params.get("seconds") or 5.0,
                            fps=params.get("fps") or H3_FPS,
                            steps=params.get("steps") or 0, lora=params.get("lora") or 0.0,
-                           superres=params.get("superres", -1))
+                           superres=params.get("superres"), sr_quality=params.get("sr_quality") or "",
+                           crf=params.get("crf"))
     raise ValueError("未知的加工类型：%s" % action)
 
 

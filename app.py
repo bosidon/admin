@@ -11,6 +11,8 @@ import json
 import sqlite3
 import uuid
 import shutil
+import sys
+import subprocess
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -2472,6 +2474,136 @@ def api_materials_txt2img():
                                              owner=user_label(u), owner_id=u.get('id'))
     return jsonify({"ok": True, "job_id": jid, "reused": reused,
                     "queue_pos": jobstore.queue_pos(jid)})
+
+
+TTS_VOICES = [
+    ("zh-CN-XiaoxiaoNeural", "晓晓 · 女声"),
+    ("zh-CN-XiaoyiNeural", "晓伊 · 女声（年轻）"),
+    ("zh-CN-YunxiNeural", "云希 · 男声（年轻）"),
+    ("zh-CN-YunjianNeural", "云健 · 男声（成熟）"),
+    ("zh-CN-YunyangNeural", "云扬 · 男声（播报）"),
+]
+
+
+def _mp3_seconds(fp):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", fp],
+                           capture_output=True, text=True, timeout=20)
+        return round(float((r.stdout or "0").strip()), 2)
+    except Exception:
+        return 0
+
+
+@app.route('/api/video-plans/<int:plan_id>/voice', methods=['GET'])
+def api_plan_voice_list(plan_id):
+    """该计划已生成的配音（按镜头）"""
+    if not current_user():
+        return jsonify({"error": "未登录"}), 401
+    db = get_content_db()
+    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g:
+        return _g
+    mdb = materialstore._conn()
+    clips = []
+    for c in db.execute("SELECT * FROM video_clips WHERE plan_id=? ORDER BY shot_idx", (plan_id,)).fetchall():
+        url, mid = "", c["audio_material_id"]
+        if mid:
+            try:
+                m = mdb.execute("SELECT file_path FROM materials WHERE id=?", (mid,)).fetchone()
+                url = m[0] if m else ""
+            except Exception:
+                url = ""
+        clips.append({"shot_idx": c["shot_idx"], "material_id": mid, "url": url,
+                      "duration_s": c["duration_s"] or 0, "status": c["status"] or ""})
+    db.close()
+    return jsonify({"ok": True, "clips": clips, "voices": [{"v": v, "label": n} for v, n in TTS_VOICES]})
+
+
+@app.route('/api/video-plans/<int:plan_id>/voice', methods=['POST'])
+def api_plan_voice_gen(plan_id):
+    """按镜头台词生成配音（edge-tts 免费）；不传 shot_idx = 全部镜头"""
+    if not current_user():
+        return jsonify({"error": "未登录"}), 401
+    db = get_content_db()
+    row = db.execute("SELECT * FROM video_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "不存在"}), 404
+    _g = _guard_article(row["article_id"])
+    if _g:
+        return _g
+    d = request.get_json(silent=True) or {}
+    voice = (d.get("voice") or "").strip() or TTS_VOICES[0][0]
+    if voice not in [v for v, _ in TTS_VOICES]:
+        return jsonify({"error": "不支持的声音"}), 400
+    try:
+        _o = json.loads(row["storyboard"] or "{}")
+    except Exception:
+        _o = {}
+    if isinstance(_o, dict):
+        shots = _o.get("shots") or []
+    elif isinstance(_o, list):
+        shots = _o
+    else:
+        shots = []
+    if not shots:
+        return jsonify({"error": "请先生成分镜"}), 400
+    want = d.get("shot_idx")
+    idxs = [int(want)] if want is not None else list(range(len(shots)))
+    out_dir = "/var/www/social-media-admin/static/generated/materials/%s" % (row["article_id"] or 0)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        pass
+    py = sys.executable or "/usr/bin/python3"
+    done, failed = [], []
+    for i in idxs:
+        if i < 0 or i >= len(shots):
+            continue
+        sh = shots[i] or {}
+        line = (sh.get("subtitle") or sh.get("line") or "").strip()
+        if not line:
+            failed.append({"shot_idx": i, "error": "无台词"})
+            continue
+        fp = os.path.join(out_dir, "voice_p%d_s%d.mp3" % (plan_id, i + 1))
+        r = None
+        for _t in range(2):
+            try:
+                r = subprocess.run([py, "-m", "edge_tts", "--voice", voice, "--text", line, "--write-media", fp],
+                                   capture_output=True, text=True, timeout=120)
+            except Exception as e:
+                r = None
+            if os.path.exists(fp) and os.path.getsize(fp) >= 512:
+                break
+        if (not os.path.exists(fp)) or os.path.getsize(fp) < 512:
+            failed.append({"shot_idx": i, "error": ((((r.stderr or r.stdout) if r is not None else "") or "")[-80:]) or "无产物"})
+            continue
+        dur = _mp3_seconds(fp)
+        rel = "/static/generated/materials/%s/voice_p%d_s%d.mp3" % (row["article_id"] or 0, plan_id, i + 1)
+        mid = None
+        try:
+            rec = materialstore.upsert(rel, "audio", name=("分镜%d配音" % (i + 1)), source="tts", article_id=row["article_id"])
+            if isinstance(rec, int):
+                mid = rec
+            elif rec is not None and hasattr(rec, "keys") and "id" in rec.keys():
+                mid = rec["id"]
+            else:
+                mid = None
+        except Exception:
+            mid = None
+        ex = db.execute("SELECT id FROM video_clips WHERE plan_id=? AND shot_idx=?", (plan_id, i)).fetchone()
+        if ex:
+            db.execute("UPDATE video_clips SET line=?, visual=?, audio_material_id=?, duration_s=? WHERE id=?",
+                       (line, sh.get("visual_prompt") or "", mid, dur, ex["id"]))
+        else:
+            db.execute("INSERT INTO video_clips (plan_id, shot_idx, line, visual, audio_material_id, duration_s, status, created_at) VALUES (?,?,?,?,?,?,'voice_done',datetime('now','localtime'))",
+                       (plan_id, i, line, sh.get("visual_prompt") or "", mid, dur))
+        done.append({"shot_idx": i, "material_id": mid, "duration_s": dur, "url": rel})
+    db.commit()
+    db.close()
+    return jsonify({"ok": True, "done": done, "failed": failed, "voice": voice})
 
 
 @app.route('/api/video-plans/<int:plan_id>/asset-attach', methods=['POST'])

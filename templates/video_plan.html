@@ -527,7 +527,6 @@ async function load() {
     renderRolePack();
     renderReqs();
     renderScenes();
-    switchTab('script');                                 // 默认打开 Tab = 剧本
     // 加载原始文案
     const arts = await api('/api/articles');
     const art = (arts || []).find(a => a.id === d.article_id);

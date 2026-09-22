@@ -16,6 +16,7 @@ import random
 import contextlib
 import difflib
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -2804,13 +2805,19 @@ def run_shotframe_job(job):
                     raise RuntimeError("已取消")
                 label = "%d 镜·%s" % (it["idx"] + 1, "尾帧" if it["frame"] == "end" else "首帧")
                 _log(jid, "%s：出图（主体图 %s）" % (label, it["main"].rsplit("/", 1)[-1]))
-                src = mat.fit_cover(it["main"], str(outdir / ("frame_src_%02d_%s.png" % (it["idx"], it["frame"]))), w, h)
+                # 裁切后的源图只用于上传 ComfyUI，落临时目录（不要写进素材目录）
+                src = mat.fit_cover(it["main"], str(Path(tempfile.gettempdir()) /
+                                     ("hermes_shotframe_%s_%02d_%s.png" % (jid, it["idx"], it["frame"]))), w, h)
                 imgs = [comfy_upload(base, src)]
                 for rp in it["refs"]:
                     imgs.append(comfy_upload(base, rp))
                 wf = mat.build_wf("edit", imgs, {"negative": neg}, cfg=cfg,
                                   prompt=it["prompt"], seed=it["seed"], prefix="shot_frame")
                 data = _run_wf_one(base, wf, logger=lambda m: _log(jid, m))
+                try:
+                    Path(src).unlink(missing_ok=True)
+                except Exception:
+                    pass
                 name = "shot%02d_%s_%08x.png" % (it["idx"] + 1, it["frame"], it["seed"] % (2 ** 32))
                 (outdir / name).write_bytes(data)
                 url = "%s/materials/%s/%s" % (mat.URL_PREFIX, article_id, name)

@@ -768,12 +768,20 @@ def needs_for_job(kind, payload=None):
         payload = payload or {}
         params = payload.get("params") or {}
         cfg = get_comfy_config()
-        if kind in ("cutout", "edit", "stitch", "shotframe", "shotclip"):
-            _n = 3 if kind == "shotframe" else (2 if kind == "shotclip"
-                                                else (len(payload.get("ids") or []) or 1))
+        if kind in ("cutout", "edit", "stitch", "shotframe", "shotclip", "txt2vid"):
+            if kind == "shotframe":
+                _n = 3
+            elif kind == "shotclip":
+                _n = 2
+            elif kind == "txt2vid":
+                _n = len(payload.get("refs") or [])
+            else:
+                _n = len(payload.get("ids") or []) or 1
             _eng = str(payload.get("engine") or "").strip().lower()
             if kind == "shotframe":
                 _act = "edit"
+            elif kind == "txt2vid":
+                _act = "h3ref"             # 素材页文生视频 = H3 多图参考引擎（0 张 = 纯文生）
             elif kind == "shotclip":
                 # 片段两引擎：wan = 首尾帧插值（任何出图机都有）；h3 = MiniMax-H3（只有 6000D 装了）
                 _act = "h3ref" if _eng == "h3ref" else ("h3clip" if _eng == "h3" else "clip")
@@ -3168,6 +3176,80 @@ def run_shotclip_job(job):
             _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
 
 
+def run_txt2vid_job(job):
+    """素材页 · 文生视频：H3 多图参考引擎（h3ref）出一条 mp4 → 素材库（type=video / source=txt2vid）
+    0 张参考图 = 纯文生（build 侧 allow_empty 放行；节点 ref_images 本身 min=0，槽位与 LoadImage 整段摘掉）
+    一次开机 → 出完本条 → 队列空才关机（与出图共用底座 / 同 GPU 域串行）"""
+    import materials as mat
+    jid = job["id"]
+    opts = job.get("payload") or {}
+    prompt = str(opts.get("prompt") or "").strip()
+    aspect = str(opts.get("aspect") or "9:16").strip()
+    try:
+        seconds = float(opts.get("seconds") or 8)
+    except Exception:
+        seconds = 8.0
+    ref_ids = []
+    for x in (opts.get("refs") or []):
+        try:
+            ref_ids.append(int(x))
+        except Exception:
+            pass
+    if not prompt:
+        raise RuntimeError("缺少提词")
+    w, h = mat.H3REF_SIZES.get(aspect, mat.H3REF_SIZES["9:16"])
+    cfg = get_comfy_config()
+    if not instance_uuids() or not cfg.get("comfy_api_token"):
+        raise RuntimeError("未配置实例池 / Token，请去「设置」页填写")
+    refs_paths = []
+    for mid in ref_ids[:mat.H3REF_MAX_REFS]:
+        row = mat.get_material(mid)
+        if not row:
+            raise RuntimeError("参考图素材不存在：#%s" % mid)
+        if (row.get("type") or "") != "image":
+            raise RuntimeError("参考图必须是图片：#%s" % mid)
+        p = mat.url_to_path(row.get("file_path") or "")
+        if not p or not p.is_file():
+            raise RuntimeError("参考图文件缺失：#%s" % mid)
+        refs_paths.append(str(p))
+    _set(jid, total=1, done=0)
+    _log(jid, "文生视频：%s · %dx%d · %.0fs · 参考图 %d 张（H3 多图参考引擎 h3ref，带音轨，约 200-400s/条）"
+         % (aspect, w, h, seconds, len(refs_paths)))
+    outdir = mat.out_dir(0)
+    with instance_ctx(jid, lambda m: _log(jid, m), needs=needs_for_job("txt2vid", opts)) as inst:
+        try:
+            _set(jid, stage="ready", host=inst)
+            base = base_for(inst, logger=lambda m: _log(jid, m))
+            if not base:
+                raise RuntimeError("拿不到 ComfyUI 地址")
+            _log(jid, "ComfyUI 地址：" + base)
+            if not comfy_ready(base, timeout=300, logger=lambda m: _log(jid, m)):
+                raise RuntimeError("ComfyUI 300s 内未就绪")
+            jobstore.set_ready(jid)
+            _set(jid, stage="generating")
+            seed = random.randint(1, 2 ** 31 - 1)
+            imgs = [comfy_upload(base, p) for p in refs_paths]
+            wf = mat.build_wf("h3ref", imgs,
+                              {"width": w, "height": h, "seconds": seconds,
+                               "allow_empty": True},
+                              cfg=cfg, prompt=prompt, seed=seed, prefix="txt2vid")
+            data = _run_wf_one(base, wf, timeout=2400, logger=lambda m: _log(jid, m))
+            name = "t2v_%08x.mp4" % (seed % (2 ** 32))
+            (outdir / name).write_bytes(data)
+            url = "%s/materials/0/%s" % (mat.URL_PREFIX, name)
+            mid = mat.upsert(url, "video", name="文生视频·" + prompt[:14],
+                             category="txt2vid", source="txt2vid",
+                             owner_id=job.get("owner_id"), owner=job.get("owner") or "",
+                             tags="文生视频")
+            _set(jid, done=1, images=[url])
+            _log(jid, "文生视频完成 → %s（素材 #%s）" % (name, mid))
+        except Exception as e:
+            _log(jid, "❌ 文生视频失败：%s" % str(e)[:220])
+            raise RuntimeError(str(e)[:300])
+        finally:
+            _shutdown_if_idle(jid, inst, lambda m: _log(jid, m))
+
+
 def register_jobs():
     """注册任务执行体 + 启动调度器（app.py 启动时调用）"""
     jobstore.DISPATCHER.register("images", run_images_job, domain="gpu")   # 显存域：一块 GPU 串行
@@ -3178,6 +3260,7 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2img", run_txt2img_job, domain="gpu")   # 文生图（同 GPU 域串行）
     jobstore.DISPATCHER.register("shotframe", run_shotframe_job, domain="gpu")  # 分镜首/尾帧出图（同 GPU 域串行）
     jobstore.DISPATCHER.register("shotclip", run_shotclip_job, domain="gpu")    # 分镜片段（首尾帧图生视频，同域串行）
+    jobstore.DISPATCHER.register("txt2vid", run_txt2vid_job, domain="gpu")      # 素材页文生视频（H3 多图参考·纯提词，同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
     # 空闲守卫：按需线程（无常驻钩子），唯一出生点 = 有任务（acquire_ready_instance 入口）

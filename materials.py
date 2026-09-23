@@ -1301,7 +1301,7 @@ def clip_prompt_h3ref(shot, refs=None, dur=5, cfg=None):
 
 def build_h3ref_wf(refs, prompt, seed=0, cfg=None, prefix="shot_h3ref",
                    width=480, height=864, seconds=5.0, superres=None, sr_quality="",
-                   crf=None, lora=None):
+                   crf=None, lora=None, allow_empty=False):
     """H3 多图参考出片段（MiniMaxH3ReferenceToVideo / ref2va）
     模板整条链已固定：5×LoadImage(ref_images.ref_image_0..4) → 136 参考条件化 →
     RandomNoise/H3SigmaRefiner → SamplerCustomAdvanced → 解码 → 164 超分 → 92 SaveVideo
@@ -1309,7 +1309,9 @@ def build_h3ref_wf(refs, prompt, seed=0, cfg=None, prefix="shot_h3ref",
     （可选：超分、画质、crf、LoRA 强度）。refs = 已上传到 ComfyUI 的文件名，顺序 = <Picture 1..N>"""
     cfg = cfg or {}
     refs = [str(x).strip() for x in (refs or []) if str(x or "").strip()]
-    if not refs:
+    if not refs and not allow_empty:
+        # 分镜链路仍要求 ≥1 张（防误用）；素材页文生视频传 allow_empty=True = 0 张纯文生
+        # （ComfyUI 节点 ref_images 本身 min=0/optional，下方循环会把 5 个 LoadImage 槽位整段摘掉）
         raise ValueError("H3 多图参考出片段至少需要 1 张参考图")
     refs = refs[:H3REF_MAX_REFS]
     wf = h3ref_template(cfg)
@@ -1451,7 +1453,8 @@ def build_wf(action, imgs, params=None, cfg=None, prompt="", seed=0, prefix="mat
                               seconds=params.get("seconds") or 5.0,
                               superres=params.get("superres"),
                               sr_quality=params.get("sr_quality") or "",
-                              crf=params.get("crf"), lora=params.get("lora"))
+                              crf=params.get("crf"), lora=params.get("lora"),
+                              allow_empty=bool(params.get("allow_empty")))
     raise ValueError("未知的加工类型：%s" % action)
 
 

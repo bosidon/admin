@@ -2976,6 +2976,48 @@ def api_materials_txt2img():
     return _images_generate(request.get_json(silent=True) or {}, force_txt2img=True)
 
 
+@app.route('/api/materials/txt2vid', methods=['POST'])
+def api_materials_txt2vid():
+    """素材页 · 文生视频（H3 多图参考引擎 h3ref；0 张参考图 = 纯文生）→ 入队 txt2vid"""
+    u = current_user() or {}
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get('prompt') or '').strip()
+    if not prompt:
+        return jsonify({"error": "请填写提词"}), 400
+    if len(prompt) > 1000:
+        return jsonify({"error": "提词太长（最多 1000 字）"}), 400
+    aspect = str(data.get('aspect') or '9:16').strip()
+    if aspect not in materialstore.H3REF_SIZES:
+        return jsonify({"error": "画幅不存在"}), 400
+    try:
+        seconds = float(data.get('seconds') or 8)
+    except Exception:
+        seconds = -1
+    if seconds not in (5.0, 8.0):
+        return jsonify({"error": "秒数只支持 5 或 8"}), 400
+    refs = data.get('refs') or []
+    if not isinstance(refs, list):
+        return jsonify({"error": "参考图参数错误"}), 400
+    try:
+        refs = [int(x) for x in refs]
+    except Exception:
+        return jsonify({"error": "参考图参数错误"}), 400
+    if len(refs) > materialstore.H3REF_MAX_REFS:
+        return jsonify({"error": "参考图最多 %d 张" % materialstore.H3REF_MAX_REFS}), 400
+    for mid in refs:                       # 逐张校验：存在 + 必须是图片（防视频/音频进 LoadImage）
+        row = materialstore.get_material(mid)
+        if not row:
+            return jsonify({"error": "参考图不存在：#%s" % mid}), 400
+        if (row.get('type') or '') != 'image':
+            return jsonify({"error": "参考图必须是图片：#%s" % mid}), 400
+    payload = {"prompt": prompt, "refs": refs, "aspect": aspect, "seconds": seconds}
+    res = enqueue_image_job('txt2vid', None, payload, 1,
+                            owner=user_label(u), owner_id=u.get('id'))
+    if res.get("error"):                   # 未配置实例池 / Token
+        return jsonify(res), 400
+    return jsonify({k: res[k] for k in ("ok", "job_id", "reused", "queue_pos")})
+
+
 TTS_VOICES = [
     ("zh-CN-XiaoxiaoNeural", "晓晓 · 女声"),
     ("zh-CN-XiaoyiNeural", "晓伊 · 女声（年轻）"),

@@ -264,6 +264,47 @@ def last_gpu_activity():
         c.close()
 
 
+def queued_gpu_count():
+    """GPU 域「排队中」任务数（逐台空闲判定用：有排队任务时任一机器都可能被指派 → 本轮不关任何机器）"""
+    c = _conn()
+    try:
+        r = c.execute("SELECT COUNT(*) n FROM jobs WHERE domain='gpu' AND status='queued'").fetchone()
+        return int((r["n"] if r else 0) or 0)
+    finally:
+        c.close()
+
+
+def running_on_host(host):
+    """该实例上是否还有 running 任务（逐台空闲判定用；host 为空视为无）"""
+    if not host:
+        return 0
+    c = _conn()
+    try:
+        r = c.execute("SELECT COUNT(*) n FROM jobs WHERE status='running' AND host=?",
+                      (host,)).fetchone()
+        return int((r["n"] if r else 0) or 0)
+    finally:
+        c.close()
+
+
+def last_activity_on_host(host):
+    """该实例上最后一次任务活动时间（epoch 秒）；该机从无任务记录 → None"""
+    if not host:
+        return None
+    c = _conn()
+    try:
+        r = c.execute("SELECT MAX(COALESCE(finished_at, started_at, created_at)) t "
+                      "FROM jobs WHERE host=?", (host,)).fetchone()
+        t = (r["t"] if r else "") or ""
+        if not t:
+            return None
+        return time.mktime(time.strptime(t, "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return None
+    finally:
+        c.close()
+
+
 def _row(r):
     if not r:
         return None

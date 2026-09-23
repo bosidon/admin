@@ -836,7 +836,7 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
     """挑一台「空闲且可用」的实例并锁住（返回 uuid, lock）
     顺序：池内正在 running 的优先（秒级可用）→ 其余按池序尝试开机（无库存重试）
     全忙/开不起来 → 等待（可被取消）；调用方负责 lock.release() + _slot_drop()"""
-    start_idle_watch()          # ⭐ 空闲守卫唯一出生点：有任务（无任务+无开机 → 线程自己退出）
+    start_idle_watch()          # 空闲守卫出生点之一（另一处：进程启动 register_jobs；常驻不掉线）
     need_nodes = list((needs or {}).get("nodes") or [])
     t0, warned, tried = time.time(), False, set()   # tried：本轮已自检过的实例（防同一台反复开机）
     while True:
@@ -2261,64 +2261,92 @@ def _idle_limit_min():
     return max(0, v)
 
 
-def idle_shutdown_check(log=None, force=False):
-    """空闲关机：队列空 且 距最后一次 GPU 任务结束已超过设定空闲分钟 → 关掉池内运行中的实例
+def idle_shutdown_check(log=None, force=False, dry=False, only=None):
+    """逐台空闲关机：对池内每台 running 实例单独判定 —— 本机无任务且空闲达阈值 → 只关这一台
 
-    按口径「开机的就管」：不区分实例是谁开的（含用户手动开机）。
-    force=True 忽略空闲时长（测试/手动用）。返回 (是否有关机动作, 说明)。
+    与旧版的区别：旧版「池内任一 GPU 任务（排队/运行）→ 全体不关」，
+    导致别的机器在跑长任务时，空转的机器永远不会被关。
+    规则：
+    - 池内还有「排队中」的 GPU 任务 → 本轮不关任何机器（调度器随时可能把任务丢给空转机器）
+    - 本机（jobs.host=该 uuid）有 running 任务 → 不关
+    - 空闲起点 = max(本机最后一次任务活动时间, 守卫首次看到它空闲的时刻)
+      （取较晚者 = 更保守：进程重启后给一个宽限期，手动机也不至于立刻被关）
+    - force=True 忽略空闲时长（测试/手动用）；dry=True 只报将要关的机器、不下关机指令
+    - only=<uuid> 只判这一台
+    返回 (是否有关机动作, 说明)
     """
     log = log or (lambda m: None)
     try:
         if str(get_comfy_config().get("comfy_auto_shutdown", "1")) != "1":
             return False, "自动关机已关闭"
-        if jobstore.gpu_active_count() > 0:
-            return False, "还有 GPU 任务（排队/运行中）"
-        idle_min = 0 if force else _idle_limit_min()
-        last = jobstore.last_gpu_activity()
-        idle_s = int(time.time() - last) if last else 0
-        if not force and last and idle_s < idle_min * 60:
-            return False, "空闲仅 %ds（< %d 分钟）" % (idle_s, idle_min)
-        results = []
+        if jobstore.queued_gpu_count() > 0:
+            return False, "还有排队中的 GPU 任务（先不关，防止刚开又关）"
+        lim = 0 if force else _idle_limit_min()
+        now = time.time()
+        off, kept = [], []
         for x in instance_pool():
-            u = x["uuid"]
+            u = (x or {}).get("uuid") if isinstance(x, dict) else None
+            if not u or (only and u != only):
+                continue
             try:
                 if (adl_status(u).get("data") or "") != "running":
+                    _IDLE_SEEN.pop(u, None)
+                    continue
+                if jobstore.running_on_host(u) > 0:
+                    _IDLE_SEEN.pop(u, None)                 # 本机在跑 → 空闲计时归零
+                    kept.append("%s:本机有任务" % u)
+                    continue
+                seen = _IDLE_SEEN.setdefault(u, now)        # ⭐ 首次看到它空闲 → 起算
+                _act = jobstore.last_activity_on_host(u) or 0
+                _from = max(_act, seen)
+                idle_s = int(now - _from) if _from else 0
+                if not force and idle_s < lim * 60:
+                    kept.append("%s:空闲 %d 分钟 < %d" % (u, idle_s // 60, lim))
+                    continue
+                if dry:
+                    off.append("%s:dry(空闲 %d 分钟)" % (u, idle_s // 60))
                     continue
                 r = adl_power_off(u)
-                results.append("%s:%s" % (u, str(r.get("code") or r)[:40]))
+                _IDLE_SEEN.pop(u, None)
+                off.append("%s:%s(空闲 %d 分钟)" % (u, str(r.get("code") or r)[:40], idle_s // 60))
             except Exception as e:
-                results.append("%s:异常(%s)" % (u, str(e)[:40]))
-        if results:
-            log("空闲 %d 分钟，自动关机 → %s" % (idle_min, "；".join(results)))
-            return True, "已关机：" + "；".join(results)
-        return False, "无需关机（池内实例均未运行）"
+                off.append("%s:异常(%s)" % (u, str(e)[:40]))
+        if off:
+            log(("[干跑] " if dry else "空闲 %d 分钟，逐台判定 → " % lim) + "；".join(off))
+            return True, ("(干跑，未真关) " if dry else "已关机：") + "；".join(off)
+        return False, "无需关机（" + ("；".join(kept) if kept else "池内无运行中实例") + "）"
     except Exception as e:
         return False, "检查异常：" + str(e)[:120]
 
 
-
 def _shutdown_if_idle(job_id, instance_uuid, log):
-    """任务收尾：0 分钟 = 立即关；>0 交给守卫线程（它到点关机后自己退出）"""
+    """任务收尾：0 分钟 = 立即关；>0 交给常驻守卫线程（并确保它活着，不再出现「无人接手」）"""
     _m = _idle_limit_min()
     log("任务结束，检查空闲关机（空闲 %d 分钟）…" % _m)
     if _m <= 0:
         _ok, _why = idle_shutdown_check(log=log)
     else:
-        _ok, _why = False, "已交守卫线程：%d 分钟无新任务则关机" % _m
+        alive = bool(_GUARD.get("th") and _GUARD["th"].is_alive())
+        if alive:
+            _ok, _why = False, "已交常驻守卫线程：%d 分钟无新任务则关机" % _m
+        else:
+            start_idle_watch()
+            _ok, _why = False, "守卫线程未运行 → 已重启（常驻）：%d 分钟无新任务则关机" % _m
     if not _ok:
         log("本次未关机：%s" % _why)
 
 
 # ------------------------------------------------------------
-# ⭐ 空闲守卫线程（按需起、自己退，不常驻）
-#   ① 无任务 + 无开机 → 线程退出
-#   ② 开机的（池内任何 running 实例，含用户手动开机）+ 空闲达阈值 → 关机 → 线程退出
-#   ③ 有新任务 → 空闲起点由 last_gpu_activity(MAX created/started/finished) 自动重置
-#   出生点：有任务（acquire_ready_instance）/ 进程启动时发现已有开机（register_jobs）
-#   阈值每次轮询重读；轮询间隔 60s
+# ⭐ 空闲守卫线程（常驻：进程启动即起，不再「按需起、自己退」）
+#   ① 逐台判定：某台 running 且本机无 running 任务 + 空闲达阈值 → 只关这一台
+#   ② 池内有排队中的 GPU 任务 → 本轮所有机器都不关（防止刚开又关）
+#   ③ 空闲起点 = max(本机最后一次任务活动, 守卫首次看到它空闲的时刻)
+#   出生点：进程启动（register_jobs）/ 有任务（acquire_ready_instance）——都在，且常驻
+#   阈值每次轮询重读；轮询间隔 _GUARD_TICK 秒
 # ------------------------------------------------------------
 _GUARD = {"th": None, "lock": threading.Lock()}
-_GUARD_TICK = 60                    # 轮询间隔 60s（线程只在「有开机」期间存在）
+_GUARD_TICK = 60                    # 轮询间隔 60s（常驻线程，不自行退出）
+_IDLE_SEEN = {}                     # uuid → 守卫首次看到它「running 且本机无任务」的时刻（epoch 秒）
 
 
 def _running_instances():
@@ -2351,29 +2379,23 @@ def start_idle_watch():
 
 
 def _idle_watch_loop():
-    """先查后睡：无事立刻退出（进程启动拉起时不会空转）"""
-    _first = True
+    """常驻：每 _GUARD_TICK 秒逐台判一次空闲（不再因「无任务/关完机」退出）"""
+    print("[空闲守卫] 常驻守卫启动（逐台判定，阈值 %d 分钟，轮询 %ds）"
+          % (_idle_limit_min(), _GUARD_TICK), flush=True)
     try:
         while True:
-            if not _first:
-                time.sleep(_GUARD_TICK)
-            _first = False
-            if jobstore.gpu_active_count() > 0:
-                continue                                # ③ 有任务：空闲起点自动重置
-            if not _running_instances():
-                break                                   # ① 无任务、无开机 → 线程退出
-            _last = jobstore.last_gpu_activity() or 0
-            _lim = _idle_limit_min()                    # ⭐ 阈值每次轮询重读（设置页改了立即生效）
-            if int(time.time() - _last) < _lim * 60:
-                continue                                # ② 未到阈值
-            idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
-            break                                       # ② 关完 → 线程退出
+            time.sleep(_GUARD_TICK)                     # 启动后先宽限一轮再判
+            try:
+                if str(get_comfy_config().get("comfy_auto_shutdown", "1")) != "1":
+                    continue                            # 开关关着：不判定，但线程继续常驻
+                idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
+            except Exception as e:
+                print("[空闲守卫] 本轮异常（下一轮继续）：%s" % str(e)[:160], flush=True)
     except Exception as e:
         print("[空闲守卫] 异常退出：%s" % str(e)[:160], flush=True)
     finally:
         with _GUARD["lock"]:
             _GUARD["th"] = None
-
 
 
 def run_plan_job(job):
@@ -3263,5 +3285,5 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2vid", run_txt2vid_job, domain="gpu")      # 素材页文生视频（H3 多图参考·纯提词，同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
-    # 空闲守卫：按需线程（无常驻钩子），唯一出生点 = 有任务（acquire_ready_instance 入口）
-    # 规则：无任务+无开机→退出；开机的（任何 running 实例）空闲达阈值→关机后退出；阈值每轮重读
+    start_idle_watch()     # ⭐ 空闲守卫：进程启动即起（常驻）→ 用户手动开机的实例同样受管
+    # 常驻守卫规则：逐台判定；池内有排队任务→都不关；某台 running 且本机无任务、空闲达阈值→只关这一台

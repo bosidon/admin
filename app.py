@@ -3117,11 +3117,19 @@ def api_plan_shot_clip(plan_id):
     if not instance_uuids() or not cfg.get('comfy_api_token'):
         return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
     _eng = str(body.get("engine") or "wan").strip().lower()
-    payload = {"plan_id": plan_id, "targets": targets, "engine": _eng}
-    jid, reused = jobstore.DISPATCHER.enqueue('shotclip', row["article_id"], payload, len(targets),
-                                             priority=10, owner=user_label(u), owner_id=u.get('id'))
-    return jsonify({"ok": True, "job_id": jid, "reused": reused, "targets": len(targets),
-                    "engine": _eng, "queue_pos": jobstore.queue_pos(jid)})
+    # ⭐ 一条产物一个任务：逐镜入队（与素材批量出图口径一致）
+    # 每镜一个任务 → 进度/取消/重出按镜、一镜失败不连坐整批（重投不再重跑已成功的镜）
+    job_ids, reused_any = [], False
+    for _t in targets:
+        _pl = {"plan_id": plan_id, "targets": [_t], "engine": _eng}
+        _jid, _reused = jobstore.DISPATCHER.enqueue('shotclip', row["article_id"], _pl, 1,
+                                                    priority=10, owner=user_label(u),
+                                                    owner_id=u.get('id'))
+        job_ids.append(_jid)
+        reused_any = reused_any or bool(_reused)
+    return jsonify({"ok": True, "job_id": job_ids[0], "job_ids": job_ids, "reused": reused_any,
+                    "targets": len(targets), "engine": _eng,
+                    "queue_pos": jobstore.queue_pos(job_ids[0])})
 
 
 def _do_asset_attach(plan_id, d, u, trusted=False):

@@ -45,6 +45,15 @@ let OWNER = '';                       // 管理员用户筛选（owner_id）
 let ME = {admin: false, id: '', name: ''};
 let TIMER = null;
 
+function jobLabel(j) {                 // 一条产物一个任务 → 标签带上条目号，整批行不再分不清
+    const base = j.kind_label || j.kind || '';
+    const p = j.payload || {};
+    const tg = (p.targets && p.targets.length === 1) ? p.targets[0] : null;
+    if (tg && typeof tg.shot_idx === 'number') return base + ' · 第' + (tg.shot_idx + 1) + '镜';
+    if (p.one && p.one.name) return base + ' · ' + p.one.name;
+    return base;
+}
+
 function esc(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -143,7 +152,7 @@ function jobRow(j) {
     return '<tr style="border-top:1px solid var(--border);">'
         + own
         + '<td style="padding:9px 10px;font-size:13px;max-width:320px;">' + link + '</td>'
-        + '<td style="padding:9px 10px;"><span class="tag tag-gray">' + esc(j.kind_label || j.kind) + '</span></td>'
+        + '<td style="padding:9px 10px;"><span class="tag tag-gray">' + esc(jobLabel(j)) + '</span></td>'
         + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;">' + (j.total ? j.done + '/' + j.total : '—') + '</td>'
         + '<td style="padding:9px 10px;font-size:13px;white-space:nowrap;color:' + col + ';">' + st + qp + '</td>'
         + '<td title="' + (j.seg ? esc('开机等待 ' + fmtDur(j.seg.boot) + ' ｜ ComfyUI 加载 ' + fmtDur(j.seg.load)

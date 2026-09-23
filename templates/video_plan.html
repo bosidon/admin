@@ -188,7 +188,7 @@ async function genClipAll() {
     if (!SCENES.length) { toast('还没有分镜', 'error'); return; }
     const r = await api('/api/video-plans/' + PLAN_ID + '/shot-clip', {
         method: 'POST', body: JSON.stringify({ engine: CLIP_ENGINE }) });
-    if (r && r.ok) { toast('已排队 ' + r.targets + ' 条片段 —— 去「任务」页看进度'); }
+    if (r && r.ok) { toast('已排队 ' + r.targets + ' 条片段（' + (r.job_ids ? r.job_ids.length : r.targets) + ' 个任务）—— 去「任务」页看进度'); }
     else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
 }
 async function refreshClips() { await loadClips(); renderScenes(); }

@@ -951,12 +951,16 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
 
 class _InstanceCtx:
     """with instance_ctx(jid, log, needs) as inst: —— 进场拿实例（含开机+环境自检），退场释放锁与名额"""
-    def __init__(self, job_id, log, needs=None):
+    def __init__(self, job_id, log, needs=None, timeout=None):
         self.job_id, self.log, self.needs = job_id, log, needs
+        self.timeout = timeout      # 视频类：同机串行要等同机锁，等待上限可放宽（默认 1800s）
         self.uuid = self.lock = None
 
     def __enter__(self):
-        self.uuid, self.lock = acquire_ready_instance(self.job_id, self.log, needs=self.needs)
+        _kw = {"needs": self.needs}
+        if self.timeout:
+            _kw["timeout"] = int(self.timeout)
+        self.uuid, self.lock = acquire_ready_instance(self.job_id, self.log, **_kw)
         return self.uuid
 
     def __exit__(self, *exc):
@@ -968,8 +972,8 @@ class _InstanceCtx:
         return False
 
 
-def instance_ctx(job_id, log, needs=None):
-    return _InstanceCtx(job_id, log, needs)
+def instance_ctx(job_id, log, needs=None, timeout=None):
+    return _InstanceCtx(job_id, log, needs, timeout)
 
 
 # ------------------------------------------------------------
@@ -1387,6 +1391,30 @@ def _merge_images(article_id, new_urls, drop_prefix=None):
     conn.execute("UPDATE articles SET images_json=?, updated_at=datetime('now','localtime') WHERE id=?",
                  (json.dumps(cur, ensure_ascii=False), article_id))
     conn.commit()
+    conn.close()
+    return cur
+
+
+def _sort_ai_images(article_id):
+    """把 images_json 里的 ai_NN.png 按编号在原位置排好
+
+    一图一任务后完成顺序不定，清单顺序必须稳定（保持与整批出图一致的条目序）。
+    """
+    conn = _content_db()
+    row = conn.execute("SELECT images_json FROM articles WHERE id=?", (article_id,)).fetchone()
+    try:
+        cur = json.loads((row["images_json"] if row else None) or "[]")
+    except Exception:
+        cur = []
+    slots = [n for n, u in enumerate(cur) if re.search(r"/ai_(\d+)\.png$", str(u))]
+    if len(slots) > 1:
+        vals = sorted((cur[n] for n in slots),
+                      key=lambda u: int(re.search(r"/ai_(\d+)\.png$", str(u)).group(1)))
+        for n, v in zip(slots, vals):
+            cur[n] = v
+        conn.execute("UPDATE articles SET images_json=?, updated_at=datetime('now','localtime')"
+                     " WHERE id=?", (json.dumps(cur, ensure_ascii=False), article_id))
+        conn.commit()
     conn.close()
     return cur
 
@@ -2228,9 +2256,36 @@ def start_generate(article_id, opts, llm_cfg=None, card_size="xiaohongshu",
     payload = {"cards": want_cards, "scenes": want_scenes, "replan": bool(opts.get("replan")),
                "plan_only": plan_only, "card_size": card_size,
                "card_want": int(card_want or 0), "scene_count": int(scene_count or 0)}
-    total = 0 if plan_only else ((int(card_want or 0) if want_cards else 0)
-                                 + (int(scene_count or 0) if want_scenes else 0))
-    return enqueue_image_job(kind, article_id, payload, total, owner=owner, owner_id=owner_id)
+    if plan_only:
+        return enqueue_image_job(kind, article_id, payload, 0, owner=owner, owner_id=owner_id)
+    # ⭐ 一条产物一个任务：配图按条目逐张入队（与素材批量出图口径一致）
+    # 每张一个 task → 进度/取消/重出按张、单张失败不连坐整批
+    plan = read_plan(article_id)
+    quotes = [q for q in (plan.get("quotes") or []) if q.get("on", True)] if want_cards else []
+    scenes = [s for s in (plan.get("scenes") or []) if s.get("on", True)] if want_scenes else []
+    if want_cards and not quotes:
+        return {"error": "方案里没有勾选的条目 —— 请先在「① 生成方案」里勾选要出的条目"}
+    if want_scenes and not scenes:
+        return {"error": "方案里没有勾选的场景 —— 请先在「① 生成方案」里勾选要出的条目"}
+    card_nos, scene_nos = _image_numbers(plan, want_cards, want_scenes)
+    order = [("card", i) for i in range(len(quotes))] + [("scene", n) for n in range(len(scenes))]
+    if not order:
+        return {"error": "没有要出图的条目"}
+    job_ids, reused_any, qpos = [], False, 1
+    for _slot, (_typ, _i) in enumerate(order):
+        _no = card_nos[_i] if _typ == "card" else scene_nos[_i]
+        _pl = dict(payload)
+        _pl["one"] = {"type": _typ, "idx": _i, "no": _no, "name": "ai_%02d.png" % _no,
+                      "first": (_slot == 0)}
+        _r = enqueue_image_job("images", article_id, _pl, 1, owner=owner, owner_id=owner_id)
+        if _r.get("error"):
+            return _r
+        job_ids.append(_r.get("job_id"))
+        reused_any = reused_any or bool(_r.get("reused"))
+        if _slot == 0:
+            qpos = int(_r.get("queue_pos") or 1)
+    return {"ok": True, "kind": "images", "job_id": job_ids[0], "job_ids": job_ids,
+            "reused": reused_any, "targets": len(job_ids), "queue_pos": qpos}
 
 
 # ============================================================
@@ -2587,9 +2642,63 @@ def run_images_job(job):
     style = plan.get("style") or ""
     if style not in style_types():
         style = get_default_style()
-    total = len(quotes) + len(scenes)
+    one = opts.get("one") or None              # ⭐ 一条产物一个任务：本任务只出这一张
+    total = 1 if one else len(quotes) + len(scenes)
     _set(jid, quotes=plan["quotes"], scenes=plan["scenes"], style=style, total=total,
          want_cards=want_cards, want_scenes=want_scenes)
+
+    if one:
+        _t = str(one.get("type") or "card")
+        _i = int(one.get("idx") or 0)
+        _name = str(one.get("name") or "").strip() or ("ai_%02d.png" % int(one.get("no") or 1))
+        if _t == "card":
+            if _i >= len(quotes):
+                raise RuntimeError("条目不存在（清单已变）—— 请重新生成方案")
+            _q = quotes[_i]
+            _cw, _ch = SIZES.get(card_size, SIZES["xiaohongshu"])
+            _bgp = _with_style(_clean_aspect_words(_q.get("bg") or FALLBACK_BG), style)
+        else:
+            if _i >= len(scenes):
+                raise RuntimeError("场景不存在（清单已变）—— 请重新生成方案")
+            _s = scenes[_i]
+            _w, _h = ASPECT_SIZE.get(_s["aspect"], ASPECT_SIZE["3:4"])
+            _sp = _with_style(_clean_aspect_words(_s["prompt"]), style)
+
+        def build_one(base, i):
+            """本任务只出一张：i=0 出图，其余返回 None 结束"""
+            if i > 0:
+                return None
+            if _t == "card":
+                _log(jid, "配图 1/1 出背景中（%dx%d）…" % (_cw, _ch))
+                fn, sub, meta = comfy_generate(base, _bgp, _cw, _ch,
+                                               "qcbg_%d_%d" % (article_id, _i), cfg)
+                bg = comfy_download(base, fn, sub)
+                card = compose_card_over_bg(bg, _q["text"], size=card_size, qr_link=None)
+                buf = io.BytesIO()
+                card.save(buf, "PNG", optimize=True)
+                _log(jid, "配图 1 完成 → %s" % _name)
+                _log_gen_meta(lambda m: _log(jid, m), article_id, _name, "card", meta, style)
+                return (buf.getvalue(), _name, None)
+            _log(jid, "画面 1/1 生成中（%s → %dx%d）…" % (_s["aspect"], _w, _h))
+            fn, sub, meta = comfy_generate(base, _sp, _w, _h, "zl_%d_%d" % (article_id, _i), cfg)
+            data = comfy_download(base, fn, sub)
+            _log(jid, "画面 1 完成 → %s" % _name)
+            _log_gen_meta(lambda m: _log(jid, m), article_id, _name, "scene", meta, style)
+            return (data, _name, None)
+
+        urls, _rows = _run_image_job_core(job, "images", build_one)
+        imgs = list(urls)
+        if _t == "card" and link and one.get("first"):   # 二维码跟着首张卡出（与整批行为一致）
+            qname = "qr.png"
+            make_qrcode(link, box=400).save(str(GEN_DIR / str(article_id) / qname), "PNG",
+                                            optimize=True)
+            imgs.append("/static/generated/%d/%s" % (article_id, qname))
+        if imgs:
+            _merge_images(article_id, imgs)
+            _sort_ai_images(article_id)                 # 清单顺序按条目号稳定（与整批一致）
+        _set(jid, images=imgs, done=1)          # 与整批口径一致：done 只数 ai_*.png（二维码不计）
+        _log(jid, "完成：%s" % _name)
+        return
 
     def build_one(base, i):
         """第 i 张：④ 叠字卡（AI 满版背景 + PIL 叠字）/ ⑤ 场景纯出图 → (bytes, name, None)"""
@@ -3127,7 +3236,8 @@ def run_shotclip_job(job):
                 _it0["length"] / float(_it0["fps"]), _it0["fps"], plan_id))
     outdir = mat.out_dir(article_id)
     done = 0
-    with instance_ctx(jid, lambda m: _log(jid, m), needs=needs_for_job("shotclip", opts)) as inst:
+    with instance_ctx(jid, lambda m: _log(jid, m), needs=needs_for_job("shotclip", opts),
+                      timeout=3600) as inst:
         try:
             _set(jid, stage="ready", host=inst)
             base = base_for(inst, logger=lambda m: _log(jid, m))

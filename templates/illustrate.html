@@ -277,7 +277,7 @@ async function startJob(payload) {
     }
     const lbl = (r.kind === 'plan') ? '生成方案' : '生成配图';
     if (r.reused) toast('ℹ️ 同样的任务已在队列里，已复用', 'success');
-    else toast('✅ ' + lbl + '已入队' + (r.queue_pos > 1 ? '（排队第 ' + r.queue_pos + ' 位）' : ''), 'success');
+    else toast('✅ ' + lbl + '已入队' + (r.targets > 1 ? '（' + r.targets + ' 个任务）' : '') + (r.queue_pos > 1 ? '（排队第 ' + r.queue_pos + ' 位）' : ''), 'success');
     label0 = lbl;
     hint('任务已入队…');
     await refreshJobs();

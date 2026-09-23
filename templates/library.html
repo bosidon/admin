@@ -20,6 +20,7 @@
             <input type="file" id="file" multiple accept="image/*,audio/*,video/*" style="display:none;" onchange="upload(this)">
         </label>
         <button class="btn btn-outline" id="btn-download" disabled onclick="downloadSelected()">⬇ 下载</button>
+        <button class="btn btn-outline" id="btn-del" disabled onclick="delSelected()">🗑 删除所选</button>
         <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
     </span>
 </div>
@@ -254,8 +255,8 @@ function card(m) {
         : '<div style="height:132px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:#f8fafc;color:#94a3b8;">'
           + '<div style="font-size:26px;">▶️</div><div style="font-size:20px;">' + (TYPE_ICON[m.type] || '📄') + '</div></div>';
     return '<div style="position:relative;border:' + (on ? '2px solid #6366f1' : '1px solid #e2e8f0') + ';border-radius:10px;overflow:hidden;background:#fff;">'
-        + (isImg ? '<div style="position:absolute;top:6px;left:6px;z-index:3;"><input type="checkbox" ' + (on ? 'checked' : '')
-          + ' onclick="event.stopPropagation()" onchange="toggle(' + m.id + ')" style="width:16px;height:16px;cursor:pointer;"></div>' : '')
+        + '<div style="position:absolute;top:6px;left:6px;z-index:3;"><input type="checkbox" ' + (on ? 'checked' : '')
+          + ' onclick="event.stopPropagation()" onchange="toggle(' + m.id + ')" style="width:16px;height:16px;cursor:pointer;"></div>'
         + '<div style="position:absolute;top:6px;right:6px;z-index:3;display:flex;gap:4px;">'
         + '<a href="' + esc(m.file_path) + '" download target="_blank" rel="noopener" title="下载" onclick="event.stopPropagation()" style="' + ICON_BTN + '">⬇</a>'
         + '<button onclick="event.stopPropagation();del(' + m.id + ')" title="删除" style="' + ICON_BTN + '">✕</button>'
@@ -277,16 +278,21 @@ function toggle(id) {
     render(); syncSel();
 }
 
-function syncSel() {                 // 顶部工具栏：勾选数不匹配就置灰（抠图 1 张 / 编辑 1-3 张 / 拼版 2-9 张）
+function syncSel() {                 // 顶部工具栏：勾选数不匹配就置灰；选中含非图 → 加工类置灰（下载/删除不限类型）
     const n = SEL.size;
     const bc = document.getElementById('btn-cutout'), bs = document.getElementById('btn-stitch'),
-          bd = document.getElementById('btn-download');
-    bc.disabled = n !== 1;                                  // 抠图：正好 1 张
-    bs.disabled = n < 2 || n > 9;                           // 拼版：2-9 张
-    if (bd) { bd.disabled = n < 1; }                        // 下载：至少 1 张
-    ((OPTS.edit || {}).modes || []).forEach(m => {          // 编辑 4 个功能：1-3 张可用
+          bd = document.getElementById('btn-download'), bdel = document.getElementById('btn-del');
+    const allImg = n > 0 && Array.from(SEL).every(function (id) {
+        const it = ITEMS.find(function (x) { return String(x.id) === String(id); });
+        return it && it.type === 'image';
+    });
+    bc.disabled = n !== 1 || !allImg;                     // 抠图：正好 1 张图
+    bs.disabled = n < 2 || n > 9 || !allImg;              // 拼版：2-9 张图
+    if (bd) { bd.disabled = n < 1; }                      // 下载：至少 1 张，不限类型
+    if (bdel) { bdel.disabled = n < 1; }                  // 删除：至少 1 张，不限类型
+    ((OPTS.edit || {}).modes || []).forEach(m => {
         const b = document.getElementById('btn-edit-' + m.id);
-        if (b) { b.disabled = n < 1 || n > 3; }
+        if (b) { b.disabled = n < 1 || n > 3 || !allImg; }   // 编辑：1-3 张图
     });
     document.getElementById('sel-hint').textContent = n
         ? ('已选 ' + n + ' 张 · 1 张抠图 / 1-3 张编辑 / 2-9 张拼版')
@@ -461,6 +467,19 @@ async function del(id) {
     const r = await api('/api/materials/delete', {method: 'POST', body: JSON.stringify({id: id})});
     if (!r.ok) { toast(r.error || '删除失败', 'error'); return; }
     toast('已删除'); SEL.delete(id); load();
+}
+
+async function delSelected() {       // 多选删除：勾几张删几张，文件一起删（不可恢复）
+    const ids = Array.from(SEL);
+    if (!ids.length) { return; }
+    if (!confirm('删除所选 ' + ids.length + ' 张？文件会一起删掉，不可恢复。被剧本/角色引用的也会删，关联会断。')) { return; }
+    const r = await api('/api/materials/delete', {method: 'POST', body: JSON.stringify({ids: ids})});
+    if (r && r.deleted > 0) {
+        toast('已删除 ' + r.deleted + ' 张' + ((r.failed || []).length ? ('，失败 ' + r.failed.length + ' 张') : ''));
+        SEL.clear(); load(); return;
+    }
+    toast((r && r.error) || '删除失败', 'error');
+    if (r && r.failed && r.failed.length) { SEL.clear(); load(); }
 }
 
 async function compress(file) {

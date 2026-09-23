@@ -1328,6 +1328,7 @@ def _run_wf_one(base, wf, timeout=900, logger=None):
 def _content_db():
     conn = sqlite3.connect(CONTENT_DB, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")   # 与 get_content_db 一致：删除父行时级联生效、不落孤儿
     return conn
 
 

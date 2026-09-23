@@ -1943,8 +1943,22 @@ def api_gen_script(plan_id):
         script = gen_script(art["content_md"], get_llm_config())
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500      # 失败不写库
-    _st = (row["status"] or "draft")
-    _new_st = _st if _st in ("scripted", "storyboard_done") else "scripted"   # status 只前进不倒退
+    # ── AI 生成剧本规则：先删剧本（级联清需求行/分镜/绑定/渲染记录，外键 ON DELETE CASCADE 已建）
+    #    → 同 id 重插；根字段（article_id/title/created_at/role_ids 等）原样保留；
+    #    素材文件挂文案（materials.article_id / roles.owner_id）不受影响 ──
+    _old = db.execute(
+        "SELECT article_id, title, logline, beats, total_duration_s, aspect, style,"
+        " owner_id, created_at, role_ids FROM video_scripts WHERE id=?", (plan_id,)).fetchone()
+    db.execute("DELETE FROM video_scripts WHERE id=?", (plan_id,))   # 级联清除剧本链（同一事务）
+    if _old:
+        db.execute(
+            "INSERT INTO video_scripts (id, article_id, title, logline, beats, total_duration_s,"
+            " aspect, style, owner_id, created_at, role_ids, status, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,'scripted',datetime('now','localtime'))",
+            (plan_id, _old["article_id"], _old["title"], _old["logline"], _old["beats"],
+             _old["total_duration_s"], _old["aspect"], _old["style"], _old["owner_id"],
+             _old["created_at"], _old["role_ids"]))
+    _new_st = "scripted"   # 分镜已级联清空 → 状态回 scripted（原「只前进」会让状态说谎）
     save_script_obj(db, plan_id, script)          # → video_scripts 主字段 + script_assets 需求行
     db.execute("UPDATE video_scripts SET status=?, updated_at=datetime('now','localtime') WHERE id=?",
                (_new_st, plan_id))
@@ -3430,18 +3444,33 @@ def api_materials_download():
 
 @app.route('/api/materials/delete', methods=['POST'])
 def api_materials_delete():
-    """删除素材：只能删自己的（含历史未归属的）"""
+    """删除素材：单 id（兼容旧调用）或 ids 批量；只能删自己的（含历史未归属的），admin 豁免"""
     u = current_user() or {}
     body = request.get_json(silent=True) or {}
-    mid = body.get('id')
-    if not mid:
+    ids = body.get('ids')
+    if not isinstance(ids, list):
+        ids = []
+    _one = body.get('id')
+    if not ids and _one:
+        ids = [_one]
+    ids = [x for x in ids if x]
+    if not ids:
         return jsonify({"error": "缺少 id"}), 400
-    r = materialstore.delete_material(mid, uid=u.get('id'), is_admin=_is_admin(u))
-    if not r.get('ok'):
-        return jsonify(r), (r.get('code') or 400)
-    return jsonify(r)
-
-
+    deleted, failed, code = 0, [], 400
+    for mid in ids:
+        try:
+            r = materialstore.delete_material(mid, uid=u.get('id'), is_admin=_is_admin(u))
+        except Exception as e:
+            r = {"ok": False, "error": str(e)[:160]}
+        if r.get('ok'):
+            deleted += 1
+        else:
+            failed.append({"id": mid, "error": r.get('error') or '删除失败'})
+            if r.get('code'):
+                code = r.get('code')
+    if not deleted and failed:
+        return jsonify({"ok": False, "error": failed[0]['error'], "failed": failed}), code
+    return jsonify({"ok": True, "deleted": deleted, "failed": failed})
 @app.route('/api/materials/process', methods=['POST'])
 def api_materials_process():
     """素材加工入队：抠图(cutout) / 图生图(edit) / 拼版(stitch) —— GPU 队列，看板可见"""

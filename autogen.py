@@ -836,7 +836,7 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
     """挑一台「空闲且可用」的实例并锁住（返回 uuid, lock）
     顺序：池内正在 running 的优先（秒级可用）→ 其余按池序尝试开机（无库存重试）
     全忙/开不起来 → 等待（可被取消）；调用方负责 lock.release() + _slot_drop()"""
-    start_idle_watch()          # 空闲守卫出生点之一（另一处：进程启动 register_jobs；常驻不掉线）
+    start_idle_watch()          # 空闲守卫出生点之一（另一处：进程启动 register_jobs）
     need_nodes = list((needs or {}).get("nodes") or [])
     t0, warned, tried = time.time(), False, set()   # tried：本轮已自检过的实例（防同一台反复开机）
     while True:
@@ -2320,7 +2320,7 @@ def idle_shutdown_check(log=None, force=False, dry=False, only=None):
 
 
 def _shutdown_if_idle(job_id, instance_uuid, log):
-    """任务收尾：0 分钟 = 立即关；>0 交给常驻守卫线程（并确保它活着，不再出现「无人接手」）"""
+    """任务收尾：0 分钟 = 立即关；>0 交给守卫线程（它到点关机后自己退出）"""
     _m = _idle_limit_min()
     log("任务结束，检查空闲关机（空闲 %d 分钟）…" % _m)
     if _m <= 0:
@@ -2328,24 +2328,25 @@ def _shutdown_if_idle(job_id, instance_uuid, log):
     else:
         alive = bool(_GUARD.get("th") and _GUARD["th"].is_alive())
         if alive:
-            _ok, _why = False, "已交常驻守卫线程：%d 分钟无新任务则关机" % _m
+            _ok, _why = False, "已交守卫线程：%d 分钟无新任务则关机" % _m
         else:
             start_idle_watch()
-            _ok, _why = False, "守卫线程未运行 → 已重启（常驻）：%d 分钟无新任务则关机" % _m
+            _ok, _why = False, "守卫线程未在岗 → 已拉起：%d 分钟无新任务则关机" % _m
     if not _ok:
         log("本次未关机：%s" % _why)
 
 
 # ------------------------------------------------------------
-# ⭐ 空闲守卫线程（常驻：进程启动即起，不再「按需起、自己退」）
-#   ① 逐台判定：某台 running 且本机无 running 任务 + 空闲达阈值 → 只关这一台
-#   ② 池内有排队中的 GPU 任务 → 本轮所有机器都不关（防止刚开又关）
-#   ③ 空闲起点 = max(本机最后一次任务活动, 守卫首次看到它空闲的时刻)
-#   出生点：进程启动（register_jobs）/ 有任务（acquire_ready_instance）——都在，且常驻
+# ⭐ 空闲守卫线程（按需起、自己退，不常驻）
+#   ① 无任务 + 无开机 → 线程退出
+#   ② 逐台判定：某台 running 且本机无 running 任务 + 空闲达阈值 → 只关这一台 → 线程退出
+#   ③ 池内有排队中的 GPU 任务 → 本轮所有机器都不关（防止刚开又关）
+#   ④ 空闲起点 = max(本机最后一次任务活动, 守卫首次看到它空闲的时刻)，有新任务自动重置
+#   出生点：有任务（acquire_ready_instance）/ 进程启动时发现已有开机（register_jobs）
 #   阈值每次轮询重读；轮询间隔 _GUARD_TICK 秒
 # ------------------------------------------------------------
 _GUARD = {"th": None, "lock": threading.Lock()}
-_GUARD_TICK = 60                    # 轮询间隔 60s（常驻线程，不自行退出）
+_GUARD_TICK = 60                    # 轮询间隔 60s（线程只在「有开机」期间存在）
 _IDLE_SEEN = {}                     # uuid → 守卫首次看到它「running 且本机无任务」的时刻（epoch 秒）
 
 
@@ -2379,16 +2380,23 @@ def start_idle_watch():
 
 
 def _idle_watch_loop():
-    """常驻：每 _GUARD_TICK 秒逐台判一次空闲（不再因「无任务/关完机」退出）"""
-    print("[空闲守卫] 常驻守卫启动（逐台判定，阈值 %d 分钟，轮询 %ds）"
+    """按需起、自己退：先查后睡；无开机即退，关完机即退（进程启动拉起时不会空转）"""
+    print("[空闲守卫] 启动（逐台判定，阈值 %d 分钟，轮询 %ds）"
           % (_idle_limit_min(), _GUARD_TICK), flush=True)
+    _first = True
     try:
         while True:
-            time.sleep(_GUARD_TICK)                     # 启动后先宽限一轮再判
+            if not _first:
+                time.sleep(_GUARD_TICK)
+            _first = False
+            if not _running_instances():
+                break                                   # ① 无任务 + 无开机 → 线程退出
             try:
                 if str(get_comfy_config().get("comfy_auto_shutdown", "1")) != "1":
-                    continue                            # 开关关着：不判定，但线程继续常驻
-                idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
+                    continue                            # 开关关着：在岗但不动作
+                _ok, _why = idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
+                if _ok:
+                    break                               # ② 已按台关机 → 线程退出
             except Exception as e:
                 print("[空闲守卫] 本轮异常（下一轮继续）：%s" % str(e)[:160], flush=True)
     except Exception as e:
@@ -2396,6 +2404,7 @@ def _idle_watch_loop():
     finally:
         with _GUARD["lock"]:
             _GUARD["th"] = None
+        print("[空闲守卫] 退出（无待管实例或已关机）", flush=True)
 
 
 def run_plan_job(job):
@@ -3285,5 +3294,5 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2vid", run_txt2vid_job, domain="gpu")      # 素材页文生视频（H3 多图参考·纯提词，同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
-    start_idle_watch()     # ⭐ 空闲守卫：进程启动即起（常驻）→ 用户手动开机的实例同样受管
-    # 常驻守卫规则：逐台判定；池内有排队任务→都不关；某台 running 且本机无任务、空闲达阈值→只关这一台
+    start_idle_watch()     # ⭐ 空闲守卫：进程启动时若发现已有开机 → 起（按需，无开机即自己退）
+    # 守卫规则：逐台判定；池内有排队任务→都不关；某台 running 且本机无任务、空闲达阈值→只关这一台→线程退出

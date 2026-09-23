@@ -43,8 +43,8 @@
     <h3 style="margin-bottom:20px;">🎨 AI 生图（AutoDL ComfyUI）</h3>
 
     <div class="form-group">
-        <label class="form-label">实例池（每行一台：<code>pro-xxxxxxxxxxxx|备注</code>，顺序即优先级）</label>
-        <textarea class="form-input" id="comfy-instances" rows="3" placeholder="pro-7895a8aee534|北京B区 ¥1.68/h&#10;pro-7898f1e60d45|西北B区 ¥6.46/h"
+        <label class="form-label">实例池（每行一台：<code>pro-xxxxxxxxxxxx|备注|用途</code>，顺序即优先级；用途 可省略=通用，取值 <code>通用</code> / <code>出图</code> / <code>视频</code>）</label>
+        <textarea class="form-input" id="comfy-instances" rows="3" placeholder="pro-7895a8aee534|北京B区 ¥1.68/h|出图&#10;pro-789944444b4b|西北D区 RTX 5090 ¥2.88/h|出图&#10;pro-7898f1e60d45|西北B区 RTX 6000D ¥6.46/h|视频"
                   style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;resize:vertical;"></textarea>
     </div>
 

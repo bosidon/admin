@@ -697,22 +697,41 @@ _SLOT = {"n": 0}                   # 正在占用「并行名额」的任务数
 _SLOT_GUARD = threading.Lock()
 
 
+USE_TOKENS = ("通用", "出图", "视频")
+
+# 任务类别 → 允许的实例用途（None/未列出的 kind = 不限制）
+JOB_USE = {"txt2img": "出图", "images": "出图", "shotframe": "出图", "cutout": "出图",
+           "shotclip": "视频", "txt2vid": "视频"}
+
+
+def _split_pool_line(ln):
+    """解析 `uuid|备注|用途`：>=3 段时尾段即用途（取值见 USE_TOKENS，非法则按「通用」容错）；
+    2 段以内沿用旧格式 `uuid|备注`"""
+    parts = [x.strip() for x in ln.split("|")]
+    u = parts[0] if parts else ""
+    use = "通用"
+    if len(parts) >= 3 and parts[-1] in USE_TOKENS:
+        use = parts[-1]
+        parts = parts[:-1]
+    note = "|".join(x for x in parts[1:] if x)
+    return u, note, use
+
+
 def instance_pool():
-    """实例池（有序）：settings.comfy_instances 每行 `uuid|备注`；为空则回落旧的单实例字段"""
+    """实例池（有序）：settings.comfy_instances 每行 `uuid|备注|用途`；为空则回落旧的单实例字段"""
     cfg = get_comfy_config()
     out = []
     for ln in str(cfg.get("comfy_instances") or "").replace(",", "\n").split("\n"):
         ln = ln.strip()
         if not ln or ln.startswith("#"):
             continue
-        parts = ln.split("|", 1)
-        u = parts[0].strip()
+        u, note, use = _split_pool_line(ln)
         if u and u not in [x["uuid"] for x in out]:
-            out.append({"uuid": u, "note": (parts[1].strip() if len(parts) > 1 else "")})
+            out.append({"uuid": u, "note": note, "use": use})
     if not out:
         u = str(cfg.get("comfy_instance_uuid") or "").strip()
         if u:
-            out.append({"uuid": u, "note": "（兼容旧配置）"})
+            out.append({"uuid": u, "note": "（兼容旧配置）", "use": "通用"})
     return out
 
 
@@ -838,6 +857,8 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
     全忙/开不起来 → 等待（可被取消）；调用方负责 lock.release() + _slot_drop()"""
     start_idle_watch()          # ⭐ 空闲守卫**唯一**出生点 = 有任务（用户 2026-09-22 定：「出生点 只有1个」）
     need_nodes = list((needs or {}).get("nodes") or [])
+    _jkind = str(((jobstore.get(job_id) or {}) or {}).get("kind") or "").strip()
+    _juse = JOB_USE.get(_jkind)      # None = 该任务类型不受用途限制
     t0, warned, tried = time.time(), False, set()   # tried：本轮已自检过的实例（防同一台反复开机）
     while True:
         if jobstore.canceled(job_id):
@@ -846,8 +867,12 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
         if not pool:
             raise RuntimeError("未配置应用实例（设置页「实例池」）")
         # A：按能力档案先筛掉「确定干不了这活」的机器（模型不进判据，避免误杀能跑的机器）
-        cands, skipped = [], []
+        cands, skipped, use_skip = [], [], []
         for _x in pool:
+            _xu = str(_x.get("use") or "通用")
+            if _juse and _xu not in ("通用", _juse):
+                use_skip.append("%s（%s）" % (_x["uuid"], _xu))
+                continue
             if jobstore.caps_ok(_x["uuid"], need_nodes) is False:
                 _d = jobstore.caps_get(_x["uuid"]) or {}
                 _miss = sorted(set(_d.get("missing_nodes") or []) & set(need_nodes))
@@ -855,10 +880,15 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
             else:
                 cands.append(_x)
         if not cands:
+            if _juse and len(use_skip) == len(pool):     # 池内压根没有该用途的机器 → 立刻报错，不空等
+                raise RuntimeError("池内没有「%s」用途的实例（%d 台：%s），请到设置页「实例池」把其中一台标为「%s」或去掉用途（=通用）"
+                                   % (_juse, len(use_skip), "；".join(use_skip), _juse))
             raise RuntimeError("池内没有满足该任务的实例（需要 %s）：%s"
-                              % (",".join(need_nodes) or "-", "；".join(skipped)))
+                              % (",".join(need_nodes) or "-", "；".join(skipped) or "；".join(use_skip) or "-"))
         if skipped and not warned:
             log("按能力档案跳过 %d 台：%s" % (len(skipped), "；".join(skipped)))
+        if use_skip and not warned:
+            log("因用途不符跳过 %d 台：%s" % (len(use_skip), "；".join(use_skip)))
         if _slot_take():
             # ① 先挑已经在 running 且锁空闲的（不用等开机）
             for x in cands:

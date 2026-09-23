@@ -1798,6 +1798,16 @@ def api_get_settings():
 @app.route('/api/settings', methods=['POST'])
 def api_save_settings():
     data = request.json
+    _ci = data.get('comfy_instances')
+    if _ci is not None:                      # 实例池第三段只能是 通用/出图/视频（防手滑，写错就静默变「通用」去烧贵机器）
+        _USES = ('通用', '出图', '视频')
+        for _i, _ln in enumerate(str(_ci).replace(',', '\n').split('\n'), 1):
+            _ln = _ln.strip()
+            if not _ln or _ln.startswith('#'):
+                continue
+            _p = [x.strip() for x in _ln.split('|')]
+            if len(_p) >= 3 and _p[-1] not in _USES:
+                return jsonify({"error": "实例池第 %d 行用途非法：%s（只能是 通用/出图/视频）" % (_i, _p[-1])}), 400
     db = get_db()
     for key, value in data.items():
         db.execute('''

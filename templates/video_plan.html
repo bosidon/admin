@@ -53,22 +53,10 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">② 分镜表（画面 / 台词 / 时长）</label>
             <div>
-                <select id="tts-voice" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
-                    <option value="zh-CN-XiaoxiaoNeural">晓晓 · 女声</option>
-                    <option value="zh-CN-XiaoyiNeural">晓伊 · 女声（年轻）</option>
-                    <option value="zh-CN-YunxiNeural">云希 · 男声（年轻）</option>
-                    <option value="zh-CN-YunjianNeural">云健 · 男声（成熟）</option>
-                    <option value="zh-CN-YunyangNeural">云扬 · 男声（播报）</option>
-                </select>
-                <button class="btn btn-outline btn-sm" onclick="genFrameAll('start')">🎨 整片出首帧</button>
-                <button class="btn btn-outline btn-sm" onclick="genFrameAll('end')">🎨 整片出尾帧</button>
-                <select id="clip-engine" onchange="setClipEngine(this.value)" title="片段引擎：Wan＝480P 快而便宜；H3＝首尾帧插值、768P＋2×超分、带音轨；H3 参考＝不吃首尾帧，直接用该镜素材图（最多 5 张）——后两者只有 6000D 有，慢且贵" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
-                    <option value="wan">片段 · Wan 480P</option>
-                    <option value="h3">片段 · H3 768P 音轨</option>
+                <select id="clip-engine" onchange="setClipEngine(this.value)" title="片段引擎：H3 参考＝用该镜素材图（最多 5 张），带音轨 —— 只走 6000D（¥6.46/h），约 3 分钟/条" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
                     <option value="h3ref">片段 · H3 参考5图</option>
                 </select>
                 <button class="btn btn-outline btn-sm" onclick="genClipAll()">🎬 整片出片段</button>
-                <button class="btn btn-outline btn-sm" onclick="genVoiceAll()">🔊 全部配音</button>
                 <button class="btn btn-primary btn-sm" onclick="genStoryboard()">🤖 AI 生成分镜</button>
                 <button class="btn btn-outline btn-sm" onclick="addScene()">＋ 添加镜头</button>
             </div>
@@ -80,8 +68,6 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;">画面</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;">台词/字幕</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;">素材</th>
-                    <th style="padding:8px;border:1px solid #e2e8f0;width:118px;">首帧图</th>
-                    <th style="padding:8px;border:1px solid #e2e8f0;width:118px;">尾帧图</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:146px;">片段</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
@@ -140,21 +126,18 @@ function switchTab(name) {
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="9" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;">${i+1}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="visual" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.visual||''}</textarea></td>
-        <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="line" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.line||''}</textarea><div id="vz-${i}" style="margin-top:3px;"></div></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;"><textarea rows="2" data-i="${i}" data-f="line" style="width:100%;border:none;font-size:12px;resize:vertical;font-family:inherit;">${s.line||''}</textarea></td>
         <td style="padding:6px;border:1px solid #e2e8f0;">${assetCell(s)}</td>
-        <td style="padding:6px;border:1px solid #e2e8f0;">${frameCell(i,'start')}</td>
-        <td style="padding:6px;border:1px solid #e2e8f0;">${frameCell(i,'end')}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;">${clipCell(i)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
-        <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-outline btn-sm" onclick="genVoice(${i})" title="生成配音">🔊</button> <button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
-    renderVoiceCells();
     tb.querySelectorAll('textarea,input').forEach(el => {
         el.onchange = function() {
             const i = +this.dataset.i, f = this.dataset.f;
@@ -163,77 +146,15 @@ function renderScenes() {
     });
 }
 
-// ==================== 首/尾帧图（文+图 出图；尾帧以首帧为底图） ====================
-let FRAMES = {};                        // 镜号 → {image_url,end_image_url,image_material_id,end_image_material_id}
-async function loadFrames() {
-    try {
-        const d = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', { method: 'GET' });
-        FRAMES = {};
-        (d.shots || []).forEach(s => { FRAMES[s.shot_idx] = s; });
-    } catch (e) { FRAMES = {}; }
-}
-function frameCell(i, kind) {
-    const f = FRAMES[i] || {};
-    const url = (kind === 'start' ? f.image_url : f.end_image_url) || '';
-    const mid = (kind === 'start' ? f.image_material_id : f.end_image_material_id);
-    const thumb = url
-        ? '<a href="' + url + '" target="_blank" title="点击看大图"><img src="/api/materials/thumb?u=' + encodeURIComponent(url) + '" style="width:100%;height:64px;object-fit:cover;border-radius:6px;display:block;"></a>'
-        : '<div style="height:64px;display:flex;align-items:center;justify-content:center;background:#f8fafc;border-radius:6px;color:#cbd5e1;font-size:11px;">未生成</div>';
-    return '<div style="display:flex;flex-direction:column;gap:4px;">' + thumb
-        + '<div style="display:flex;gap:4px;">'
-        + '<button class="btn btn-outline btn-sm" style="flex:1;padding:2px 6px;font-size:11px;" onclick="genFrame(' + i + ',\'' + kind + '\')">' + (mid ? '重出' : '🎨 生成') + '</button>'
-        + '<button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:11px;" onclick="pickFrameMaterial(' + i + ',\'' + kind + '\')" title="从素材库选一张">📚</button>'
-        + '</div></div>';
-}
-async function genFrame(i, kind) {
-    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', {
-        method: 'POST', body: JSON.stringify({ frame: kind, shot_idx: i }) });
-    if (r && r.ok) { toast('已排队：第 ' + (i + 1) + ' 镜 · ' + (kind === 'start' ? '首帧' : '尾帧') + '（队列 ' + (r.queue_pos || 0) + '）'); }
-    else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
-}
-async function genFrameAll(kind) {
-    if (!SCENES.length) { toast('还没有分镜', 'error'); return; }
-    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', {
-        method: 'POST', body: JSON.stringify({ frame: kind }) });
-    if (r && r.ok) { toast('已排队 ' + r.targets + ' 张' + (kind === 'start' ? '首帧' : '尾帧') + ' —— 去「任务」页看进度'); }
-    else { toast('❌ ' + ((r && r.error) || '入队失败'), 'error'); }
-}
-let FRAME_PICK_I = 0, FRAME_PICK_KIND = 'start';
-async function pickFrameMaterial(i, kind) {
-    FRAME_PICK_I = i; FRAME_PICK_KIND = kind;
-    const rows = await api('/api/library?type=image');
-    LIB_PICK = (Array.isArray(rows) ? rows : []).filter(function (m) {
-        return m && (m.file_path || m.path || m.url) && (m.type === 'image' || !m.type); });
-    const body = LIB_PICK.length ? ('<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;max-height:52vh;overflow:auto;">'
-        + LIB_PICK.map(function (m, k) {
-            const fp = m.file_path || m.path || m.url || '';
-            return '<div onclick="attachFrameMaterial(' + k + ')">'
-                + '<div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;cursor:pointer;">'
-                + '<img src="/api/materials/thumb?u=' + encodeURIComponent(fp) + '" style="width:100%;height:96px;object-fit:cover;display:block;">'
-                + '<div style="font-size:11px;padding:4px;color:#475569;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (m.name || ('#' + m.id)) + '</div></div></div>';
-        }).join('') + '</div>')
-        : '<div style="padding:24px;text-align:center;color:#94a3b8;">素材库里还没有图片</div>';
-    openModal('第 ' + (i + 1) + ' 镜 · 选' + (kind === 'start' ? '首帧' : '尾帧') + '图', body, function () {});
-}
-async function attachFrameMaterial(k) {
-    const m = LIB_PICK[k];
-    if (!m) { closeModal(); return; }
-    const r = await api('/api/video-plans/' + PLAN_ID + '/shot-frame', {
-        method: 'POST', body: JSON.stringify({ attach_material: { shot_idx: FRAME_PICK_I, frame: FRAME_PICK_KIND, material_id: m.id } }) });
-    closeModal();
-    if (r && r.ok) { toast('✓ 已挂到第 ' + (FRAME_PICK_I + 1) + ' 镜 · ' + (FRAME_PICK_KIND === 'start' ? '首帧' : '尾帧')); await refreshFrames(); }
-    else { toast('❌ ' + ((r && r.error) || '挂载失败'), 'error'); }
-}
-async function refreshFrames() { await loadFrames(); renderScenes(); }
 
-// ==================== 分镜片段（首帧 + 尾帧 → 一条 mp4；首尾帧图生视频） ====================
+
+// ==================== 分镜片段（该镜素材图 → 一条 mp4） ====================
 let CLIPS = {};                          // 镜号 → {clip_url, clip_engine, clip_duration_s, has_start, has_end}
-let CLIP_ENGINE = localStorage.getItem('clip_engine') || 'wan';
+let CLIP_ENGINE = 'h3ref'; localStorage.setItem('clip_engine', 'h3ref');
 function setClipEngine(v) {
-    CLIP_ENGINE = (v === 'h3ref') ? 'h3ref' : ((v === 'h3') ? 'h3' : 'wan');
+    CLIP_ENGINE = 'h3ref';
     localStorage.setItem('clip_engine', CLIP_ENGINE);
-    if (CLIP_ENGINE === 'h3') { toast('H3 引擎：只走 6000D（¥6.46/h），5–11 分钟/条 —— 带音轨 + 2× 超分'); }
-    if (CLIP_ENGINE === 'h3ref') { toast('H3 多图参考：不吃首尾帧，直接用该镜素材图（最多 5 张）—— 只走 6000D（¥6.46/h），约 3 分钟/条，带音轨'); }
+    if (CLIP_ENGINE === 'h3ref') { toast('H3 多图参考：用该镜素材图（最多 5 张），带音轨 —— 只走 6000D（¥6.46/h），约 3 分钟/条'); }
 }
 function applyClipEngine() { const s = document.getElementById('clip-engine'); if (s) { s.value = CLIP_ENGINE; } }
 async function loadClips() {
@@ -537,51 +458,6 @@ function pollAssetJob(jobId, i, p, kind) {
     }, 3000);
 }
 
-let VOICE_MAP = {};
-function _ttsVoice() {
-    const el = document.getElementById('tts-voice');
-    return (el && el.value) || 'zh-CN-XiaoxiaoNeural';
-}
-function genVoice(i) {
-    const box = document.getElementById('vz-' + i);
-    if (box) box.innerHTML = '<span style="color:#64748b;font-size:11px;">合成中…</span>';
-    fetch('/api/video-plans/' + PLAN_ID + '/voice', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shot_idx: i, voice: _ttsVoice() }) })
-      .then(r => r.json()).then(j => {
-        const d = (j.done || [])[0];
-        if (d) { VOICE_MAP[i] = { url: d.url, duration_s: d.duration_s }; renderVoiceCells(); toast('🔊 镜' + (i + 1) + ' 配音已生成（' + d.duration_s + 's）', 'success'); }
-        else { const f = (j.failed || [])[0]; if (box) box.innerHTML = '<span style="color:#dc2626;font-size:11px;">' + ((f && f.error) || j.error || '失败') + '</span>'; }
-      }).catch(() => { if (box) box.innerHTML = '<span style="color:#dc2626;font-size:11px;">请求失败</span>'; });
-}
-function genVoiceAll() {
-    toast('🔊 正在为 ' + SCENES.length + ' 个镜头合成配音…');
-    fetch('/api/video-plans/' + PLAN_ID + '/voice', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ voice: _ttsVoice() }) })
-      .then(r => r.json()).then(j => {
-        (j.done || []).forEach(d => { VOICE_MAP[d.shot_idx] = { url: d.url, duration_s: d.duration_s }; });
-        renderVoiceCells();
-        toast('✅ 配音完成 ' + (j.done || []).length + ' 段' + ((j.failed || []).length ? ('，失败 ' + j.failed.length) : ''), 'success');
-      }).catch(() => toast('配音请求失败', 'error'));
-}
-function loadVoices() {
-    fetch('/api/video-plans/' + PLAN_ID + '/voice').then(r => r.json()).then(j => {
-        VOICE_MAP = {};
-        (j.clips || []).forEach(c => { if (c.url) VOICE_MAP[c.shot_idx] = { url: c.url, duration_s: c.duration_s }; });
-        renderVoiceCells();
-    }).catch(() => {});
-}
-function renderVoiceCells() {
-    SCENES.forEach((s, i) => {
-        const box = document.getElementById('vz-' + i);
-        if (!box) return;
-        const v = VOICE_MAP[i];
-        if (v && v.url) {
-            box.innerHTML = '<audio controls preload="none" style="height:26px;max-width:220px;" src="' + v.url + '"></audio><span style="color:#0f766e;font-size:11px;margin-left:4px;">' + v.duration_s + 's</span>';
-        } else if (!box.innerHTML || box.innerHTML.indexOf('未配音') >= 0) {
-            box.innerHTML = '<span style="color:#cbd5e1;font-size:11px;">未配音</span>';
-        }
-    });
-}
 function copyIdx(i) { copyText(PROMPT_FLAT[i] || ''); }
 
 function copyText(t) {
@@ -653,7 +529,6 @@ async function load() {
     await loadRoles();
     renderRolePack();
     renderReqs();
-    await loadFrames();
     await loadClips();
     renderScenes();
     // 加载原始文案
@@ -917,6 +792,5 @@ async function genStoryboard() {
 }
 
 load();
-loadVoices();
 </script>
 {% endblock %}

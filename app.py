@@ -3018,107 +3018,6 @@ def api_materials_txt2vid():
     return jsonify({k: res[k] for k in ("ok", "job_id", "reused", "queue_pos")})
 
 
-TTS_VOICES = [
-    ("zh-CN-XiaoxiaoNeural", "晓晓 · 女声"),
-    ("zh-CN-XiaoyiNeural", "晓伊 · 女声（年轻）"),
-    ("zh-CN-YunxiNeural", "云希 · 男声（年轻）"),
-    ("zh-CN-YunjianNeural", "云健 · 男声（成熟）"),
-    ("zh-CN-YunyangNeural", "云扬 · 男声（播报）"),
-]
-
-
-def _mp3_seconds(fp):
-    try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", fp],
-                           capture_output=True, text=True, timeout=20)
-        return round(float((r.stdout or "0").strip()), 2)
-    except Exception:
-        return 0
-
-
-@app.route('/api/video-plans/<int:plan_id>/shot-frame', methods=['GET', 'POST'])
-def api_plan_shot_frame(plan_id):
-    """分镜首/尾帧出图：GET = 每镜两张图的状态；POST = 入队（GPU 队列，看板可见）
-    body: {"frame": "start"|"end", "shot_idx": 3} —— 不传 shot_idx = 整片所有镜"""
-    u = current_user()
-    if not u:
-        return jsonify({"error": "未登录"}), 401
-    db = get_content_db()
-    row = _script_row(db, plan_id)
-    if not row:
-        return jsonify({"error": "不存在"}), 404
-    _g = _guard_article(row["article_id"])
-    if _g:
-        return _g
-    shots = db.execute("""SELECT shot_idx, image_material_id, end_image_material_id, status
-                          FROM storyboard_shots WHERE script_id=? ORDER BY shot_idx""",
-                       (plan_id,)).fetchall()
-    if request.method == 'GET':
-        mdb = materialstore._conn()
-        out = []
-        for s in shots:
-            d = dict(s)
-            for k in ('image_material_id', 'end_image_material_id'):
-                mid = s[k]
-                m = mdb.execute("SELECT file_path FROM materials WHERE id=?", (mid,)).fetchone() if mid else None
-                d[k.replace('_material_id', '_url')] = (m["file_path"] if m else "")
-            out.append(d)
-        return jsonify({"shots": out})
-    if not shots:
-        return jsonify({"error": "该剧本还没有分镜，请先生成分镜"}), 400
-    body = request.get_json(silent=True) or {}
-    _at = body.get('attach_material') or {}
-    if _at:                                   # 手动挂图：从素材库选一张当该镜首/尾帧
-        try:
-            mid = int(_at.get('material_id'))
-            _si = int(_at.get('shot_idx'))
-        except Exception:
-            return jsonify({"error": "shot_idx / material_id 不合法"}), 400
-        _f = 'end' if (_at.get('frame') == 'end') else 'start'
-        if not [s2 for s2 in shots if s2["shot_idx"] == _si]:
-            return jsonify({"error": "镜号 %s 不存在" % _si}), 404
-        try:
-            _lib = materialstore.list_for(uid=u.get('id'), mtype='image', scope='mine', is_admin=_is_admin(u))
-        except Exception:
-            _lib = []
-        if not any(int(x.get('id') or 0) == mid for x in _lib):
-            return jsonify({"error": "素材不存在或无权使用"}), 403
-        col = 'end_image_material_id' if _f == 'end' else 'image_material_id'
-        db.execute("UPDATE storyboard_shots SET %s=?, updated_at=datetime('now','localtime')"
-                   " WHERE script_id=? AND shot_idx=?" % col, (mid, plan_id, _si))
-        db.commit()
-        return jsonify({"ok": True, "frame": _f, "shot_idx": _si, "material_id": mid})
-    frame = 'end' if (body.get('frame') == 'end') else 'start'
-    idx = body.get('shot_idx')
-    if idx is None or idx == '':
-        targets = [{"shot_idx": s["shot_idx"], "frame": frame} for s in shots]
-        if frame == 'end':               # 尾帧以首帧为底图：还没出首帧的镜先跳过
-            _first = {s["shot_idx"]: s["image_material_id"] for s in shots}
-            targets = [t for t in targets if _first.get(t["shot_idx"])]
-    else:
-        try:
-            idx = int(idx)
-        except Exception:
-            return jsonify({"error": "镜号不合法"}), 400
-        hit = [dict(s) for s in shots if s["shot_idx"] == idx]
-        if not hit:
-            return jsonify({"error": "镜号 %s 不存在" % idx}), 404
-        if frame == 'end' and not hit[0]["image_material_id"]:
-            return jsonify({"error": "请先生成该镜的首帧图（尾帧以首帧为底图）"}), 400
-        targets = [{"shot_idx": idx, "frame": frame}]
-    if not targets:
-        return jsonify({"error": "没有可出图的目标（尾帧需要先生成首帧）"}), 400
-    cfg = get_comfy_config()
-    if not instance_uuids() or not cfg.get('comfy_api_token'):
-        return jsonify({"error": "未配置实例池 / Token，请去「设置」页填写"}), 400
-    payload = {"plan_id": plan_id, "targets": targets,
-               "params": {"enc": (body.get("enc") or "auto")}}
-    jid, reused = jobstore.DISPATCHER.enqueue('shotframe', row["article_id"], payload, len(targets),
-                                             priority=10, owner=user_label(u), owner_id=u.get('id'))
-    return jsonify({"ok": True, "job_id": jid, "reused": reused, "targets": len(targets),
-                    "queue_pos": jobstore.queue_pos(jid)})
-
-
 def _eng_of(row):
     """从 shot_renders.params 里取片段引擎（老数据没有 = wan）"""
     try:
@@ -3130,8 +3029,8 @@ def _eng_of(row):
 @app.route('/api/video-plans/<int:plan_id>/shot-clip', methods=['GET', 'POST'])
 def api_plan_shot_clip(plan_id):
     """分镜片段：GET = 每镜片段状态；POST = 入队
-    body: {"shot_idx": 3, "engine": "wan|h3|h3ref"} —— 不传 shot_idx = 整片
-    engine：wan/h3 吃首尾帧；h3ref（H3 多图参考）不吃首尾帧，用该镜的素材图当参考"""
+    body: {"shot_idx": 3, "engine": "h3ref"} —— 不传 shot_idx = 整片
+    engine：只支持 h3ref（H3 多图参考），用该镜的素材图当参考"""
     u = current_user()
     if not u:
         return jsonify({"error": "未登录"}), 401
@@ -3173,9 +3072,9 @@ def api_plan_shot_clip(plan_id):
     if not shots:
         return jsonify({"error": "该剧本还没有分镜，请先生成分镜"}), 400
     body = request.get_json(silent=True) or {}
-    _eng = str(body.get("engine") or "wan").strip().lower()
-    if _eng not in ("wan", "h3", "h3ref"):
-        return jsonify({"error": "片段引擎只能是 wan、h3 或 h3ref"}), 400
+    _eng = str(body.get("engine") or "h3ref").strip().lower()
+    if _eng != "h3ref":
+        return jsonify({"error": "Wan/H3 首尾帧引擎已下线（首尾帧功能已删除），请用 H3 多图参考（h3ref）"}), 400
     idx = body.get('shot_idx')
     if idx is None or idx == '':
         if _eng == "h3ref":                            # 多图参考：只看有没有参考素材，不看首尾帧
@@ -3213,120 +3112,6 @@ def api_plan_shot_clip(plan_id):
                                              priority=10, owner=user_label(u), owner_id=u.get('id'))
     return jsonify({"ok": True, "job_id": jid, "reused": reused, "targets": len(targets),
                     "engine": _eng, "queue_pos": jobstore.queue_pos(jid)})
-
-
-@app.route('/api/video-plans/<int:plan_id>/voice', methods=['GET'])
-def api_plan_voice_list(plan_id):
-    """该计划已生成的配音（按镜头）"""
-    if not current_user():
-        return jsonify({"error": "未登录"}), 401
-    db = get_content_db()
-    row = _script_row(db, plan_id)
-    if not row:
-        return jsonify({"error": "不存在"}), 404
-    _g = _guard_article(row["article_id"])
-    if _g:
-        return _g
-    mdb = materialstore._conn()
-    clips = []
-    for c in db.execute("""SELECT s.shot_idx AS shot_idx, s.audio_material_id AS audio_material_id,
-                                  s.status AS status, r.duration_s AS duration_s
-                           FROM storyboard_shots s
-                           LEFT JOIN shot_renders r ON r.shot_id = s.id AND r.kind = 'audio'
-                           WHERE s.script_id=? ORDER BY s.shot_idx""", (plan_id,)).fetchall():
-        url, mid = "", c["audio_material_id"]
-        if mid:
-            try:
-                m = mdb.execute("SELECT file_path FROM materials WHERE id=?", (mid,)).fetchone()
-                url = m[0] if m else ""
-            except Exception:
-                url = ""
-        clips.append({"shot_idx": c["shot_idx"], "material_id": mid, "url": url,
-                      "duration_s": c["duration_s"] or 0, "status": c["status"] or ""})
-    db.close()
-    return jsonify({"ok": True, "clips": clips, "voices": [{"v": v, "label": n} for v, n in TTS_VOICES]})
-
-
-@app.route('/api/video-plans/<int:plan_id>/voice', methods=['POST'])
-def api_plan_voice_gen(plan_id):
-    """按镜头台词生成配音（edge-tts 免费）；不传 shot_idx = 全部镜头"""
-    if not current_user():
-        return jsonify({"error": "未登录"}), 401
-    db = get_content_db()
-    row = _script_row(db, plan_id)
-    if not row:
-        return jsonify({"error": "不存在"}), 404
-    _g = _guard_article(row["article_id"])
-    if _g:
-        return _g
-    d = request.get_json(silent=True) or {}
-    voice = (d.get("voice") or "").strip() or TTS_VOICES[0][0]
-    if voice not in [v for v, _ in TTS_VOICES]:
-        return jsonify({"error": "不支持的声音"}), 400
-    shots = shots_of(db, plan_id)          # 分镜来自 storyboard_shots（新表，不再是 JSON 列）
-    if not shots:
-        return jsonify({"error": "请先生成分镜"}), 400
-    want = d.get("shot_idx")
-    idxs = [int(want)] if want is not None else list(range(len(shots)))
-    out_dir = "/var/www/social-media-admin/static/generated/materials/%s" % (row["article_id"] or 0)
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except Exception:
-        pass
-    py = sys.executable or "/usr/bin/python3"
-    done, failed = [], []
-    for i in idxs:
-        if i < 0 or i >= len(shots):
-            continue
-        sh = shots[i] or {}
-        line = (sh.get("subtitle") or sh.get("line") or "").strip()
-        if not line:
-            failed.append({"shot_idx": i, "error": "无台词"})
-            continue
-        fp = os.path.join(out_dir, "voice_p%d_s%d.mp3" % (plan_id, i + 1))
-        r = None
-        for _t in range(2):
-            try:
-                r = subprocess.run([py, "-m", "edge_tts", "--voice", voice, "--text", line, "--write-media", fp],
-                                   capture_output=True, text=True, timeout=120)
-            except Exception as e:
-                r = None
-            if os.path.exists(fp) and os.path.getsize(fp) >= 512:
-                break
-        if (not os.path.exists(fp)) or os.path.getsize(fp) < 512:
-            failed.append({"shot_idx": i, "error": ((((r.stderr or r.stdout) if r is not None else "") or "")[-80:]) or "无产物"})
-            continue
-        dur = _mp3_seconds(fp)
-        rel = "/static/generated/materials/%s/voice_p%d_s%d.mp3" % (row["article_id"] or 0, plan_id, i + 1)
-        mid = None
-        try:
-            rec = materialstore.upsert(rel, "audio", name=("分镜%d配音" % (i + 1)), source="tts", article_id=row["article_id"])
-            if isinstance(rec, int):
-                mid = rec
-            elif rec is not None and hasattr(rec, "keys") and "id" in rec.keys():
-                mid = rec["id"]
-            else:
-                mid = None
-        except Exception:
-            mid = None
-        # 配音落到镜头：storyboard_shots.audio_material_id + shot_renders(kind='audio')
-        ex = db.execute("SELECT id FROM storyboard_shots WHERE script_id=? AND shot_idx=?", (plan_id, i)).fetchone()
-        if ex:
-            sid = ex["id"]
-            db.execute("UPDATE storyboard_shots SET line=?,"
-                       " visual=COALESCE(NULLIF(visual,''),?), audio_material_id=?, status='voice_done',"
-                       " updated_at=datetime('now','localtime') WHERE id=?",
-                       (line, sh.get("visual_prompt") or "", mid, sid))
-        else:
-            sid = db.execute("INSERT INTO storyboard_shots (script_id, shot_idx, line, visual,"
-                             " audio_material_id, status, created_at)"
-                             " VALUES (?,?,?,?,?,'voice_done',datetime('now','localtime'))",
-                             (plan_id, i, line, sh.get("visual_prompt") or "", mid)).lastrowid
-        set_shot_render(db, sid, "audio", material_id=mid, url=rel, duration_s=dur, status="done")
-        done.append({"shot_idx": i, "material_id": mid, "duration_s": dur, "url": rel})
-    db.commit()
-    db.close()
-    return jsonify({"ok": True, "done": done, "failed": failed, "voice": voice})
 
 
 def _do_asset_attach(plan_id, d, u, trusted=False):

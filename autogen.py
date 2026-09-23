@@ -836,7 +836,7 @@ def acquire_ready_instance(job_id, log, timeout=1800, boot_timeout=300, needs=No
     """挑一台「空闲且可用」的实例并锁住（返回 uuid, lock）
     顺序：池内正在 running 的优先（秒级可用）→ 其余按池序尝试开机（无库存重试）
     全忙/开不起来 → 等待（可被取消）；调用方负责 lock.release() + _slot_drop()"""
-    start_idle_watch()          # 空闲守卫出生点之一（另一处：进程启动 register_jobs）
+    start_idle_watch()          # ⭐ 空闲守卫**唯一**出生点 = 有任务（用户 2026-09-22 定：「出生点 只有1个」）
     need_nodes = list((needs or {}).get("nodes") or [])
     t0, warned, tried = time.time(), False, set()   # tried：本轮已自检过的实例（防同一台反复开机）
     while True:
@@ -3294,5 +3294,7 @@ def register_jobs():
     jobstore.DISPATCHER.register("txt2vid", run_txt2vid_job, domain="gpu")      # 素材页文生视频（H3 多图参考·纯提词，同 GPU 域串行）
     # 将来加场景只需两行：写一个 runner + 注册域（分镜/素材 → llm；出视频/配音 → gpu）
     jobstore.DISPATCHER.start()
-    start_idle_watch()     # ⭐ 空闲守卫：进程启动时若发现已有开机 → 起（按需，无开机即自己退）
-    # 守卫规则：逐台判定；池内有排队任务→都不关；某台 running 且本机无任务、空闲达阈值→只关这一台→线程退出
+    # ⚠️ 空闲守卫**不**在这里拉起：出生点唯一 = 有任务（acquire_ready_instance）。
+    #    用户 2026-09-22 定「出生点 只有1个」；此处的拉起曾加过、被驳回，勿再加回。
+    #    已知并接受的后果：进程重启 + 机器还开着 + 之后没有新任务 ⇒ 那台不会被自动关。
+    #    守卫规则：逐台判定；池内有排队任务→都不关；某台 running 且本机无任务、空闲达阈值→只关这一台→线程退出

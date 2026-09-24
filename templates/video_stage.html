@@ -10,7 +10,6 @@
 {% block content %}
 <div style="display:flex;gap:8px;margin-bottom:18px;">
     <button id="tab-script" class="btn btn-primary" onclick="switchTab('script')">✍️ 分镜脚本</button>
-    <button id="tab-video" class="btn btn-outline" onclick="switchTab('video')">🎞️ 分镜视频</button>
 </div>
 
 <div class="card">
@@ -30,7 +29,6 @@ let PLANS = [];
 function switchTab(t) {
     CUR_TAB = t;
     document.getElementById('tab-script').className = 'btn ' + (t==='script' ? 'btn-primary' : 'btn-outline');
-    document.getElementById('tab-video').className  = 'btn ' + (t==='video'  ? 'btn-primary' : 'btn-outline');
     document.getElementById('tab-desc').textContent = t==='script'
         ? '阶段 ③-1 —— 为「已审核」的短视频 / 长视频脚本生成分镜表（画面 / 台词 / 时长）'
         : '阶段 ③-2 —— 基于分镜生成素材、合成并导出视频';
@@ -68,20 +66,6 @@ function render() {
                 </div>
             </div>`;
         }).join('');
-    } else {
-        // 已有分镜的 → 素材/渲染
-        const ready = PLANS.filter(p => p.status === 'storyboard_done' || p.status === 'rendering' || p.status === 'done');
-        if (!ready.length) {
-            el.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:44px;color:#94a3b8;">'
-                + '📭 暂无已生成分镜的视频 —— 请先完成「分镜脚本」</div>';
-            return;
-        }
-        el.innerHTML = ready.map(p => `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:16px;">
-            <div style="font-weight:600;margin-bottom:8px;">${p.article_title || p.title || '未命名'}</div>
-            <div style="font-size:12px;color:#64748b;margin-bottom:10px;">状态：${p.status}</div>
-            <button class="btn btn-outline btn-sm" onclick="openSetup(${p.id})">${p.persona_id ? '修改人物/声音' : '制作视频'}</button>
-            <div style="font-size:12px;color:#0f766e;margin-top:8px;">🖼 ${p.persona_id ? (PER_NAME[p.persona_id] || ('形象 #' + p.persona_id)) : '未选形象'} · 🎙 ${p.voice_material_id ? '声音 #' + p.voice_material_id : '未选声音'} · ${p.aspect || '9:16'}</div>
-        </div>`).join('');
     }
 }
 
@@ -99,113 +83,9 @@ async function load() {
     switchTab(CUR_TAB);
 }
 
-let SETUP_PLAN = null, PICK_TARGET = 'persona';
-async function libItems(type) {
-    const r = await api('/api/library?type=' + type);
-    return Array.isArray(r) ? r : [];
-}
-async function openSetup(planId) {
-    const p = PLANS.find(x => x.id === planId) || {};
-    SETUP_PLAN = p;
-    document.getElementById('setupTitle').textContent = (p.article_title || p.title || '未命名');
-    document.getElementById('setupAspect').value = p.aspect || '9:16';
-    const pe = document.getElementById('setupPersona'), ve = document.getElementById('setupVoice');
-    pe.dataset.mid = p.persona_id || '';
-    ve.dataset.mid = p.voice_material_id || '';
-    pe.textContent = p.persona_id ? (PER_NAME[p.persona_id] || ('形象 #' + p.persona_id)) : '未选择';
-    ve.textContent = p.voice_material_id ? ('已选素材 #' + p.voice_material_id) : '未选择';
-    document.getElementById('setupModal').style.display = 'flex';
-}
-function closeSetup() { document.getElementById('setupModal').style.display = 'none'; }
-async function pick(target, type) {
-    PICK_TARGET = target;
-    const items = await libItems(type);
-    document.getElementById('pickTitle').textContent = (type === 'image' ? '选择人物形象（图片素材）' : '选择声音（音频素材）');
-    document.getElementById('pickList').innerHTML = items.length ? items.map(m => `
-      <div onclick="choosePick(${m.id})" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;">
-        ${type === 'image' ? `<img src="/api/materials/thumb?u=${encodeURIComponent(m.file_path || '')}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;background:#f1f5f9;">` : '<span style="font-size:24px;">🎵</span>'}
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${m.name || ('素材 #' + m.id)}</div>
-          <div style="font-size:11px;color:#94a3b8;">#${m.id} · ${m.created_at || ''}</div>
-        </div>
-        ${type === 'audio' ? `<audio controls src="${m.file_path || ''}" style="height:30px;" onclick="event.stopPropagation()"></audio>` : ''}
-      </div>`).join('') : '<div style="padding:24px;color:#94a3b8;text-align:center;">该类型暂无素材 —— 请先到「素材库」上传</div>';
-    document.getElementById('pickModal').style.display = 'flex';
-}
-function closePick() { document.getElementById('pickModal').style.display = 'none'; }
-function choosePick(id) {
-    const el = document.getElementById(PICK_TARGET === 'persona' ? 'setupPersona' : 'setupVoice');
-    el.dataset.mid = id; el.textContent = '已选素材 #' + id;
-    closePick();
-}
-async function saveSetup() {
-    const body = {
-        persona_id: parseInt(document.getElementById('setupPersona').dataset.mid || '0', 10) || null,
-        voice_material_id: parseInt(document.getElementById('setupVoice').dataset.mid || '0', 10) || null,
-        aspect: document.getElementById('setupAspect').value
-    };
-    if (!body.persona_id) { return toast('请先选择人物形象', 'error'); }
-    const r = await api('/api/video-plans/' + SETUP_PLAN.id, {method: 'PUT', body: JSON.stringify(body)});
-    if (r && r.ok) { toast('已保存 ✓'); closeSetup(); await load(); }
-    else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
-}
-let PER_NAME = {}, PER_LIST = [];
-async function loadPerNames() {
-    const r = await api('/api/roles?kind=persona');
-    PER_LIST = Array.isArray(r) ? r : [];
-    PER_NAME = {};
-    PER_LIST.forEach(p => { PER_NAME[p.id] = p.name; });
-}
-async function pickPersona() {
-    await loadPerNames();
-    document.getElementById('pickTitle').textContent = '选择人物形象';
-    document.getElementById('pickList').innerHTML = PER_LIST.length ? PER_LIST.map(p => {
-        const tri = [p.front, p.side, p.back].map(mm => mm
-            ? '<img src="/api/materials/thumb?u=' + encodeURIComponent(mm.file_path) + '" style="width:46px;height:46px;object-fit:cover;border-radius:8px;">'
-            : '<div style="width:46px;height:46px;border-radius:8px;background:#f1f5f9;"></div>').join('');
-        return '<div onclick="choosePersona(' + p.id + ')" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;">'
-            + '<div style="display:flex;gap:4px;">' + tri + '</div>'
-            + '<div style="flex:1;min-width:0;"><div style="font-size:13px;">' + (p.name || '') + '</div>'
-            + '<div style="font-size:11px;color:#94a3b8;">' + (p.voice ? '有默认声音' : '无默认声音') + (p.tags ? (' · ' + p.tags) : '') + '</div></div></div>';
-    }).join('') : '<div style="padding:24px;color:#94a3b8;text-align:center;">还没有人物形象 —— 请到「素材库 → 人物形象」新建</div>';
-    document.getElementById('pickModal').style.display = 'flex';
-}
-function choosePersona(id) {
-    const p = PER_LIST.find(x => x.id === id) || {};
-    const pe = document.getElementById('setupPersona');
-    pe.dataset.mid = id; pe.textContent = p.name || ('形象 #' + id);
-    if (p.voice_material_id) {
-        const ve = document.getElementById('setupVoice');
-        ve.dataset.mid = p.voice_material_id;
-        ve.textContent = '形象默认声音 #' + p.voice_material_id;
-    }
-    document.getElementById('pickModal').style.display = 'none';
-}
 
 load();
-loadPerNames();
 </script>
 
-<div id="setupModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:999;align-items:center;justify-content:center;">
-  <div style="background:#fff;border-radius:14px;padding:20px;width:430px;max-width:92vw;">
-    <div style="font-weight:600;margin-bottom:4px;">制作视频</div>
-    <div id="setupTitle" style="font-size:12px;color:#64748b;margin-bottom:12px;"></div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
-      <span>🖼 人物形象</span><button id="setupPersona" class="btn btn-outline btn-sm" data-mid="" onclick="pickPersona()">未选择</button></div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
-      <span>🎙 声音</span><button id="setupVoice" class="btn btn-outline btn-sm" data-mid="" onclick="pick('voice','audio')">未选择</button></div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;">
-      <span>📐 画幅</span><select id="setupAspect" style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px;"><option value="9:16">9:16 竖版</option><option value="16:9">16:9 横版</option></select></div>
-    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
-      <button class="btn btn-outline btn-sm" onclick="closeSetup()">取消</button><button class="btn btn-sm" onclick="saveSetup()">保存</button></div>
-  </div>
-</div>
-<div id="pickModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;align-items:center;justify-content:center;">
-  <div style="background:#fff;border-radius:14px;padding:18px;width:470px;max-width:92vw;max-height:76vh;display:flex;flex-direction:column;">
-    <div id="pickTitle" style="font-weight:600;margin-bottom:10px;">选择素材</div>
-    <div id="pickList" style="overflow:auto;display:grid;gap:8px;"></div>
-    <div style="display:flex;justify-content:flex-end;margin-top:12px;"><button class="btn btn-outline btn-sm" onclick="closePick()">关闭</button></div>
-  </div>
-</div>
 
 {% endblock %}

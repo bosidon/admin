@@ -1785,6 +1785,7 @@ def gen_asset_reqs(script_obj, llm_cfg, roles_brief=""):
         if not isinstance(_shots, list):
             _shots = []
         _out_reqs.append({"kind": _k, "name": _n, "desc": (_q.get("desc") or "").strip(),
+                          "voice_desc": (_q.get("voice_desc") or "").strip(),
                           "slots": _slots, "needed_in_shots": _shots})
     prompts = data.get("asset_prompts")
     if not isinstance(prompts, list):
@@ -1811,6 +1812,7 @@ def gen_asset_reqs(script_obj, llm_cfg, roles_brief=""):
                 if isinstance(_q, dict) and (_q.get("name") or "").strip():
                     _out_reqs.append({"kind": _q.get("kind") if _q.get("kind") in _kinds else "prop",
                                       "name": _q["name"].strip(), "desc": (_q.get("desc") or "").strip(),
+                                      "voice_desc": (_q.get("voice_desc") or "").strip(),
                                       "slots": _q.get("slots") if isinstance(_q.get("slots"), list) and _q.get("slots") else ["front"],
                                       "needed_in_shots": _q.get("needed_in_shots") if isinstance(_q.get("needed_in_shots"), list) else []})
             if isinstance(data2.get("asset_prompts"), list):

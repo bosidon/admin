@@ -807,7 +807,7 @@ def upsert_asset(db, script_id, kind, name, desc='', slot='front', aspect='1:1',
     cur = db.execute("""INSERT INTO script_assets
         (script_id, req_key, kind, name, desc, slot, aspect, prompt, prompt_en, material_id, source,
          status, matched_role_id, sort_order, speaks, voice_desc, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                      (script_id, key, kind, name, desc or '', slot, aspect or '1:1', prompt or '',
                       prompt_en or '', material_id, source or '',
                       status or ('chosen' if material_id else 'missing'), matched_role_id, sort_order or 0,

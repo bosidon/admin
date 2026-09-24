@@ -62,7 +62,8 @@
                 <button class="btn btn-outline btn-sm" onclick="addScene()">＋ 添加镜头</button>
             </div>
         </div>
-        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:1240px;">
             <thead>
                 <tr style="background:#f8fafc;">
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">镜号</th>
@@ -74,11 +75,13 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;width:130px;">BGM</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:130px;">音效</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:112px;">说话人</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:130px;">配音</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
                 </tr>
             </thead>
             <tbody id="sb-body"></tbody>
         </table>
+        </div>
     </div>
 
     <!-- Tab 素材：③ 素材需求（asset_requirements / asset_prompts） -->
@@ -147,10 +150,22 @@ function speakerOptions(cur) {
     return h;
 }
 
+function dubText(spk) {
+    spk = (spk || '').trim();
+    if (!spk) return '—';
+    if (spk === '旁白') {
+        const nv = (SCRIPT_OBJ && SCRIPT_OBJ.narrator_voice) || '';
+        return nv ? nv : '未设声线';
+    }
+    const cs = (SCRIPT_OBJ && Array.isArray(SCRIPT_OBJ.characters)) ? SCRIPT_OBJ.characters : [];
+    const hit = cs.find(c => ((c.name || '').trim() === spk));
+    if (!hit) return spk + ' · 不在素材库';
+    return (hit.voice_desc || '').trim() || spk + ' · 未设声线';
+}
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="10" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="11" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
@@ -163,6 +178,7 @@ function renderScenes() {
         <td style="padding:6px;border:1px solid #e2e8f0;"><input value="${s.music_hint||''}" data-i="${i}" data-f="music_hint" placeholder="BGM 提示词" style="width:100%;border:none;font-size:12px;font-family:inherit;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><input value="${s.sfx||''}" data-i="${i}" data-f="sfx" placeholder="音效" style="width:100%;border:none;font-size:12px;font-family:inherit;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><select data-i="${i}" data-f="speaker" style="width:100%;border:none;font-size:12px;background:transparent;">${speakerOptions(s.speaker||'')}</select></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;font-size:11px;color:#475569;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><span data-dub="${i}" title="${dubText(s.speaker||'')}">${dubText(s.speaker||'')}</span></td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
     tb.querySelectorAll('textarea,input,select').forEach(el => {
@@ -170,6 +186,23 @@ function renderScenes() {
             const i = +this.dataset.i, f = this.dataset.f;
             SCENES[i][f] = (f === 'duration') ? (+this.value || 5) : this.value;
         };
+    });
+    tb.querySelectorAll('select[data-f="speaker"]').forEach(sel => {
+        const _old = sel.onchange;
+        sel.onchange = function(e) {
+            if (_old) _old.call(this, e);
+            const sp = tb.querySelector('[data-dub="' + this.dataset.i + '"]');
+            if (sp) sp.textContent = dubText(this.value);
+        };
+    });
+}
+
+function refreshDubs() {
+    const tb = document.getElementById('sb-body');
+    if (!tb) return;
+    tb.querySelectorAll('[data-dub]').forEach(sp => {
+        const sel = tb.querySelector('select[data-f="speaker"][data-i="' + sp.dataset.dub + '"]');
+        sp.textContent = dubText(sel ? sel.value : '');
     });
 }
 
@@ -596,6 +629,7 @@ async function load() {
     renderScenes();
     const _nvIn = document.getElementById('narrator-voice');
     if (_nvIn) { _nvIn.value = (SCRIPT_OBJ && SCRIPT_OBJ.narrator_voice) || ''; }
+        if (_nvIn) { _nvIn.oninput = refreshDubs; }
     // 加载原始文案
     const arts = await api('/api/articles');
     const art = (arts || []).find(a => a.id === d.article_id);

@@ -3,7 +3,7 @@
 外观描述用英文，与剧本里的 desc 保持一致。输出严格 JSON（不要 markdown 代码块，不要多余文字）。
 
 格式：
-{"asset_requirements":[{"kind":"persona","name":"小仙","desc":"young woman, light-green knit sweater","slots":["front"],"needed_in_shots":[0,2]},
+{"asset_requirements":[{"kind":"persona","name":"小仙","desc":"young woman, light-green knit sweater","voice_desc":"年轻女声，中高音，语速偏快，语气温和","slots":["front"],"needed_in_shots":[0,2]},
                        {"kind":"scene","name":"老宅庭院","desc":"old Chinese courtyard, morning light","slots":["front"],"needed_in_shots":[0,1]},
                        {"kind":"prop","name":"油纸伞","desc":"beige oil-paper umbrella, bamboo ribs","slots":["front"],"needed_in_shots":[1]}],
  "asset_prompts":[{"kind":"prop","name":"油纸伞","slot":"front","aspect":"1:1",
@@ -19,6 +19,10 @@
 6. **asset_prompts 只给"不在【已有素材库】里"的缺失素材**；已有的不要给提词
 7. 不要新增剧本以外的角色/场景/道具
 8. 只输出 JSON，不要解释、不要前后缀、不要代码围栏
+9. **persona 必填 voice_desc**（中文声音描述）：写清音色 / 音高 / 语速 / 语气，
+   例「年轻女声，中高音，语速偏快，语气温和」「中年男声，低音，沉稳缓慢」；
+   旁白 / 画外音 / 独白也要单独列一条 persona（name 填「旁白」或剧本里的说话人原名）并给 voice_desc；
+   scene / prop 不要给 voice_desc。
 ---USER---
 【剧本】
 {{SCRIPT}}

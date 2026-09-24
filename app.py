@@ -530,6 +530,7 @@ CREATE TABLE IF NOT EXISTS video_scripts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL, title TEXT, logline TEXT,
   total_duration_s INTEGER, beats TEXT DEFAULT '[]', aspect TEXT DEFAULT '9:16',
   owner_id INTEGER, role_ids TEXT DEFAULT '[]',
+  narrator_voice VARCHAR(300) DEFAULT '',
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (article_id) REFERENCES articles(id));
 CREATE TABLE IF NOT EXISTS script_assets (
@@ -549,7 +550,7 @@ CREATE TABLE IF NOT EXISTS storyboard_shots (
   scene_asset_id INTEGER REFERENCES script_assets(id) ON DELETE SET NULL, music_hint TEXT DEFAULT '',
   template_hint TEXT DEFAULT '', image_material_id INTEGER, audio_material_id INTEGER,
   beat_idx INTEGER DEFAULT 0, camera_move TEXT DEFAULT '', end_state TEXT DEFAULT '',
-  end_image_material_id INTEGER, speaker VARCHAR(80) DEFAULT '',
+  end_image_material_id INTEGER, speaker VARCHAR(80) DEFAULT '', sfx VARCHAR(200) DEFAULT '',
   status TEXT DEFAULT 'pending',
   created_at DATETIME DEFAULT (datetime('now','localtime')), updated_at DATETIME,
   FOREIGN KEY (script_id) REFERENCES video_scripts(id) ON DELETE CASCADE,
@@ -719,6 +720,7 @@ def shots_of(db, script_id):
                     'shot_type': s['shot_type'], 'characters': cast, 'scene': (sc['name'] if sc else ''),
                     'props': props, 'shot_face': s['shot_face'], 'music_hint': s['music_hint'],
                     'speaker': (s['speaker'] if 'speaker' in s.keys() else ''),
+                    'sfx': (s['sfx'] if 'sfx' in s.keys() else ''),
                     'template_hint': s['template_hint'],
                     'beat_idx': s['beat_idx'], 'camera_move': s['camera_move'],
                     'end_state': s['end_state'], 'end_image_material_id': s['end_image_material_id'],
@@ -745,7 +747,8 @@ def script_obj_of(db, script_id):
     return {'title': row['title'], 'logline': row['logline'],
             'total_duration_s': row['total_duration_s'],
             'characters': by['persona'], 'scenes': by['scene'], 'props': by['prop'],
-            'beats': _sjson(row['beats'], [])}
+            'beats': _sjson(row['beats'], []),
+            'narrator_voice': (row['narrator_voice'] if 'narrator_voice' in row.keys() else '') or ''}
 
 
 def role_ids_of(db, script_id):
@@ -865,9 +868,10 @@ def save_script_obj(db, script_id, obj):
         pass
     db.execute("""UPDATE video_scripts SET logline=?, beats=?,
                   total_duration_s=COALESCE(NULLIF(?,''), total_duration_s),
+                  narrator_voice=COALESCE(NULLIF(?,''), narrator_voice),
                   updated_at=datetime('now','localtime') WHERE id=?""",
                (obj.get('logline') or '', json.dumps(beats, ensure_ascii=False),
-                obj.get('total_duration_s'), script_id))
+                obj.get('total_duration_s'), (obj.get('narrator_voice') or '').strip(), script_id))
     if (obj.get('title') or '').strip():
         db.execute("UPDATE video_scripts SET title=? WHERE id=? AND (title IS NULL OR title='')",
                    (obj['title'].strip(), script_id))
@@ -879,10 +883,6 @@ def save_script_obj(db, script_id, obj):
                 upsert_asset(db, script_id, kind, it['name'], desc=it.get('desc') or '', sort_order=order,
                              speaks=(it.get('speaks') if kind == 'persona' else None),
                              voice_desc=((it.get('voice_desc') or '') if kind == 'persona' else ''))
-    # 顶层 narrator_voice → 旁白声线行（kind=persona / name=旁白 / slot=front）
-    _nv = (obj.get('narrator_voice') or '').strip()
-    if _nv:
-        upsert_asset(db, script_id, 'persona', '旁白', voice_desc=_nv)
     # 本次未再提及的需求行不留幽灵 —— 两条保护缺一不可：
     # ① 只清 slot='front'（本函数自己产生的那一类；「素材需求」步骤产生的 side/back 行不动）
     # ② 用户/下游动过的行不删：已挂素材或已选源（material_id / status）、已被镜头关联（shot_assets）
@@ -890,8 +890,6 @@ def save_script_obj(db, script_id, obj):
              for _k, _key in (('persona', 'characters'), ('scene', 'scenes'), ('prop', 'props'))
              for _it in (obj.get(_key) or [])
              if isinstance(_it, dict) and (_it.get('name') or '').strip()]
-    if _nv and _seen and _req_key('persona', '旁白', 'front') not in _seen:
-        _seen.append(_req_key('persona', '旁白', 'front'))   # 旁白行进保留名单，防幽灵删除清掉
     if _seen:                                   # 三类全空＝生成异常 → 整段跳过，绝不误删
         _dead = ("SELECT id FROM script_assets WHERE script_id=? AND slot='front'"
                  " AND req_key NOT IN (%s) AND material_id IS NULL"
@@ -946,14 +944,14 @@ def save_shots(db, script_id, shots):
                 _spk = ''
         sid = db.execute("""INSERT INTO storyboard_shots
             (script_id, shot_idx, visual, line, duration_s, shot_type, shot_face, music_hint,
-             template_hint, scene_asset_id, beat_idx, camera_move, end_state, speaker, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+             sfx, template_hint, scene_asset_id, beat_idx, camera_move, end_state, speaker, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
                          (script_id, idx,
                           sh.get('visual') or sh.get('visual_prompt') or '',   # ★ 分镜提词的键名是 visual_prompt
                           sh.get('line') or sh.get('subtitle') or '',
                           sh.get('duration') or sh.get('duration_s'), sh.get('shot_type') or '',
                           sh.get('shot_face') or 'front', sh.get('music_hint') or '',
-                          sh.get('template_hint') or '', scene_id,
+                          sh.get('sfx') or '', sh.get('template_hint') or '', scene_id,
                           _bi, sh.get('camera_move') or '', sh.get('end_state') or '', _spk)).lastrowid
         n += 1
         if scene_id:

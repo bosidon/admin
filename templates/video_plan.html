@@ -53,6 +53,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <label style="font-weight:600;font-size:14px;">② 分镜表（画面 / 台词 / 时长）</label>
             <div>
+                <input id="narrator-voice" placeholder="旁白声线（全片统一）" title="全片旁白统一声线，例：温柔知性女声，中速" style="height:30px;width:240px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 8px;">
                 <select id="clip-engine" onchange="setClipEngine(this.value)" title="片段引擎：H3 参考＝用该镜素材图（最多 5 张），带音轨 —— 只走 6000D（¥6.46/h），约 3 分钟/条" style="height:30px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px;">
                     <option value="h3ref">片段 · H3 参考5图</option>
                 </select>
@@ -71,6 +72,7 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;width:146px;">片段</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:130px;">BGM</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:130px;">音效</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:112px;">说话人</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
                 </tr>
@@ -148,7 +150,7 @@ function speakerOptions(cur) {
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="9" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="10" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
@@ -159,6 +161,7 @@ function renderScenes() {
         <td style="padding:6px;border:1px solid #e2e8f0;">${clipCell(i)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><input value="${s.music_hint||''}" data-i="${i}" data-f="music_hint" placeholder="BGM 提示词" style="width:100%;border:none;font-size:12px;font-family:inherit;"></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;"><input value="${s.sfx||''}" data-i="${i}" data-f="sfx" placeholder="音效" style="width:100%;border:none;font-size:12px;font-family:inherit;"></td>
         <td style="padding:6px;border:1px solid #e2e8f0;"><select data-i="${i}" data-f="speaker" style="width:100%;border:none;font-size:12px;background:transparent;">${speakerOptions(s.speaker||'')}</select></td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
@@ -578,6 +581,7 @@ async function load() {
                  duration: s.duration || s.duration_s || 5, shot_type: s.shot_type || '',
                  characters: s.characters || [], scene: s.scene || '', props: s.props || [],
                  shot_face: s.shot_face || '', music_hint: s.music_hint || '', speaker: s.speaker || '',
+                 sfx: s.sfx || '',
                  template_hint: s.template_hint || 'U02' };
     });
     try { ROLE_IDS = JSON.parse(d.role_ids || '[]'); } catch(e) { ROLE_IDS = []; }
@@ -590,6 +594,8 @@ async function load() {
     renderReqs();
     await loadClips();
     renderScenes();
+    const _nvIn = document.getElementById('narrator-voice');
+    if (_nvIn) { _nvIn.value = (SCRIPT_OBJ && SCRIPT_OBJ.narrator_voice) || ''; }
     // 加载原始文案
     const arts = await api('/api/articles');
     const art = (arts || []).find(a => a.id === d.article_id);
@@ -766,6 +772,8 @@ function collectForm() {
     let sum = 0;
     (o.beats || []).forEach(function (b) { if (typeof b.seconds === 'number') { sum += b.seconds; } });
     o.total_duration_s = sum;
+    const _nvEl = document.getElementById('narrator-voice');
+    o.narrator_voice = _nvEl ? (_nvEl.value || '').trim() : '';
     return o;
 }
 
@@ -841,7 +849,8 @@ async function genStoryboard() {
         duration: s.duration_s || 5, shot_type: s.shot_type || '',
         characters: s.characters || [], scene: s.scene || '', props: s.props || [],
         shot_face: s.shot_face || '',
-        music_hint: s.music_hint || '', speaker: s.speaker || '', template_hint: s.template_hint || 'U02'
+        music_hint: s.music_hint || '', speaker: s.speaker || '',
+        sfx: s.sfx || '', template_hint: s.template_hint || 'U02'
     }));
     document.getElementById('plan-status').textContent = 'storyboard_done';
     renderScenes();

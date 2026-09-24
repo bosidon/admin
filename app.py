@@ -857,6 +857,12 @@ def save_script_obj(db, script_id, obj):
     """剧本对象 → video_scripts 主字段 + 三类素材需求行（persona/scene/prop）"""
     obj = obj if isinstance(obj, dict) else {}
     beats = obj.get('beats') if isinstance(obj.get('beats'), list) else []
+    try:                      # 总时长以各节 seconds 求和为准（不信 LLM 自报值）
+        _bsum = sum(int(b.get('seconds') or 0) for b in beats if isinstance(b, dict))
+        if _bsum > 0:
+            obj['total_duration_s'] = _bsum
+    except Exception:
+        pass
     db.execute("""UPDATE video_scripts SET logline=?, beats=?,
                   total_duration_s=COALESCE(NULLIF(?,''), total_duration_s),
                   updated_at=datetime('now','localtime') WHERE id=?""",
@@ -871,7 +877,12 @@ def save_script_obj(db, script_id, obj):
             if isinstance(it, dict) and (it.get('name') or '').strip():
                 order += 1
                 upsert_asset(db, script_id, kind, it['name'], desc=it.get('desc') or '', sort_order=order,
-                             speaks=(it.get('speaks') if kind == 'persona' else None))
+                             speaks=(it.get('speaks') if kind == 'persona' else None),
+                             voice_desc=((it.get('voice_desc') or '') if kind == 'persona' else ''))
+    # 顶层 narrator_voice → 旁白声线行（kind=persona / name=旁白 / slot=front）
+    _nv = (obj.get('narrator_voice') or '').strip()
+    if _nv:
+        upsert_asset(db, script_id, 'persona', '旁白', voice_desc=_nv)
     # 本次未再提及的需求行不留幽灵 —— 两条保护缺一不可：
     # ① 只清 slot='front'（本函数自己产生的那一类；「素材需求」步骤产生的 side/back 行不动）
     # ② 用户/下游动过的行不删：已挂素材或已选源（material_id / status）、已被镜头关联（shot_assets）
@@ -879,6 +890,8 @@ def save_script_obj(db, script_id, obj):
              for _k, _key in (('persona', 'characters'), ('scene', 'scenes'), ('prop', 'props'))
              for _it in (obj.get(_key) or [])
              if isinstance(_it, dict) and (_it.get('name') or '').strip()]
+    if _nv and _seen and _req_key('persona', '旁白', 'front') not in _seen:
+        _seen.append(_req_key('persona', '旁白', 'front'))   # 旁白行进保留名单，防幽灵删除清掉
     if _seen:                                   # 三类全空＝生成异常 → 整段跳过，绝不误删
         _dead = ("SELECT id FROM script_assets WHERE script_id=? AND slot='front'"
                  " AND req_key NOT IN (%s) AND material_id IS NULL"
@@ -1919,7 +1932,7 @@ def api_gen_storyboard(plan_id):
             _req["exists"] = bool(_pool.get(_req.get("kind") or "persona", {}).get(_req.get("name") or ""))
     shots = result.get("shots", [])
     overview = result.get("overview", "")
-    total = result.get("total_duration_s") or sum(s.get("duration_s", 5) for s in shots)
+    total = sum(int(s.get("duration_s") or 5) for s in shots) or (result.get("total_duration_s") or 0)
     lines = [overview] if overview else []
     for sh in shots:
         lines.append("\u3010" + sh.get("shot_type", "") + "\u3011" + sh.get("subtitle", ""))

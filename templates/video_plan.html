@@ -332,6 +332,10 @@ function renderReqs() {
             + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
             + ((q.kind === 'persona')
                ? '<div style="margin-top:6px;">'
+                 + '<input class="ar-desc" data-qi="' + qi + '" value="' + escAttr(q.desc || '') + '"'
+                 + ' placeholder="外观描述（英文，如：young woman, long black hair）· 改完点别处自动保存"'
+                 + ' onchange="onDesc(this); saveReqs(true, this)"'
+                 + ' style="width:100%;padding:5px 7px;margin-bottom:5px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:inherit;"></div>'
                  + '<input class="ar-vd" data-qi="' + qi + '" value="' + escAttr(q.voice_desc || '') + '"'
                  + ' placeholder="声音中文描述（如：年轻女声，中高音）· 改完点别处自动保存"'
                  + ' onchange="onVoiceDesc(this); saveReqs(true, this)"'
@@ -347,6 +351,12 @@ function renderReqs() {
             + '<div style="font-size:12px;font-weight:600;color:#475569;">其他出图提词（未按名称匹配到具体需求）</div>'
             + rest.map(promptHtml).join('') + '</div>';
     }
+}
+
+function onDesc(el) {
+    const qi = +el.dataset.qi;
+    if (REQS[qi]) { REQS[qi].desc = el.value; }
+    if (!el.value.trim()) { toast('⚠️ 留空保存不了（非空才覆盖）；要清掉请填 -', 'error'); }
 }
 
 function onVoiceDesc(el) {

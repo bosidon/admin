@@ -88,7 +88,6 @@
                 <button class="btn btn-outline btn-sm" onclick="toggleSelectAll()">☑ 全选待生成</button>
                 <button class="btn btn-primary btn-sm" id="asset-batch-btn" onclick="genAssetsBatch()">🎨 批量生成所选</button>
                 <button class="btn btn-outline btn-sm" id="asset-gen-btn" onclick="genAssets()">🧩 生成素材需求</button>
-                <button class="btn btn-primary btn-sm" id="asset-save-btn" onclick="saveReqs()">💾 保存声音描述</button>
             </div>
         </div>
         <div id="asset-req"></div>
@@ -334,7 +333,8 @@ function renderReqs() {
             + ((q.kind === 'persona')
                ? '<div style="margin-top:6px;">'
                  + '<input class="ar-vd" data-qi="' + qi + '" value="' + escAttr(q.voice_desc || '') + '"'
-                 + ' placeholder="声音中文描述（如：年轻女声，中高音，语速偏快）" onchange="onVoiceDesc(this)"'
+                 + ' placeholder="声音中文描述（如：年轻女声，中高音）· 改完点别处自动保存"'
+                 + ' onchange="onVoiceDesc(this); saveReqs(true, this)"'
                  + ' style="width:100%;padding:5px 7px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:inherit;"></div>'
                : '')
             + btns + '</div></div>';
@@ -352,12 +352,18 @@ function renderReqs() {
 function onVoiceDesc(el) {
     const qi = +el.dataset.qi;
     if (REQS[qi]) { REQS[qi].voice_desc = el.value; }
+    if (!el.value.trim()) { toast('⚠️ 留空保存不了（后端只在有值时才覆盖）；要清掉请填「不出声」', 'error'); }
 }
 
-async function saveReqs() {
+async function saveReqs(quiet, el) {
     const r = await api('/api/video-plans/' + PLAN_ID,
         { method: 'PUT', body: JSON.stringify({ asset_reqs: JSON.stringify(REQS) }) });
-    if (r && r.ok) { toast('✅ 声音描述已保存', 'success'); load(); }
+    if (r && r.ok) {
+        if (quiet && el) {
+            el.style.borderColor = '#16a34a';
+            setTimeout(function () { el.style.borderColor = ''; }, 1200);
+        } else { toast('✅ 需求已保存', 'success'); load(); }
+    }
     else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
 }
 

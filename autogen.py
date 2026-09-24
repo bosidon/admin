@@ -2348,6 +2348,23 @@ def _idle_limit_min():
     return max(0, v)
 
 
+def _wait_shutdown(u, timeout=60, step=5):
+    """轮询确认实例真的落地为 shutdown ⭐
+    adl_power_off 的回执 Success ≠ 机器已关（实测：回执 Success 但机器仍 running，
+    守卫随即退出 → 那台机器再没人管，一直空转计费）。
+    返回 (是否落地, 耗时秒)
+    """
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        time.sleep(step)
+        try:
+            if str(adl_status(u).get("data") or "") == "shutdown":
+                return True, int(time.time() - t0)
+        except Exception:
+            pass
+    return False, int(time.time() - t0)
+
+
 def idle_shutdown_check(log=None, force=False, dry=False, only=None):
     """逐台空闲关机：对池内每台 running 实例单独判定 —— 本机无任务且空闲达阈值 → 只关这一台
 
@@ -2378,6 +2395,7 @@ def idle_shutdown_check(log=None, force=False, dry=False, only=None):
             try:
                 if (adl_status(u).get("data") or "") != "running":
                     _IDLE_SEEN.pop(u, None)
+                    _PENDING_OFF.pop(u, None)           # 已不在运行 → 清未落地计数
                     continue
                 if jobstore.running_on_host(u) > 0:
                     _IDLE_SEEN.pop(u, None)                 # 本机在跑 → 空闲计时归零
@@ -2394,13 +2412,32 @@ def idle_shutdown_check(log=None, force=False, dry=False, only=None):
                     off.append("%s:dry(空闲 %d 分钟)" % (u, idle_s // 60))
                     continue
                 r = adl_power_off(u)
-                _IDLE_SEEN.pop(u, None)
-                off.append("%s:%s(空闲 %d 分钟)" % (u, str(r.get("code") or r)[:40], idle_s // 60))
+                _ack = str(r.get("code") or r)[:40]
+                _landed, _took = _wait_shutdown(u)          # ⭐ 回执 Success ≠ 真关，必须验落地
+                if not _landed:
+                    r = adl_power_off(u)                    # 未落地 → 重下一次
+                    _ack += "/重试"
+                    _landed, _took = _wait_shutdown(u)
+                if _landed:
+                    _PENDING_OFF.pop(u, None)
+                    _IDLE_SEEN.pop(u, None)
+                    off.append("%s:%s→shutdown(%ds，空闲 %d 分钟)" % (u, _ack, _took, idle_s // 60))
+                else:
+                    _PENDING_OFF[u] = _PENDING_OFF.get(u, 0) + 1
+                    off.append("%s:%s→⚠️未落地(第%d次，空闲 %d 分钟)"
+                               % (u, _ack, _PENDING_OFF[u], idle_s // 60))
             except Exception as e:
                 off.append("%s:异常(%s)" % (u, str(e)[:40]))
         if off:
             log(("[干跑] " if dry else "空闲 %d 分钟，逐台判定 → " % lim) + "；".join(off))
-            return True, ("(干跑，未真关) " if dry else "已关机：") + "；".join(off)
+            _nl = [x for x in off if "未落地" in x]
+            if dry:
+                _head = "(干跑，未真关) "
+            elif _nl:
+                _head = "下了关机指令 %d 台：落地 %d 台、⚠️未落地 %d 台：" % (len(off), len(off) - len(_nl), len(_nl))
+            else:
+                _head = "已关机："
+            return True, _head + "；".join(off)
         return False, "无需关机（" + ("；".join(kept) if kept else "池内无运行中实例") + "）"
     except Exception as e:
         return False, "检查异常：" + str(e)[:120]
@@ -2435,6 +2472,7 @@ def _shutdown_if_idle(job_id, instance_uuid, log):
 _GUARD = {"th": None, "lock": threading.Lock()}
 _GUARD_TICK = 60                    # 轮询间隔 60s（线程只在「有开机」期间存在）
 _IDLE_SEEN = {}                     # uuid → 守卫首次看到它「running 且本机无任务」的时刻（epoch 秒）
+_PENDING_OFF = {}                   # uuid → 连续「下了关机指令但未落地」次数（守卫据此继续盯）
 
 
 def _running_instances():
@@ -2483,7 +2521,17 @@ def _idle_watch_loop():
                     continue                            # 开关关着：在岗但不动作
                 _ok, _why = idle_shutdown_check(log=lambda m: print("[空闲关机] " + str(m), flush=True))
                 if _ok:
-                    break                               # ② 已按台关机 → 线程退出
+                    _stuck = sorted(u for u, n in _PENDING_OFF.items() if n >= 10)
+                    if _stuck:
+                        print("[空闲守卫] ⚠️ 关机始终未落地（已试 10 次），放弃盯守：%s"
+                              % "、".join(_stuck), flush=True)
+                        for _u in _stuck:
+                            _PENDING_OFF.pop(_u, None)
+                    if _PENDING_OFF:
+                        print("[空闲守卫] ⚠️ 有实例下了关机指令但未落地为 shutdown，继续盯：%s"
+                              % "、".join(sorted(_PENDING_OFF)), flush=True)
+                        continue                            # ②a 没真关 → 线程不退，下一轮再来
+                    break                                   # ②b 已确认全部关机 → 线程退出
             except Exception as e:
                 print("[空闲守卫] 本轮异常（下一轮继续）：%s" % str(e)[:160], flush=True)
     except Exception as e:

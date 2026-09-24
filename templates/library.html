@@ -670,7 +670,7 @@ window.addEventListener('resize', function () { if (viewerVisible()) { fitViewer
 let ROLES = [];
 let CUR_KIND = 'persona';
 let PK = { slot: null, type: 'image' };
-const PF_SLOTS = ['front', 'side', 'back', 'voice'];
+const PF_SLOTS = ['front', 'side', 'back', 'voice', 'video'];
 const ROLE_KINDS = ['persona', 'scene', 'prop'];
 const KIND_CN = { persona: '人物', scene: '场景', prop: '道具' };
 // 槽位标签按 kind 变：人物=正面/侧面/背面；场景=全景/近景/细节；道具=主图/细节/其他
@@ -708,6 +708,9 @@ async function loadPersonas() {
         const voice = (CUR_KIND === 'persona' && p.voice && p.voice.file_path)
             ? '<audio controls src="' + p.voice.file_path + '" style="width:100%;height:30px;"></audio>'
             : '<div style="font-size:11px;color:#94a3b8;">未设默认声音</div>';
+        const vido = (CUR_KIND === 'persona' && p.video && p.video.file_path)
+            ? '<video controls src="' + p.video.file_path + '" style="width:100%;height:130px;margin-top:6px;border-radius:8px;"></video>'
+            : '<div style="font-size:11px;color:#94a3b8;margin-top:6px;">未设人物视频</div>';
         return '<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px;">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
             + '<b style="font-size:14px;">' + (p.name || '') + '</b>'
@@ -717,6 +720,7 @@ async function loadPersonas() {
             + '</span></div>'
             + '<div style="display:flex;gap:6px;margin-bottom:8px;">' + tri + '</div>'
             + voice
+            + vido
             + (p.note ? '<div style="font-size:11px;color:#475569;margin-top:6px;">外观：' + p.note + '</div>' : '')
             + (p.tags ? '<div style="font-size:11px;color:#64748b;margin-top:6px;">' + p.tags + '</div>' : '')
             + '</div>';
@@ -755,19 +759,25 @@ function applySlotLabels() {
     if (ti) ti.placeholder = ph || '';
     const vr = document.getElementById('pf-voice-row');
     if (vr) vr.style.display = (k === 'persona') ? '' : 'none';
+    const vd = document.getElementById('pf-video-row');
+    if (vd) vd.style.display = (k === 'persona') ? '' : 'none';
 }
 
 async function pickForSlot(slot) {
     PK.slot = slot;
-    PK.type = (slot === 'voice') ? 'audio' : 'image';
+    PK.type = (slot === 'voice') ? 'audio' : ((slot === 'video') ? 'video' : 'image');
     const items = await libCache(PK.type);
     window.__PK_ITEMS = items;
-    document.getElementById('pkTitle').textContent = (PK.type === 'audio') ? '选择声音（音频素材）' : '选择照片（图片素材）';
+    document.getElementById('pkTitle').textContent = (PK.type === 'audio') ? '选择声音（音频素材）' : ((PK.type === 'video') ? '选择视频（视频素材）' : '选择照片（图片素材）');
     document.getElementById('pkList').innerHTML = items.length ? items.map(m => {
         const left = (PK.type === 'audio')
             ? '<span style="font-size:22px;">🎵</span>'
-            : '<img src="/api/materials/thumb?u=' + encodeURIComponent(m.file_path || '') + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;">';
-        const player = (PK.type === 'audio') ? '<audio controls src="' + (m.file_path || '') + '" style="height:30px;" onclick="event.stopPropagation()"></audio>' : '';
+            : ((PK.type === 'video')
+               ? '<span style="font-size:22px;">🎬</span>'
+               : '<img src="/api/materials/thumb?u=' + encodeURIComponent(m.file_path || '') + '" style="width:56px;height:56px;object-fit:cover;border-radius:8px;">');
+        const player = (PK.type === 'audio')
+            ? '<audio controls src="' + (m.file_path || '') + '" style="height:30px;" onclick="event.stopPropagation()"></audio>'
+            : ((PK.type === 'video') ? '<video controls src="' + (m.file_path || '') + '" style="height:34px;max-width:130px;" onclick="event.stopPropagation()"></video>' : '');
         return '<div onclick="chooseSlot(' + m.id + ')" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;">'
             + left
             + '<div style="flex:1;min-width:0;"><div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (m.name || ('素材 #' + m.id)) + '</div>'
@@ -874,6 +884,14 @@ load();
                 <span style="width:56px;height:56px;border-radius:8px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:22px;">🎙</span>
                 <span id="pf-voice-label" style="flex:1;font-size:12px;color:#64748b;">未选择</span>
                 <button id="pf-voice" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('voice')">选择</button>
+            </div>
+        </div>
+        <div id="pf-video-row" style="margin-bottom:12px;">
+            <div style="font-size:13px;margin-bottom:6px;">人物视频</div>
+            <div style="display:flex;gap:10px;align-items:center;">
+                <span style="width:56px;height:56px;border-radius:8px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:22px;">🎬</span>
+                <span id="pf-video-label" style="flex:1;font-size:12px;color:#64748b;">未选择</span>
+                <button id="pf-video" class="btn btn-outline btn-sm" data-mid="" onclick="pickForSlot('video')">选择</button>
             </div>
         </div>
         <div style="margin-bottom:12px;">

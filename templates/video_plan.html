@@ -70,6 +70,8 @@
                     <th style="padding:8px;border:1px solid #e2e8f0;">素材</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:146px;">片段</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:90px;">时长(秒)</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:130px;">BGM</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;width:112px;">说话人</th>
                     <th style="padding:8px;border:1px solid #e2e8f0;width:50px;">操作</th>
                 </tr>
             </thead>
@@ -86,6 +88,7 @@
                 <button class="btn btn-outline btn-sm" onclick="toggleSelectAll()">☑ 全选待生成</button>
                 <button class="btn btn-primary btn-sm" id="asset-batch-btn" onclick="genAssetsBatch()">🎨 批量生成所选</button>
                 <button class="btn btn-outline btn-sm" id="asset-gen-btn" onclick="genAssets()">🧩 生成素材需求</button>
+                <button class="btn btn-primary btn-sm" id="asset-save-btn" onclick="saveReqs()">💾 保存声音描述</button>
             </div>
         </div>
         <div id="asset-req"></div>
@@ -123,10 +126,30 @@ function switchTab(name) {
     });
 }
 
+function escAttr(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// 说话人下拉：剧本人物原名 + 「旁白」（与剧本层 beats.speaker 口径一致）
+function speakerOptions(cur) {
+    const names = ['旁白'];
+    try {
+        const cs = (SCRIPT_OBJ && Array.isArray(SCRIPT_OBJ.characters)) ? SCRIPT_OBJ.characters : [];
+        cs.forEach(function (c) { const n = (c && c.name) || ''; if (n && names.indexOf(n) < 0) names.push(n); });
+    } catch (e) {}
+    if (cur && names.indexOf(cur) < 0) names.push(cur);
+    let h = '<option value=""' + (!cur ? ' selected' : '') + '>（无）</option>';
+    names.forEach(function (n) {
+        h += '<option value="' + escAttr(n) + '"' + (n === cur ? ' selected' : '') + '>' + escAttr(n) + '</option>';
+    });
+    return h;
+}
+
 function renderScenes() {
     const tb = document.getElementById('sb-body');
     if (!SCENES.length) {
-        tb.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
+        tb.innerHTML = '<tr><td colspan="9" style="padding:24px;text-align:center;color:#94a3b8;">暂无分镜，点击「AI 生成分镜」或「添加镜头」开始</td></tr>';
         return;
     }
     tb.innerHTML = SCENES.map((s, i) => `<tr>
@@ -136,9 +159,11 @@ function renderScenes() {
         <td style="padding:6px;border:1px solid #e2e8f0;">${assetCell(s)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;">${clipCell(i)}</td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><input type="number" value="${s.duration||5}" data-i="${i}" data-f="duration" style="width:60px;border:none;text-align:center;font-size:12px;"></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;"><input value="${s.music_hint||''}" data-i="${i}" data-f="music_hint" placeholder="BGM 提示词" style="width:100%;border:none;font-size:12px;font-family:inherit;"></td>
+        <td style="padding:6px;border:1px solid #e2e8f0;"><select data-i="${i}" data-f="speaker" style="width:100%;border:none;font-size:12px;background:transparent;">${speakerOptions(s.speaker||'')}</select></td>
         <td style="padding:6px;border:1px solid #e2e8f0;text-align:center;"><button class="btn btn-danger btn-sm" onclick="delScene(${i})">✕</button></td>
     </tr>`).join('');
-    tb.querySelectorAll('textarea,input').forEach(el => {
+    tb.querySelectorAll('textarea,input,select').forEach(el => {
         el.onchange = function() {
             const i = +this.dataset.i, f = this.dataset.f;
             SCENES[i][f] = (f === 'duration') ? (+this.value || 5) : this.value;
@@ -306,6 +331,12 @@ function renderReqs() {
         + (q.matched_role_id ? ' <button class="btn btn-outline btn-sm" onclick="useRoleOnce(' + q.matched_role_id + ')">用库里的</button>' : '')
             + '<span style="color:#94a3b8;font-size:11px;"> · 出现在镜头 '
             + (((q.needed_in_shots || []).map(n => (+n) + 1).join(', ')) || '-') + '</span></div>'
+            + ((q.kind === 'persona')
+               ? '<div style="margin-top:6px;">'
+                 + '<input class="ar-vd" data-qi="' + qi + '" value="' + escAttr(q.voice_desc || '') + '"'
+                 + ' placeholder="声音中文描述（如：年轻女声，中高音，语速偏快）" onchange="onVoiceDesc(this)"'
+                 + ' style="width:100%;padding:5px 7px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;font-family:inherit;"></div>'
+               : '')
             + btns + '</div></div>';
     }).join('');
     updateSelCount();
@@ -316,6 +347,18 @@ function renderReqs() {
             + '<div style="font-size:12px;font-weight:600;color:#475569;">其他出图提词（未按名称匹配到具体需求）</div>'
             + rest.map(promptHtml).join('') + '</div>';
     }
+}
+
+function onVoiceDesc(el) {
+    const qi = +el.dataset.qi;
+    if (REQS[qi]) { REQS[qi].voice_desc = el.value; }
+}
+
+async function saveReqs() {
+    const r = await api('/api/video-plans/' + PLAN_ID,
+        { method: 'PUT', body: JSON.stringify({ asset_reqs: JSON.stringify(REQS) }) });
+    if (r && r.ok) { toast('✅ 声音描述已保存', 'success'); load(); }
+    else { toast('❌ ' + ((r && r.error) || '保存失败'), 'error'); }
 }
 
 function promptHtml(p, _objIdx) {
@@ -518,7 +561,7 @@ async function load() {
         return { visual: s.visual || s.visual_prompt || '', line: s.line || s.subtitle || '',
                  duration: s.duration || s.duration_s || 5, shot_type: s.shot_type || '',
                  characters: s.characters || [], scene: s.scene || '', props: s.props || [],
-                 shot_face: s.shot_face || '', music_hint: s.music_hint || '',
+                 shot_face: s.shot_face || '', music_hint: s.music_hint || '', speaker: s.speaker || '',
                  template_hint: s.template_hint || 'U02' };
     });
     try { ROLE_IDS = JSON.parse(d.role_ids || '[]'); } catch(e) { ROLE_IDS = []; }
@@ -782,7 +825,7 @@ async function genStoryboard() {
         duration: s.duration_s || 5, shot_type: s.shot_type || '',
         characters: s.characters || [], scene: s.scene || '', props: s.props || [],
         shot_face: s.shot_face || '',
-        music_hint: s.music_hint || '', template_hint: s.template_hint || 'U02'
+        music_hint: s.music_hint || '', speaker: s.speaker || '', template_hint: s.template_hint || 'U02'
     }));
     document.getElementById('plan-status').textContent = 'storyboard_done';
     renderScenes();

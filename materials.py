@@ -1244,7 +1244,7 @@ def _h3ref_fill(tpl, d):
     return tpl.format_map(_Safe(d))
 
 
-def clip_prompt_h3ref(shot, refs=None, dur=5, cfg=None):
+def clip_prompt_h3ref(shot, refs=None, dur=5, cfg=None, voice=None):
     """H3 多图参考提词（代码组装：运镜←camera_move、动作←visual、台词←line 原文、末态←end_state、
     外观←script_assets.desc、配乐←music_hint）。措辞模板见 prompts/shot_clip_ref.md"""
     shot = shot or {}
@@ -1292,7 +1292,10 @@ def clip_prompt_h3ref(shot, refs=None, dur=5, cfg=None):
         "camera_directive": H3REF_CAMERA.get(cm, "机位稳定"),
         "dialogue": ("<d>[Chinese] %s</d>" % line) if line else "本镜全程不说话（无对白）。",
         "end_state": (_es + "。") if _es else "镜头结束时画面自然收束。",
-        "soundscape": "安静的环境音，与参考素材的氛围一致，不要额外音效。",
+        "soundscape": (
+            ("环境音：%s。" % _s(shot.get("sfx")) if _s(shot.get("sfx"))
+             else "安静的环境音，与参考素材的氛围一致，不要额外音效。")
+            + ("说话声线：%s。" % _s(voice) if _s(voice) else "")),
         "music": (_s(shot.get("music_hint")) or "无配乐"),
         "seconds": _sec,
     }

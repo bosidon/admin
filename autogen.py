@@ -3229,7 +3229,8 @@ def _clip_target_rows(conn, plan_id, targets, engine="wan"):
         if h3ref:
             length = 0
             seconds = mat.h3_seconds(dur)
-            prompt = mat.clip_prompt_h3ref(shot_d, refs_d, dur, cfg=_cfg)
+            prompt = mat.clip_prompt_h3ref(shot_d, refs_d, dur, cfg=_cfg,
+                                        voice=(plan["narrator_voice"] or ""))
         elif h3:
             length = 0                                    # H3：帧数由模板里的表达式按秒数换算
             seconds = mat.h3_seconds(dur)

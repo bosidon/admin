@@ -150,6 +150,9 @@
         <select class="form-input" id="agent-select" onchange="loadAgentPrompt()">
             <option value="plan">配图 Agent</option>
             <option value="storyboard">视频分镜 Agent</option>
+            <option value="script">AI 编剧 Agent</option>
+            <option value="assets">素材需求 Agent</option>
+            <option value="shotclip">片段措辞模板</option>
             <option value="rewrite">改写 Agent</option>
             <option value="lingxiu">文案 · 灵性书籍</option>
             <option value="maya">文案 · 玛雅天赋</option>
@@ -424,6 +427,9 @@ async function saveSettings() {
 const AGENT_INFO = {
     plan:       {name: '配图 Agent',      url: '/api/prompts/plan'},
     storyboard: {name: '视频分镜 Agent',  url: '/api/prompts/storyboard', noreset: true},
+    script:     {name: 'AI 编剧 Agent',     url: '/api/prompts/script',   noreset: true},
+    assets:     {name: '素材需求 Agent',     url: '/api/prompts/assets',   noreset: true},
+    shotclip:   {name: '片段措辞模板',       url: '/api/prompts/shotclip', noreset: true},
     rewrite:    {name: '改写 Agent',      url: '/api/prompts/rewrite'},
     lingxiu:    {name: '文案 · 灵性书籍', url: '/api/prompts/article?line=lingxiu', save: {line: 'lingxiu'}},
     maya:       {name: '文案 · 玛雅天赋', url: '/api/prompts/article?line=maya',    save: {line: 'maya'}},
@@ -441,7 +447,7 @@ async function loadAgentPrompt() {
     const ph = (r && r.placeholders) || [];
     if (ph.length) bits.push('可用占位符：' + ph.map(function(p) { return '{' + '{' + p + '}' + '}'; }).join(' '));
     bits.push('分段：单独一行 ---USER--- 之上 = system（角色/铁律/输出契约，固定不变）｜ 之下 = user（本次参数与素材）｜ 不写分隔符则整段作为一条 user 消息');
-    if (id === 'storyboard') bits.push('（此提词无内置默认，不支持一键恢复）');
+    if (info.noreset) bits.push('（此提词无内置默认，不支持一键恢复）');
     document.getElementById('agent-hint').innerHTML = bits.join('<br>');
     document.getElementById('agent-reset').style.display = info.noreset ? 'none' : '';
 }

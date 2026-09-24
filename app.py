@@ -893,7 +893,10 @@ def save_script_obj(db, script_id, obj):
 
 
 def save_shots(db, script_id, shots):
-    """旧 storyboard 数组 → storyboard_shots + shot_assets（characters/scene/props 关联需求行）"""
+    """旧 storyboard 数组 → storyboard_shots + shot_assets：先删除旧行（级联 shot_assets/shot_renders），再插入新行"""
+    if not shots:
+        return 0                          # 空列表不删（防空返回抹库）
+    db.execute('DELETE FROM storyboard_shots WHERE script_id=?', (script_id,))
     assets = {}
     for a in _assets_rows(db, script_id):
         assets[(a['kind'], _norm_name(a['name']))] = a['id']
@@ -907,13 +910,11 @@ def save_shots(db, script_id, shots):
             assets[k] = upsert_asset(db, script_id, kind, nm)
         return assets[k]
 
-    keep = []
-    for i, sh in enumerate(shots or []):
+    n = 0
+    for i, sh in enumerate(shots):
         sh = sh if isinstance(sh, dict) else {}
         idx = int(sh.get('shot_idx')) if isinstance(sh.get('shot_idx'), int) else i
         scene_id = _aid('scene', sh.get('scene'))
-        ex = db.execute('SELECT id, visual, speaker FROM storyboard_shots WHERE script_id=? AND shot_idx=?',
-                        (script_id, idx)).fetchone()
         _bi = sh.get('beat_idx')          # 对应剧本第几节（LLM 新口径；缺失/非法一律 0）
         try:
             _bi = int(_bi)
@@ -930,31 +931,18 @@ def save_shots(db, script_id, shots):
                     _spk = (_bs[_bi].get('speaker') or '').strip()
             except Exception:
                 _spk = ''
-
-        vals = (sh.get('visual') or sh.get('visual_prompt') or '',   # ★ 分镜提词的键名是 visual_prompt
-                sh.get('line') or sh.get('subtitle') or '',
-                sh.get('duration') or sh.get('duration_s'), sh.get('shot_type') or '',
-                sh.get('shot_face') or 'front', sh.get('music_hint') or '',
-                sh.get('template_hint') or '', scene_id,
-                _bi, sh.get('camera_move') or '', sh.get('end_state') or '', _spk)
-        if ex:
-            sid = ex['id']
-            if not (vals[0] or '').strip():        # 新值空 → 保留原画面描述，别把已有内容抹掉
-                vals = (ex['visual'] or '',) + vals[1:]
-            if not vals[-1]:                      # 说话人空 → 保留原值
-                vals = vals[:-1] + (ex['speaker'] or '',)
-            db.execute("""UPDATE storyboard_shots SET visual=?, line=?, duration_s=?, shot_type=?,
-                          shot_face=?, music_hint=?, template_hint=?, scene_asset_id=?,
-                          beat_idx=?, camera_move=?, end_state=?, speaker=?,
-                          updated_at=datetime('now','localtime') WHERE id=?""", vals + (sid,))
-            db.execute('DELETE FROM shot_assets WHERE shot_id=?', (sid,))
-        else:
-            sid = db.execute("""INSERT INTO storyboard_shots
-                (script_id, shot_idx, visual, line, duration_s, shot_type, shot_face, music_hint,
-                 template_hint, scene_asset_id, beat_idx, camera_move, end_state, speaker, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
-                             (script_id, idx) + vals).lastrowid
-        keep.append(sid)
+        sid = db.execute("""INSERT INTO storyboard_shots
+            (script_id, shot_idx, visual, line, duration_s, shot_type, shot_face, music_hint,
+             template_hint, scene_asset_id, beat_idx, camera_move, end_state, speaker, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))""",
+                         (script_id, idx,
+                          sh.get('visual') or sh.get('visual_prompt') or '',   # ★ 分镜提词的键名是 visual_prompt
+                          sh.get('line') or sh.get('subtitle') or '',
+                          sh.get('duration') or sh.get('duration_s'), sh.get('shot_type') or '',
+                          sh.get('shot_face') or 'front', sh.get('music_hint') or '',
+                          sh.get('template_hint') or '', scene_id,
+                          _bi, sh.get('camera_move') or '', sh.get('end_state') or '', _spk)).lastrowid
+        n += 1
         if scene_id:
             db.execute("INSERT OR IGNORE INTO shot_assets (shot_id, asset_id, role) VALUES (?,?,'background')",
                        (sid, scene_id))
@@ -968,10 +956,7 @@ def save_shots(db, script_id, shots):
             if aid:
                 db.execute("INSERT OR IGNORE INTO shot_assets (shot_id, asset_id, role) VALUES (?,?,'prop')",
                            (sid, aid))
-    if keep:
-        db.execute('DELETE FROM storyboard_shots WHERE script_id=? AND id NOT IN (%s)'
-                   % ','.join('?' * len(keep)), [script_id] + keep)
-    return len(keep)
+    return n
 
 
 def set_shot_render(db, shot_id, kind, material_id=None, url='', duration_s=None,
@@ -2473,6 +2458,82 @@ def api_save_storyboard_prompt():
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(t + "\n", encoding='utf-8')
     return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip()})
+
+
+
+@app.route('/api/prompts/script', methods=['GET'])
+def api_get_script_prompt():
+    """AI 编剧 Agent 提词（prompts/video_script.md）"""
+    p = Path(__file__).resolve().parent / 'prompts' / 'video_script.md'
+    try:
+        return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip(),
+                        "path": "prompts/video_script.md", "placeholders": []})
+    except Exception:
+        return jsonify({"ok": True, "content": "", "path": "prompts/video_script.md", "placeholders": []})
+
+
+@app.route('/api/prompts/script', methods=['POST'])
+def api_save_script_prompt():
+    """保存AI 编剧 Agent 提词 · body {content}"""
+    data = request.json or {}
+    p = Path(__file__).resolve().parent / 'prompts' / 'video_script.md'
+    t = (data.get('content') or '').strip()
+    if not t:
+        return jsonify({"error": "内容不能为空"}), 400
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(t + "\n", encoding='utf-8')
+    return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip()})
+
+
+
+@app.route('/api/prompts/assets', methods=['GET'])
+def api_get_assets_prompt():
+    """素材需求 Agent 提词（prompts/video_assets.md）"""
+    p = Path(__file__).resolve().parent / 'prompts' / 'video_assets.md'
+    try:
+        return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip(),
+                        "path": "prompts/video_assets.md", "placeholders": []})
+    except Exception:
+        return jsonify({"ok": True, "content": "", "path": "prompts/video_assets.md", "placeholders": []})
+
+
+@app.route('/api/prompts/assets', methods=['POST'])
+def api_save_assets_prompt():
+    """保存素材需求 Agent 提词 · body {content}"""
+    data = request.json or {}
+    p = Path(__file__).resolve().parent / 'prompts' / 'video_assets.md'
+    t = (data.get('content') or '').strip()
+    if not t:
+        return jsonify({"error": "内容不能为空"}), 400
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(t + "\n", encoding='utf-8')
+    return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip()})
+
+
+
+@app.route('/api/prompts/shotclip', methods=['GET'])
+def api_get_shotclip_prompt():
+    """片段措辞模板（prompts/shot_clip_ref.md）"""
+    p = Path(__file__).resolve().parent / 'prompts' / 'shot_clip_ref.md'
+    try:
+        return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip(),
+                        "path": "prompts/shot_clip_ref.md", "placeholders": []})
+    except Exception:
+        return jsonify({"ok": True, "content": "", "path": "prompts/shot_clip_ref.md", "placeholders": []})
+
+
+@app.route('/api/prompts/shotclip', methods=['POST'])
+def api_save_shotclip_prompt():
+    """保存片段措辞模板 · body {content}"""
+    data = request.json or {}
+    p = Path(__file__).resolve().parent / 'prompts' / 'shot_clip_ref.md'
+    t = (data.get('content') or '').strip()
+    if not t:
+        return jsonify({"error": "内容不能为空"}), 400
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(t + "\n", encoding='utf-8')
+    return jsonify({"ok": True, "content": p.read_text(encoding='utf-8').strip()})
+
 
 
 @app.route('/api/articles/<int:article_id>/illustrations/logs')
